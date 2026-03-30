@@ -86,36 +86,25 @@ def get_transcript(video_id: str) -> str | None:
 # ==========================
 # Gemini 분석
 # ==========================
-def analyze_with_gemini(title: str, transcript: str, date: str) -> dict | None:
+def analyze_with_gemini(title: str, transcript: str, date: str) -> str | None:
     client = genai.Client(api_key=GEMINI_API_KEY)
 
-    prompt = f"""다음은 한국 주식 투자 채널 3proTV의 영상 자막입니다.
-투자 정보를 분석해 아래 JSON 형식으로만 응답해주세요 (다른 텍스트 없이).
+    prompt = f"""아래는 한국 주식 투자 유튜브 채널 3proTV 영상의 자막입니다.
+이 영상의 전체 내용을 한국어로 자연스럽게 요약해주세요.
+상세한 원고 내용을 최대한 유지하면서, 독자가 영상을 보지 않아도 핵심을 파악할 수 있도록 작성해주세요.
 
 영상 제목: {title}
 게시일: {date}
 
 자막:
-{transcript}
-
-{{
-  "summary": "핵심 내용 요약 3~4문장",
-  "key_claims": ["주요 주장 1", "주요 주장 2", "주요 주장 3"],
-  "stocks_sectors": ["언급 종목/섹터 (코드 포함 시 함께)"],
-  "market_outlook": "시장 전망 또는 매크로 관점 1~2문장",
-  "investment_ideas": ["실행 가능한 투자 아이디어 1", "아이디어 2"],
-  "risks": ["리스크 요인 1", "리스크 요인 2"]
-}}"""
+{transcript}"""
 
     try:
         response = client.models.generate_content(
             model="gemini-2.0-flash",
             contents=prompt,
         )
-        raw = response.text.strip()
-        m   = re.search(r"\{.*\}", raw, re.DOTALL)
-        if m:
-            return json.loads(m.group())
+        return response.text.strip()
     except Exception as e:
         log(f"    Gemini 오류: {e}")
     return None
@@ -141,7 +130,7 @@ def _bullet(items: list) -> list:
         "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": str(item)}}]},
     } for item in items]
 
-def build_video_blocks(video: dict, analysis: dict | None, transcript_len: int) -> list:
+def build_video_blocks(video: dict, analysis: str | None, transcript_len: int) -> list:
     blocks = []
 
     # 영상 제목 (H3, 링크 포함)
@@ -159,29 +148,9 @@ def build_video_blocks(video: dict, analysis: dict | None, transcript_len: int) 
     # 메타
     blocks.extend(_para(f"📅 {video['published']}  |  📝 자막 {transcript_len:,}자"))
 
+    # Gemini 요약 본문 (자유 형식 텍스트)
     if analysis:
-        blocks.extend(_para("📌 핵심 요약", "heading_3"))
-        blocks.extend(_para(analysis.get("summary", "-")))
-
-        if analysis.get("key_claims"):
-            blocks.extend(_para("💡 주요 포인트", "heading_3"))
-            blocks.extend(_bullet(analysis["key_claims"]))
-
-        if analysis.get("stocks_sectors"):
-            blocks.extend(_para("📈 언급 종목/섹터", "heading_3"))
-            blocks.extend(_bullet(analysis["stocks_sectors"]))
-
-        if analysis.get("market_outlook"):
-            blocks.extend(_para("🌐 시장 전망", "heading_3"))
-            blocks.extend(_para(analysis["market_outlook"]))
-
-        if analysis.get("investment_ideas"):
-            blocks.extend(_para("🎯 투자 아이디어", "heading_3"))
-            blocks.extend(_bullet(analysis["investment_ideas"]))
-
-        if analysis.get("risks"):
-            blocks.extend(_para("⚠️ 리스크", "heading_3"))
-            blocks.extend(_bullet(analysis["risks"]))
+        blocks.extend(_para(analysis))
     else:
         blocks.extend(_para("⚠️ Gemini 분석 실패 (자막은 정상 수집됨)"))
 
