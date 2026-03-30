@@ -1,0 +1,6 @@
+fin_ratio_cache.csv
+*_국내퀀트데이터.xlsx
+__pycache__/
+*.pyc
+.DS_Store
+quant_cron.log

@@ -1,0 +1,54 @@
+name: Daily Quant Analysis
+
+on:
+  schedule:
+    - cron: '30 8 * * 1-5'  # 17:30 KST (UTC+9), 평일만
+  workflow_dispatch:          # GitHub UI에서 수동 실행 가능
+
+jobs:
+  run-quant:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore financial ratio cache
+        uses: actions/cache@v4
+        with:
+          path: fin_ratio_cache.csv
+          key: fin-ratio-${{ github.run_id }}
+          restore-keys: |
+            fin-ratio-
+
+      - name: Run quant analysis
+        env:
+          APP_KEY: ${{ secrets.APP_KEY }}
+          APP_SECRET: ${{ secrets.APP_SECRET }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
+          OUTPUT_DIR: ${{ github.workspace }}
+        run: python 수급.py
+
+      - name: Upload Excel report as artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: quant-report-${{ github.run_id }}
+          path: '*_국내퀀트데이터.xlsx'
+          retention-days: 30
