@@ -1,0 +1,50 @@
+name: Daily YouTube Analysis
+
+on:
+  schedule:
+    - cron: '0 14 * * *'   # 23:00 KST (UTC+9), 매일
+  workflow_dispatch:         # 수동 실행 가능
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore processed videos state
+        uses: actions/cache@v4
+        with:
+          path: processed_videos.json
+          key: processed-videos-${{ github.run_id }}
+          restore-keys: |
+            processed-videos-
+
+      - name: Write YouTube cookies file
+        if: ${{ secrets.YOUTUBE_COOKIES != '' }}
+        env:
+          YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
+        run: echo "$YOUTUBE_COOKIES" > youtube_cookies.txt
+
+      - name: Run YouTube analysis
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_YT_PARENT_PAGE_ID: ${{ secrets.NOTION_YT_PARENT_PAGE_ID }}
+        run: python youtube_report.py

@@ -1,4 +1,6 @@
 fin_ratio_cache.csv
+youtube_cookies.txt
+processed_videos.json
 *_국내퀀트데이터.xlsx
 __pycache__/
 *.pyc

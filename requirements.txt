@@ -2,3 +2,5 @@ requests
 pandas
 numpy
 openpyxl
+google-genai
+youtube-transcript-api
