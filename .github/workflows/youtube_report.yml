@@ -37,10 +37,12 @@ jobs:
             processed-videos-
 
       - name: Write YouTube cookies file
-        if: ${{ secrets.YOUTUBE_COOKIES != '' }}
         env:
           YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
-        run: echo "$YOUTUBE_COOKIES" > youtube_cookies.txt
+        run: |
+          if [ -n "$YOUTUBE_COOKIES" ]; then
+            echo "$YOUTUBE_COOKIES" > youtube_cookies.txt
+          fi
 
       - name: Run YouTube analysis
         env:
