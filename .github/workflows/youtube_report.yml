@@ -2,7 +2,7 @@ name: Daily YouTube Analysis
 
 on:
   schedule:
-    - cron: '0 14 * * *'   # 23:00 KST (UTC+9), 매일
+    - cron: '30 11 * * *'  # 20:30 KST (UTC+9), 매일
   workflow_dispatch:         # 수동 실행 가능
 
 jobs:
