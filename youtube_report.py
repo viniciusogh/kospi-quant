@@ -109,7 +109,7 @@ def analyze_with_gemini(title: str, transcript: str, date: str) -> str | None:
     for attempt in range(4):
         try:
             response = client.models.generate_content(
-                model="gemini-2.0-flash",
+                model="gemini-2.0-flash-lite",
                 contents=prompt,
             )
             return response.text.strip()
