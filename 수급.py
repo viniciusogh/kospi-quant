@@ -387,9 +387,18 @@ def compute_multifactor_score(df: pd.DataFrame) -> pd.Series:
     # 수급 팩터
     z_supply = _cross_z(df["strength_score"].fillna(0))
 
-    # 밸류 팩터: 1/PER + 1/PBR (저평가일수록 역수 크게)
-    inv_per = df["per"].apply(lambda x: 1 / x if pd.notna(x) and x > 0 else np.nan)
-    inv_pbr = df["pbr"].apply(lambda x: 1 / x if pd.notna(x) and x > 0 else np.nan)
+    # 밸류 팩터: 1/PER + 1/PBR
+    # 음수 PER(적자) → 페널티(-1.0) / 양수 PER → 낙을수록 유리 / 데이터 없음 → 중립(NaN→0)
+    def _inv_per(x):
+        if pd.isna(x):   return np.nan   # 데이터 없음 → 중립
+        elif x > 0:      return 1 / x    # 정상 PER → 낙을수록 저평가
+        else:            return -1.0     # 적자(음수 PER) → 페널티
+    def _inv_pbr(x):
+        if pd.isna(x):   return np.nan   # 데이터 없음 → 중립
+        elif x > 0:      return 1 / x    # 정상 PBR
+        else:            return -1.0     # 자본잠식(음수 PBR) → 페널티
+    inv_per = df["per"].apply(_inv_per)
+    inv_pbr = df["pbr"].apply(_inv_pbr)
     z_val = (_cross_z(inv_per).fillna(0) + _cross_z(inv_pbr).fillna(0)) / 2
 
     # 퀄리티 팩터: ROE
