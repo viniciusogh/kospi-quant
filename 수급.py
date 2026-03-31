@@ -30,7 +30,7 @@ WORKERS_NETFLOW = 4
 WORKERS_MKTCAP  = 5
 
 # 추천 설정
-TOP_MKTCAP_N = 200
+TOP_MKTCAP_N = 500
 TOP_RECO_N   = 30
 
 # 재무비율 캐시 (주간 갱신)
