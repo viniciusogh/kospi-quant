@@ -106,14 +106,24 @@ def analyze_with_gemini(title: str, transcript: str, date: str) -> str | None:
 자막:
 {transcript}"""
 
-    try:
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=prompt,
-        )
-        return response.text.strip()
-    except Exception as e:
-        log(f"    Gemini 오류: {e}")
+    for attempt in range(4):
+        try:
+            response = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=prompt,
+            )
+            return response.text.strip()
+        except Exception as e:
+            err = str(e)
+            if "429" in err:
+                # API가 제안한 대기 시간 추출
+                m = re.search(r"retry in (\d+(?:\.\d+)?)s", err)
+                wait = float(m.group(1)) + 3 if m else 60
+                log(f"    Gemini 할당량 초과 → {wait:.0f}초 대기 후 재시도 ({attempt+1}/3)")
+                time.sleep(wait)
+            else:
+                log(f"    Gemini 오류: {e}")
+                break
     return None
 
 # ==========================
