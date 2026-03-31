@@ -4,6 +4,7 @@ import re
 import time
 import requests
 import urllib.request
+from http.cookiejar import MozillaCookieJar
 from datetime import datetime, timezone, timedelta
 from google import genai
 from youtube_transcript_api import YouTubeTranscriptApi
@@ -70,12 +71,18 @@ def get_channel_videos() -> list:
 # 자막 추출
 # ==========================
 def get_transcript(video_id: str) -> str | None:
-    # 쿠키 파일이 있으면 사용 (GitHub Actions IP 차단 우회)
-    kwargs = {}
+    # 쿠키 파일이 있으면 requests 세션에 로드 (GitHub Actions IP 차단 우회)
+    session = requests.Session()
     if os.path.exists(COOKIES_FILE):
-        kwargs["cookies"] = COOKIES_FILE
+        jar = MozillaCookieJar(COOKIES_FILE)
+        try:
+            jar.load(ignore_discard=True, ignore_expires=True)
+            session.cookies = jar
+            log("    쿠키 로드 완료")
+        except Exception as e:
+            log(f"    쿠키 로드 실패: {e}")
     try:
-        api  = YouTubeTranscriptApi(**kwargs)
+        api  = YouTubeTranscriptApi(http_client=session)
         t    = api.fetch(video_id, languages=["ko", "ko-KR"])
         text = " ".join(x.text for x in t)
         return text[:MAX_TRANSCRIPT_CHARS]
