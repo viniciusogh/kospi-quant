@@ -45,6 +45,14 @@ jobs:
           OUTPUT_DIR: ${{ github.workspace }}
         run: python 수급.py
 
+      - name: Commit latest results CSV
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add latest_results.csv
+          git diff --staged --quiet || git commit -m "Auto-update: latest_results.csv $(date +%Y-%m-%d)"
+          git push
+
       - name: Upload Excel report as artifact
         uses: actions/upload-artifact@v4
         if: always()

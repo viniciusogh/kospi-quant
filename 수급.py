@@ -707,6 +707,14 @@ def main():
     log(f"🎉 엑셀 저장 완료: {output_file}")
 
     # ------------------------------------
+    # 4.5) latest_results.csv 저장 (AI 조회용)
+    # ------------------------------------
+    csv_path = os.path.join(_BASE_DIR, "latest_results.csv")
+    all_kor["기준일자"] = today_str
+    all_kor.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    log(f"✅ latest_results.csv 저장: {csv_path}")
+
+    # ------------------------------------
     # 5) Notion 업로드
     # ------------------------------------
     log("▶ Notion 업로드 시작")
