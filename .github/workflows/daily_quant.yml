@@ -5,6 +5,9 @@ on:
     - cron: '30 8 * * 1-5'  # 17:30 KST (UTC+9), 평일만
   workflow_dispatch:          # GitHub UI에서 수동 실행 가능
 
+permissions:
+  contents: write
+
 jobs:
   run-quant:
     runs-on: ubuntu-latest
