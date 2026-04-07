@@ -373,9 +373,10 @@ def load_or_fetch_fin_ratios(codes: list, access_token: str) -> pd.DataFrame:
 # ==========================
 # 멀티팩터 점수 계산 (단면 Z-score 가중합)
 # ==========================
-def _cross_z(s: pd.Series) -> pd.Series:
-    """단면(Cross-sectional) Z-score"""
-    return (s - s.mean()) / (s.std() + 1e-8)
+def _cross_z(s: pd.Series, clip: float = 3.0) -> pd.Series:
+    """단면(Cross-sectional) Z-score + 클리핑 (±clip)"""
+    z = (s - s.mean()) / (s.std() + 1e-8)
+    return z.clip(-clip, clip)
 
 
 def compute_multifactor_score(df: pd.DataFrame) -> pd.Series:
@@ -471,7 +472,7 @@ def upload_to_notion(reco_kor: pd.DataFrame):
 
     col_labels = ["랭킹", "종목코드", "종목명", "멀티팩터점수", "수급강화점수",
                   "시가총액(억)", "외국인순매수(백만)", "기관순매수(백만)",
-                  "PER", "PBR", "ROE(%)", "부채비율(%)"]
+                  "PER", "PBR", "ROE(%)", "부채비율(%)", "매출증가율(%)", "영업이익증가율(%)"]
 
     def cell(text):
         return [{"type": "text", "text": {"content": str(text)}}]
@@ -491,6 +492,8 @@ def upload_to_notion(reco_kor: pd.DataFrame):
             pbr_val  = _v(row.get("PBR", None))
             roe_val  = _v(row.get("ROE(%)", None))
             debt_val = _v(row.get("부채비율(%)", None))
+            rev_val  = _v(row.get("매출증가율(%)", None))
+            op_val   = _v(row.get("영업이익증가율(%)", None))
             rows.append({"type": "table_row", "table_row": {"cells": [
                 cell(int(row.get("랭킹", ""))),
                 cell(row.get("종목코드", "")),
@@ -504,6 +507,8 @@ def upload_to_notion(reco_kor: pd.DataFrame):
                 cell(f"{float(pbr_val):.2f}"  if pbr_val  is not None else "-"),
                 cell(f"{float(roe_val):.1f}"  if roe_val  is not None else "-"),
                 cell(f"{float(debt_val):.1f}" if debt_val is not None else "-"),
+                cell(f"{float(rev_val):.1f}"  if rev_val  is not None else "-"),
+                cell(f"{float(op_val):.1f}"   if op_val   is not None else "-"),
             ]}})
         except Exception:
             continue
