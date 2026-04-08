@@ -276,6 +276,58 @@ def get_valuation_info(code: str, access_token: str):
         return None, None, None, None
 
 # ==========================
+# 일별 종가 조회 + 이동평균선 정배열 확인
+# ==========================
+def get_daily_prices(code: str, access_token: str, days: int = 160) -> list:
+    """FHKST03010100: 일별 종가 리스트 반환 (오래된 순서)"""
+    from datetime import timedelta
+    url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
+    end_dt   = datetime.today()
+    start_dt = end_dt - timedelta(days=days)
+    headers = {
+        "authorization": f"Bearer {access_token}",
+        "appkey": APP_KEY, "appsecret": APP_SECRET,
+        "tr_id": "FHKST03010100",
+    }
+    params = {
+        "FID_COND_MRKT_DIV_CODE": MRKT_CODE,
+        "FID_INPUT_ISCD": code,
+        "FID_INPUT_DATE_1": start_dt.strftime("%Y%m%d"),
+        "FID_INPUT_DATE_2": end_dt.strftime("%Y%m%d"),
+        "FID_PERIOD_DIV_CODE": "D",
+        "FID_ORG_ADJ_PV": "0",
+    }
+    r = safe_request_get(url, headers, params, max_retry=3, timeout=5)
+    if r is None:
+        return []
+    try:
+        output = r.json().get("output2", [])
+        prices = []
+        for row in output:
+            try:
+                p = float(row.get("stck_clpr", 0))
+                if p > 0:
+                    prices.append(p)
+            except Exception:
+                pass
+        prices.reverse()   # 오래된 날짜 순서로
+        return prices
+    except Exception:
+        return []
+
+
+def is_jeong_baeyeol(prices: list) -> bool:
+    """정배열 확인: 5MA > 20MA > 60MA > 120MA"""
+    if len(prices) < 120:
+        return False
+    ma5   = sum(prices[-5:])   / 5
+    ma20  = sum(prices[-20:])  / 20
+    ma60  = sum(prices[-60:])  / 60
+    ma120 = sum(prices[-120:]) / 120
+    return ma5 > ma20 > ma60 > ma120
+
+
+# ==========================
 # 재무비율 조회 (FHKST66430300)
 # ==========================
 def get_financial_ratio(code: str, access_token: str):
@@ -455,6 +507,7 @@ def to_korean_columns(df: pd.DataFrame) -> pd.DataFrame:
         "rev_growth": "매출증가율(%)",
         "op_profit_growth": "영업이익증가율(%)",
         "multi_score": "멀티팩터점수",
+        "jeong_baeyeol": "정배열",
     }
     return df.rename(columns={c: col_map.get(c, c) for c in df.columns})
 
@@ -470,7 +523,7 @@ def upload_to_notion(reco_kor: pd.DataFrame):
     }
     today_str = datetime.today().strftime("%Y-%m-%d")
 
-    col_labels = ["랭킹", "종목코드", "종목명", "멀티팩터점수", "수급강화점수",
+    col_labels = ["랭킹", "종목코드", "종목명", "정배열", "멀티팩터점수", "수급강화점수",
                   "시가총액(억)", "외국인순매수(백만)", "기관순매수(백만)",
                   "PER", "PBR", "ROE(%)", "부채비율(%)", "매출증가율(%)", "영업이익증가율(%)"]
 
@@ -498,6 +551,7 @@ def upload_to_notion(reco_kor: pd.DataFrame):
                 cell(int(row.get("랭킹", ""))),
                 cell(row.get("종목코드", "")),
                 cell(row.get("종목명", "")),
+                cell("✅" if row.get("정배열") else "-"),
                 cell(f"{float(row.get('멀티팩터점수', 0)):.3f}"),
                 cell(f"{float(row.get('수급강화점수', 0)):.3f}"),
                 cell(f"{int(row.get('시가총액', 0)):,}"),
@@ -688,6 +742,20 @@ def main():
 
     log(f"✅ 추천 유니버스(시총상위200) 내 유효 종목: {len(uni_df)}개")
     log(f"✅ 추천 종목(상위 {TOP_RECO_N}) 생성 완료")
+
+    # ------------------------------------
+    # 3.7) 정배열 확인 (추천 30종목만)
+    # ------------------------------------
+    log("▶ 이동평균선 정배열 확인 시작")
+    jb_map = {}
+    for _, r in reco_df.iterrows():
+        prices = get_daily_prices(r["code"], access_token)
+        jb_map[r["code"]] = is_jeong_baeyeol(prices)
+        time.sleep(0.2)
+    reco_df = reco_df.copy()
+    reco_df["jeong_baeyeol"] = reco_df["code"].map(jb_map)
+    jb_count = sum(jb_map.values())
+    log(f"✅ 정배열 확인 완료: {jb_count}/{TOP_RECO_N}종목")
 
     # ------------------------------------
     # 4) 엑셀 저장 규칙
