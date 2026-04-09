@@ -295,7 +295,7 @@ def get_daily_prices(code: str, access_token: str, days: int = 160) -> list:
         "FID_INPUT_DATE_1": start_dt.strftime("%Y%m%d"),
         "FID_INPUT_DATE_2": end_dt.strftime("%Y%m%d"),
         "FID_PERIOD_DIV_CODE": "D",
-        "FID_ORG_ADJ_PV": "0",
+        "FID_ORG_ADJ_PRC": "0",
     }
     r = safe_request_get(url, headers, params, max_retry=3, timeout=5)
     if r is None:
