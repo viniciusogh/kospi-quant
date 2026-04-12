@@ -317,14 +317,15 @@ def get_daily_prices(code: str, access_token: str, days: int = 160) -> list:
 
 
 def is_jeong_baeyeol(prices: list) -> bool:
-    """정배열 확인: 5MA > 20MA > 60MA > 120MA"""
-    if len(prices) < 120:
+    """정배열 확인: 5MA > 20MA > 60MA
+    (KIS API 최대 100개 반환 제한으로 120MA 제외)
+    """
+    if len(prices) < 60:
         return False
-    ma5   = sum(prices[-5:])   / 5
-    ma20  = sum(prices[-20:])  / 20
-    ma60  = sum(prices[-60:])  / 60
-    ma120 = sum(prices[-120:]) / 120
-    return ma5 > ma20 > ma60 > ma120
+    ma5  = sum(prices[-5:])  / 5
+    ma20 = sum(prices[-20:]) / 20
+    ma60 = sum(prices[-60:]) / 60
+    return ma5 > ma20 > ma60
 
 
 # ==========================
