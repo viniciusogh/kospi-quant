@@ -4,3 +4,5 @@ numpy
 openpyxl
 google-genai
 youtube-transcript-api
+yfinance
+lxml
