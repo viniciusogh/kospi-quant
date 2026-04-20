@@ -55,35 +55,47 @@ def get_sp500_tickers() -> list[dict]:
         return []
 
 # ==========================
-# 3개월 가격 모멘텀 (yfinance 일괄 다운로드)
+# 가격 데이터 다운로드: 3개월 모멘텀 + 정배열 용 종가 로우데이터
 # ==========================
-def get_price_momentum(tickers: list[str]) -> dict:
-    """yf.download()로 전 종목 3개월 수익률 일괄 계산"""
-    log(f"▶ 가격 모멘텀 다운로드 시작 ({len(tickers)}개 종목)")
+def get_price_data(tickers: list[str]) -> tuple[dict, dict]:
+    """
+    yf.download()로 일괄 다운로드
+    반환: (momentum_dict, prices_dict)
+      - momentum_dict: {ticker: 3개월 수익률}
+      - prices_dict:   {ticker: pd.Series 종가 시계열} ← 정배열 계산용
+    """
+    log(f"▶ 가격 데이터 다운로드 시작 ({len(tickers)}개 종목)")
     try:
         raw = yf.download(
             tickers, period="4mo", interval="1d",
             progress=False, auto_adjust=True,
             group_by="ticker", threads=True,
         )
-        momentum = {}
-        # multi-ticker: raw[ticker]['Close']
+        momentum    = {}
+        prices_dict = {}
         for t in tickers:
             try:
-                if len(tickers) == 1:
-                    prices = raw['Close'].dropna()
-                else:
-                    prices = raw[t]['Close'].dropna()
+                prices = (raw['Close'] if len(tickers) == 1 else raw[t]['Close']).dropna()
+                prices_dict[t] = prices
                 if len(prices) >= 60:
-                    ret = float(prices.iloc[-1] / prices.iloc[-63] - 1)
-                    momentum[t] = ret
+                    momentum[t] = float(prices.iloc[-1] / prices.iloc[-63] - 1)
             except Exception:
                 pass
-        log(f"✅ 모멘텀 계산 완료: {len(momentum)}개 종목")
-        return momentum
+        log(f"✅ 다운로드 완료: 모멘텀 {len(momentum)}개 / 종가데이터 {len(prices_dict)}개")
+        return momentum, prices_dict
     except Exception as e:
         log(f"❌ 가격 다운로드 실패: {e}")
-        return {}
+        return {}, {}
+
+
+def is_ma_aligned(prices: pd.Series) -> bool:
+    """정배열 확인: 5MA > 20MA > 60MA (yfinance 4개월 데이터 재사용, 추가 API 호출 없음)"""
+    if len(prices) < 60:
+        return False
+    ma5  = float(prices.iloc[-5:].mean())
+    ma20 = float(prices.iloc[-20:].mean())
+    ma60 = float(prices.iloc[-60:].mean())
+    return ma5 > ma20 > ma60
 
 # ==========================
 # 단일 종목 재무 데이터 (yfinance info)
@@ -144,7 +156,7 @@ def _cz(s: pd.Series, clip: float = 3.0) -> pd.Series:
 
 def compute_us_multifactor(df: pd.DataFrame) -> pd.Series:
     """
-    모멘텀(25%) + 밸류(20%) + 퀄리티ROE(25%) + 성장(15%) + 안정성(15%)
+    모멘텀(20%) + 밸류(25%) + 퀄리티ROE(25%) + 성장(15%) + 안정성(15%)
     음수 PE/PB → 페널티(-1.0), 데이터 없음 → 중립(0)
     """
     # 모멘텀 팩터
@@ -171,8 +183,8 @@ def compute_us_multifactor(df: pd.DataFrame) -> pd.Series:
     z_safety = _cz(-debt_filled).fillna(0)
 
     return (
-        0.25 * z_mom
-        + 0.20 * z_val
+        0.20 * z_mom
+        + 0.25 * z_val
         + 0.25 * z_quality
         + 0.15 * z_growth
         + 0.15 * z_safety
@@ -189,7 +201,7 @@ def upload_us_to_notion(reco_df: pd.DataFrame):
     }
     today_str = datetime.today().strftime("%Y-%m-%d")
 
-    col_labels = ["랭킹", "티커", "종목명", "섹터", "멀티팩터점수",
+    col_labels = ["랭킹", "티커", "종목명", "섹터", "정배열", "멀티팩터점수",
                   "3M수익률(%)", "시가총액(B$)", "PER", "PBR",
                   "ROE(%)", "부채비율(%)"]
 
@@ -217,6 +229,7 @@ def upload_us_to_notion(reco_df: pd.DataFrame):
             cell(row.get("ticker", "")),
             cell(row.get("name", "")[:30]),
             cell(row.get("sector", "")[:20]),
+            cell("✅" if row.get("ma_aligned") else "-"),
             cell(f"{float(row.get('multi_score', 0)):.3f}"),
             cell(f"{float(mom_val)*100:.1f}" if mom_val is not None else "-"),
             cell(f"{float(mcap_val)/1e9:.1f}" if mcap_val else "-"),
@@ -275,8 +288,8 @@ def main():
     sector_map  = {s["ticker"]: s["sector"] for s in sp500}
     log(f"✅ S&P 500 종목 {len(tickers)}개 로드")
 
-    # 가격 모멘텀 (일괄 다운로드)
-    momentum = get_price_momentum(tickers)
+    # 가격 데이터 (모멘텀 + 정배열용 종가 데이터 동시 확보)
+    momentum, prices_dict = get_price_data(tickers)
 
     # 재무 데이터 (캐시 or 새로 조회)
     fin_df = load_or_fetch_us_fundamentals(tickers)
@@ -297,11 +310,20 @@ def main():
     log("✅ 멀티팩터 점수 계산 완료")
 
     # 상위 TOP_RECO_N
-    reco_df = universe.sort_values("multi_score", ascending=False).head(TOP_RECO_N)
+    reco_df = universe.sort_values("multi_score", ascending=False).head(TOP_RECO_N).copy()
+
+    # 정배열 확인 (이미 다운로드된 가격 데이터 재사용, 추가 API 없음)
+    reco_df["ma_aligned"] = reco_df["ticker"].apply(
+        lambda t: is_ma_aligned(prices_dict[t]) if t in prices_dict else False
+    )
+    ma_cnt = reco_df["ma_aligned"].sum()
+    log(f"✅ 정배열 확인 완료: {ma_cnt}/{TOP_RECO_N}개 종목")
+
     log(f"✅ 추천 종목 TOP {TOP_RECO_N} 선정:")
     for rank, (_, row) in enumerate(reco_df.iterrows(), 1):
+        jb = "✅" if row["ma_aligned"] else "-"
         log(f"  {rank:2d}. {row['ticker']:6s} {row['name'][:28]:28s} "
-            f"점수:{row['multi_score']:.3f}  3M:{row.get('momentum', 0)*100:.1f}%")
+            f"점수:{row['multi_score']:.3f}  3M:{row.get('momentum', 0)*100:.1f}%  정배열:{jb}")
 
     # 엑셀 저장
     output_file = os.path.join(OUTPUT_DIR, f"{today_str}_US퀀트데이터.xlsx")
