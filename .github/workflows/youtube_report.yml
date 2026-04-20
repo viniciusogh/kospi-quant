@@ -2,7 +2,7 @@ name: Daily YouTube Analysis
 
 on:
   schedule:
-    - cron: '30 11 * * *'  # 20:30 KST (UTC+9), 매일
+    - cron: '0 8-15 * * *'  # 17:00~00:00 KST (UTC+9), 매시간
   workflow_dispatch:         # 수동 실행 가능
 
 jobs:
@@ -28,13 +28,15 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Restore processed videos state
+      - name: Restore state files
         uses: actions/cache@v4
         with:
-          path: processed_videos.json
-          key: processed-videos-${{ github.run_id }}
+          path: |
+            processed_videos.json
+            notion_daily_pages.json
+          key: yt-state-${{ github.run_id }}
           restore-keys: |
-            processed-videos-
+            yt-state-
 
       - name: Write YouTube cookies file
         env:

@@ -15,14 +15,15 @@ from youtube_transcript_api import YouTubeTranscriptApi
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 CHANNEL_ID            = "UChlv4GSd7OQl3js-jkLOnFA"   # @3protv
-GEMINI_API_KEY        = os.environ.get("GEMINI_API_KEY",        "AIzaSyBnoK6bxDxkRCkELWP612HXsNlcHGHHlRc")
+GEMINI_API_KEY        = os.environ.get("GEMINI_API_KEY",        "AIzaSyBRAHYt5C38MIHObIoJ8tIzeAlRXArO_J0")
 NOTION_API_KEY        = os.environ.get("NOTION_API_KEY",        "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")
-NOTION_PARENT_PAGE_ID = os.environ.get("NOTION_YT_PARENT_PAGE_ID", "3334a00632f880dc9c41fc9f09fab351")
+NOTION_PARENT_PAGE_ID = os.environ.get("NOTION_YT_PARENT_PAGE_ID", "3484a00632f880988b41e8b13d7fbb0b")
 
 PROCESSED_FILE       = os.path.join(_BASE_DIR, "processed_videos.json")
-COOKIES_FILE         = os.path.join(_BASE_DIR, "youtube_cookies.txt")  # 쿠키 파일 경로
-MAX_TRANSCRIPT_CHARS = 25000   # Gemini 요청 최대 자막 길이
-MAX_VIDEOS_PER_RUN   = 10      # 1회 최대 처리 영상 수
+NOTION_DAILY_PAGES   = os.path.join(_BASE_DIR, "notion_daily_pages.json")  # 일일 페이지 ID 저장
+COOKIES_FILE         = os.path.join(_BASE_DIR, "youtube_cookies.txt")
+MAX_TRANSCRIPT_CHARS = 25000
+MAX_VIDEOS_PER_RUN   = 10
 
 KST = timezone(timedelta(hours=9))
 
@@ -97,8 +98,18 @@ def analyze_with_gemini(title: str, transcript: str, date: str) -> str | None:
     client = genai.Client(api_key=GEMINI_API_KEY)
 
     prompt = f"""아래는 한국 주식 투자 유튜브 채널 3proTV 영상의 자막입니다.
-이 영상의 전체 내용을 한국어로 자연스럽게 요약해주세요.
-상세한 원고 내용을 최대한 유지하면서, 독자가 영상을 보지 않아도 핵심을 파악할 수 있도록 작성해주세요.
+이 영상의 내용을 **최대한 누락 없이** 상세하게 정리해주세요.
+
+다음 항목을 보드락없이 포함해야 합니다:
+- 핵심 주제 및 결론
+- 언급된 종목명·섹터와 해당 분석 내용 (구체적 수치 포함)
+- 시장 전망 및 매크로 관점
+- 구체적인 투자 전략·매매 아이디어
+- 언급된 주요 데이터 (지수, 가격, 비율, 날짜 등)
+- 리스크·주의사항
+
+자막의 흐름을 따라가며 중요한 내용이 빠지지 않게 작성하되, 반복 내용은 한 번만 정리해주세요.
+독자가 영상을 보지 않아도 전체 내용을 완전히 파악할 수 있도록 상세하게 작성해주세요.
 
 영상 제목: {title}
 게시일: {date}
@@ -175,41 +186,61 @@ def build_video_blocks(video: dict, analysis: str | None, transcript_len: int) -
     return blocks
 
 # ==========================
-# Notion 업로드
+# Notion 판리제: 일일 페이지 이어붙이기
 # ==========================
-def upload_to_notion(date_str: str, blocks: list) -> bool:
-    headers = {
+def _nh():
+    return {
         "Authorization":  f"Bearer {NOTION_API_KEY}",
         "Content-Type":   "application/json",
         "Notion-Version": "2022-06-28",
     }
 
-    # 페이지 생성 (첫 100블록)
+def get_or_create_daily_page(today: str) -> str | None:
+    """
+    오늘 날짜의 Notion 페이지 ID 반환.
+    없으면 새 페이지 생성 후 notion_daily_pages.json에 저장.
+    """
+    pages = {}
+    if os.path.exists(NOTION_DAILY_PAGES):
+        with open(NOTION_DAILY_PAGES) as f:
+            pages = json.load(f)
+
+    if today in pages:
+        log(f"✅ 오늘 페이지 재사용: {pages[today]}")
+        return pages[today]
+
+    # 새 페이지 생성 (빈 페이지, 이후 이어붙이기)
     body = {
         "parent":     {"page_id": NOTION_PARENT_PAGE_ID},
-        "properties": {"title": {"title": [{"text": {"content": f"📺 {date_str} 3proTV 분석 리포트"}}]}},
-        "children":   blocks[:100],
+        "properties": {"title": {"title": [{"text": {"content": f"📺 {today} 3proTV 분석"}}]}},
     }
-    r = requests.post("https://api.notion.com/v1/pages", headers=headers, json=body, timeout=30)
+    r = requests.post("https://api.notion.com/v1/pages", headers=_nh(), json=body, timeout=15)
     if r.status_code != 200:
-        log(f"❌ Notion 페이지 생성 실패 ({r.status_code}): {r.text[:300]}")
-        return False
+        log(f"❌ 페이지 생성 실패 ({r.status_code}): {r.text[:200]}")
+        return None
 
     page_id = r.json()["id"]
-    log(f"✅ Notion 페이지 생성 완료: {r.json().get('url', '')}")
+    log(f"✅ 새 페이지 생성: {r.json().get('url', '')}")
 
-    # 나머지 블록 추가 (100개씩)
-    for i in range(100, len(blocks), 100):
-        r2 = requests.patch(
+    pages[today] = page_id
+    with open(NOTION_DAILY_PAGES, "w") as f:
+        json.dump(pages, f, indent=2)
+    return page_id
+
+
+def append_to_page(page_id: str, blocks: list) -> bool:
+    """Notion 페이지에 블록 이어붙이기 (100개씨)"""
+    for i in range(0, len(blocks), 100):
+        r = requests.patch(
             f"https://api.notion.com/v1/blocks/{page_id}/children",
-            headers=headers,
+            headers=_nh(),
             json={"children": blocks[i:i+100]},
             timeout=30,
         )
-        if r2.status_code != 200:
-            log(f"⚠️ 블록 추가 실패 ({i}~{i+100}): {r2.status_code}")
+        if r.status_code != 200:
+            log(f"⚠️ 블록 추가 실패 ({i}~): {r.status_code} {r.text[:100]}")
+            return False
         time.sleep(0.3)
-
     return True
 
 # ==========================
@@ -250,8 +281,8 @@ def main():
             continue
         log(f"    자막 {len(transcript):,}자")
 
-        # Gemini 분석 (요청 간격 유지)
-        time.sleep(2)
+        # Gemini 분석 (요청 간격 유지 - 분당 한도 여유)
+        time.sleep(5)
         analysis = analyze_with_gemini(video["title"], transcript, video["published"])
         log(f"    Gemini {'✅' if analysis else '❌'}")
 
@@ -262,27 +293,25 @@ def main():
         log("⚠️ 업로드할 내용 없음. 종료.")
         return
 
-    # 상단 헤딩 추가
-    header = [
+    # 업데이트 시간 헤딩 추가 (어느 시간 모드에서 추가된 영상인지 표시)
+    now_kst = datetime.now(KST).strftime("%H:%M")
+    update_header = [
         {
-            "object": "block",
-            "type":   "heading_2",
-            "heading_2": {
-                "rich_text": [{"type": "text", "text": {
-                    "content": f"총 {len(processed_now)}편 분석 | {today}"
-                }}]
-            },
+            "object": "block", "type": "heading_3",
+            "heading_3": {"rich_text": [{"type": "text", "text": {
+                "content": f"🕔 {now_kst} 업데이트 — {len(processed_now)}편 추가"
+            }}]},
         },
-        {"object": "block", "type": "divider", "divider": {}},
     ]
-    all_blocks = header + all_blocks
+    all_blocks = update_header + all_blocks
 
-    # Notion 업로드
+    # 일일 페이지 가져오거나 생성 후 이어붙이기
     log(f"▶ Notion 업로드 시작 (블록 {len(all_blocks)}개)")
-    if upload_to_notion(today, all_blocks):
+    page_id = get_or_create_daily_page(today)
+    if page_id and append_to_page(page_id, all_blocks):
         processed.update(processed_now)
         save_processed(processed)
-        log(f"🎉 완료! {len(processed_now)}개 영상 분석 리포트 업로드")
+        log(f"🎉 완료! {len(processed_now)}개 영상 분석 이어붙이기 완료")
 
 if __name__ == "__main__":
     main()

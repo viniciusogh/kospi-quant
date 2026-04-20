@@ -1,6 +1,7 @@
 fin_ratio_cache.csv
 youtube_cookies.txt
 processed_videos.json
+notion_daily_pages.json
 *_국내퀀트데이터.xlsx
 __pycache__/
 *.pyc
