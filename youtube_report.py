@@ -20,8 +20,9 @@ NOTION_API_KEY        = os.environ.get("NOTION_API_KEY",        "ntn_19864630008
 NOTION_PARENT_PAGE_ID = os.environ.get("NOTION_YT_PARENT_PAGE_ID", "3484a00632f880988b41e8b13d7fbb0b")
 
 PROCESSED_FILE       = os.path.join(_BASE_DIR, "processed_videos.json")
-NOTION_DAILY_PAGES   = os.path.join(_BASE_DIR, "notion_daily_pages.json")  # 일일 페이지 ID 저장
+NOTION_DAILY_PAGES   = os.path.join(_BASE_DIR, "notion_daily_pages.json")
 COOKIES_FILE         = os.path.join(_BASE_DIR, "youtube_cookies.txt")
+LOCK_FILE            = os.path.join(_BASE_DIR, "youtube_report.lock")  # 중복 실행 방지
 MAX_TRANSCRIPT_CHARS = 25000
 MAX_VIDEOS_PER_RUN   = 10
 
@@ -117,7 +118,7 @@ def analyze_with_gemini(title: str, transcript: str, date: str) -> str | None:
 자막:
 {transcript}"""
 
-    for attempt in range(4):
+    for attempt in range(2):   # 최대 2회만 재시도 (무한 대기 방지)
         try:
             response = client.models.generate_content(
                 model="gemini-2.0-flash-lite",
@@ -127,10 +128,9 @@ def analyze_with_gemini(title: str, transcript: str, date: str) -> str | None:
         except Exception as e:
             err = str(e)
             if "429" in err:
-                # API가 제안한 대기 시간 추출
                 m = re.search(r"retry in (\d+(?:\.\d+)?)s", err)
-                wait = float(m.group(1)) + 3 if m else 60
-                log(f"    Gemini 할당량 초과 → {wait:.0f}초 대기 후 재시도 ({attempt+1}/3)")
+                wait = min(float(m.group(1)) + 3 if m else 60, 65)  # 최대 65초
+                log(f"    Gemini 할당량 초과 → {wait:.0f}초 대기 후 재시도 ({attempt+1}/2)")
                 time.sleep(wait)
             else:
                 log(f"    Gemini 오류: {e}")
@@ -195,6 +195,11 @@ def _nh():
         "Notion-Version": "2022-06-28",
     }
 
+def _save_daily_pages(pages: dict):
+    with open(NOTION_DAILY_PAGES, "w") as f:
+        json.dump(pages, f, indent=2)
+
+
 def get_or_create_daily_page(today: str) -> str | None:
     """
     오늘 날짜의 Notion 페이지 ID 반환.
@@ -223,13 +228,15 @@ def get_or_create_daily_page(today: str) -> str | None:
     log(f"✅ 새 페이지 생성: {r.json().get('url', '')}")
 
     pages[today] = page_id
-    with open(NOTION_DAILY_PAGES, "w") as f:
-        json.dump(pages, f, indent=2)
+    _save_daily_pages(pages)
     return page_id
 
 
-def append_to_page(page_id: str, blocks: list) -> bool:
-    """Notion 페이지에 블록 이어붙이기 (100개씨)"""
+def append_to_page(page_id: str, blocks: list, today: str) -> bool:
+    """
+    Notion 페이지에 블록 이어붙이기 (100개씨).
+    아카이브/삭제된 페이지라면 notion_daily_pages.json에서 제거 후 False 반환.
+    """
     for i in range(0, len(blocks), 100):
         r = requests.patch(
             f"https://api.notion.com/v1/blocks/{page_id}/children",
@@ -237,6 +244,14 @@ def append_to_page(page_id: str, blocks: list) -> bool:
             json={"children": blocks[i:i+100]},
             timeout=30,
         )
+        if r.status_code == 400 and "archived" in r.text:
+            log(f"⚠️ 페이지가 아카이브 상태 → 저장된 ID 제거 후 재실행 필요")
+            if os.path.exists(NOTION_DAILY_PAGES):
+                with open(NOTION_DAILY_PAGES) as f:
+                    pages = json.load(f)
+                pages.pop(today, None)
+                _save_daily_pages(pages)
+            return False
         if r.status_code != 200:
             log(f"⚠️ 블록 추가 실패 ({i}~): {r.status_code} {r.text[:100]}")
             return False
@@ -247,6 +262,19 @@ def append_to_page(page_id: str, blocks: list) -> bool:
 # 메인
 # ==========================
 def main():
+    # 중복 실행 방지 (lock 파일)
+    if os.path.exists(LOCK_FILE):
+        log("⚠️ 이전 실행이 아직 진행 중. 스킵.")
+        return
+    open(LOCK_FILE, "w").close()
+
+    try:
+        _main()
+    finally:
+        os.remove(LOCK_FILE)   # 정상/비정상 종료 시 모두 lock 해제
+
+
+def _main():
     today = datetime.now(KST).strftime("%Y-%m-%d")
     log(f"▶ 3proTV 분석 시작 (KST 기준: {today})")
 
@@ -308,7 +336,7 @@ def main():
     # 일일 페이지 가져오거나 생성 후 이어붙이기
     log(f"▶ Notion 업로드 시작 (블록 {len(all_blocks)}개)")
     page_id = get_or_create_daily_page(today)
-    if page_id and append_to_page(page_id, all_blocks):
+    if page_id and append_to_page(page_id, all_blocks, today):
         processed.update(processed_now)
         save_processed(processed)
         log(f"🎉 완료! {len(processed_now)}개 영상 분석 이어붙이기 완료")
