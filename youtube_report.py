@@ -141,31 +141,74 @@ def analyze_with_gemini(title: str, transcript: str, date: str) -> str | None:
 # ==========================
 # Notion 블록 생성
 # ==========================
+def _parse_bold(text: str) -> list:
+    """**bold** 텍스트를 Notion rich_text 볼드로 변환"""
+    parts = re.split(r'(\*\*[^*]+\*\*)', text)
+    result = []
+    for p in parts:
+        if p.startswith('**') and p.endswith('**'):
+            result.append({"type": "text", "text": {"content": p[2:-2]},
+                           "annotations": {"bold": True}})
+        elif p:
+            result.append({"type": "text", "text": {"content": p}})
+    return result or [{"type": "text", "text": {"content": text}}]
+
+
 def _para(content: str, block_type: str = "paragraph") -> list:
-    """2000자 제한을 지키며 단락 블록 리스트 생성"""
     blocks = []
     for chunk in [content[i:i+1900] for i in range(0, len(content), 1900)]:
         blocks.append({
-            "object": "block",
-            "type":   block_type,
+            "object": "block", "type": block_type,
             block_type: {"rich_text": [{"type": "text", "text": {"content": chunk}}]},
         })
     return blocks
 
-def _bullet(items: list) -> list:
-    return [{
-        "object": "block",
-        "type":   "bulleted_list_item",
-        "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": str(item)}}]},
-    } for item in items]
+
+def markdown_to_notion(text: str) -> list:
+    """
+    Gemini 마크다운 출력을 Notion 블록으로 변환
+    ### 헤딩 / ** 볼드 / * 불릿 / --- 다이비더
+    """
+    blocks = []
+    for raw in text.split('\n'):
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith('### '):
+            blocks.append({
+                "object": "block", "type": "heading_3",
+                "heading_3": {"rich_text": _parse_bold(line[4:].strip())}
+            })
+        elif line.startswith('## '):
+            blocks.append({
+                "object": "block", "type": "heading_2",
+                "heading_2": {"rich_text": _parse_bold(line[3:].strip())}
+            })
+        elif line in ('---', '***', '___'):
+            blocks.append({"object": "block", "type": "divider", "divider": {}})
+        elif re.match(r'^[*\-] ', line) or re.match(r'^\*{1,3}\s+', line):
+            content = re.sub(r'^[*\-]+\s*', '', line).strip()
+            blocks.append({
+                "object": "block", "type": "bulleted_list_item",
+                "bulleted_list_item": {"rich_text": _parse_bold(content)}
+            })
+        else:
+            # 일반 단락 (1900자 청크)
+            rt = _parse_bold(line)
+            # rt는 짧으니 chunk 분할 불필요
+            blocks.append({
+                "object": "block", "type": "paragraph",
+                "paragraph": {"rich_text": rt}
+            })
+    return blocks
+
 
 def build_video_blocks(video: dict, analysis: str | None, transcript_len: int) -> list:
     blocks = []
 
     # 영상 제목 (H3, 링크 포함)
     blocks.append({
-        "object": "block",
-        "type":   "heading_3",
+        "object": "block", "type": "heading_3",
         "heading_3": {
             "rich_text": [{
                 "type": "text",
@@ -177,9 +220,9 @@ def build_video_blocks(video: dict, analysis: str | None, transcript_len: int) -
     # 메타
     blocks.extend(_para(f"📅 {video['published']}  |  📝 자막 {transcript_len:,}자"))
 
-    # Gemini 요약 본문 (자유 형식 텍스트)
+    # Gemini 분석 본문: 마크다운 → Notion 블록 변환
     if analysis:
-        blocks.extend(_para(analysis))
+        blocks.extend(markdown_to_notion(analysis))
     else:
         blocks.extend(_para("⚠️ Gemini 분석 실패 (자막은 정상 수집됨)"))
 
