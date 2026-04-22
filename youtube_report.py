@@ -24,7 +24,8 @@ NOTION_DAILY_PAGES   = os.path.join(_BASE_DIR, "notion_daily_pages.json")
 COOKIES_FILE         = os.path.join(_BASE_DIR, "youtube_cookies.txt")
 LOCK_FILE            = os.path.join(_BASE_DIR, "youtube_report.lock")  # 중복 실행 방지
 MAX_TRANSCRIPT_CHARS = 25000
-MAX_VIDEOS_PER_RUN   = 10
+MAX_VIDEOS_PER_RUN   = 5     # 하루 5편 제한 (Gemini 무료 쿼터 절약)
+LOCK_MAX_AGE_HOURS   = 2     # lock 파일 최대 유효 시간
 
 KST = timezone(timedelta(hours=9))
 
@@ -264,8 +265,12 @@ def append_to_page(page_id: str, blocks: list, today: str) -> bool:
 def main():
     # 중복 실행 방지 (lock 파일)
     if os.path.exists(LOCK_FILE):
-        log("⚠️ 이전 실행이 아직 진행 중. 스킵.")
-        return
+        lock_age_h = (time.time() - os.path.getmtime(LOCK_FILE)) / 3600
+        if lock_age_h < LOCK_MAX_AGE_HOURS:
+            log(f"⚠️ 이전 실행이 진행 중 (lock 나이 {lock_age_h:.1f}시간). 스킵.")
+            return
+        log(f"⚠️ stale lock 발견 ({lock_age_h:.1f}시간) → 자동 제거 후 실행")
+        os.remove(LOCK_FILE)
     open(LOCK_FILE, "w").close()
 
     try:
