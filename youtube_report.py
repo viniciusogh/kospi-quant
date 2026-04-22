@@ -24,7 +24,7 @@ NOTION_DAILY_PAGES   = os.path.join(_BASE_DIR, "notion_daily_pages.json")
 COOKIES_FILE         = os.path.join(_BASE_DIR, "youtube_cookies.txt")
 LOCK_FILE            = os.path.join(_BASE_DIR, "youtube_report.lock")  # 중복 실행 방지
 MAX_TRANSCRIPT_CHARS = 25000
-MAX_VIDEOS_PER_RUN   = 5     # 하루 5편 제한 (Gemini 무료 쿼터 절약)
+MAX_VIDEOS_PER_RUN   = 3     # 1회당 3편 제한 (Gemini 무료 쿼터 절약)
 LOCK_MAX_AGE_HOURS   = 2     # lock 파일 최대 유효 시간
 
 KST = timezone(timedelta(hours=9))
