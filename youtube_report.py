@@ -287,10 +287,21 @@ def _main():
     videos = get_channel_videos()
     log(f"✅ RSS 영상 {len(videos)}개 수집")
 
-    # 미처리 영상 선별 (오늘 영상 우선, 최대 MAX_VIDEOS_PER_RUN)
+    # 미처리 영상 선별
     processed = load_processed()
-    new_videos = [v for v in videos if v["id"] not in processed]
 
+    # 3일 이상 오래된 미처리 영상은 Gemini 호출 없이 바로 완료 체크 (쿠터 절약)
+    cutoff_date = (datetime.now(KST) - timedelta(days=3)).strftime("%Y-%m-%d")
+    old_skipped = []
+    for v in videos:
+        if v["id"] not in processed and v["published"] < cutoff_date:
+            old_skipped.append(v["id"])
+    if old_skipped:
+        processed.update(old_skipped)
+        save_processed(processed)
+        log(f"⏩ {len(old_skipped)}개 오래된 영상 자동 스킵 (쿠터 절약)")
+
+    new_videos = [v for v in videos if v["id"] not in processed]
     today_new   = [v for v in new_videos if v["published"] == today]
     other_new   = [v for v in new_videos if v["published"] != today]
     target      = (today_new + other_new)[:MAX_VIDEOS_PER_RUN]
