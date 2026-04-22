@@ -347,7 +347,9 @@ def _main():
     new_videos = [v for v in videos if v["id"] not in processed]
     today_new   = [v for v in new_videos if v["published"] == today]
     other_new   = [v for v in new_videos if v["published"] != today]
-    target      = (today_new + other_new)[:MAX_VIDEOS_PER_RUN]
+    # RSS는 최신순 정렬 → reverse하여 오래된 것부터 처리 (Notion에 최신이 아래 쌓이도록)
+    target      = list(reversed((today_new + other_new)[:MAX_VIDEOS_PER_RUN]))
+    target      = list(reversed((today_new + other_new)[:MAX_VIDEOS_PER_RUN]))
 
     if not target:
         log("✅ 처리할 새 영상 없음. 종료.")
