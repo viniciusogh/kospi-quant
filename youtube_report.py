@@ -122,7 +122,7 @@ def analyze_with_gemini(title: str, transcript: str, date: str) -> str | None:
     for attempt in range(2):   # 최대 2회만 재시도 (무한 대기 방지)
         try:
             response = client.models.generate_content(
-                model="gemini-2.0-flash-lite",
+                model="gemini-2.0-flash",
                 contents=prompt,
             )
             return response.text.strip()
