@@ -24,7 +24,7 @@ NOTION_DAILY_PAGES   = os.path.join(_BASE_DIR, "notion_daily_pages.json")
 COOKIES_FILE         = os.path.join(_BASE_DIR, "youtube_cookies.txt")
 LOCK_FILE            = os.path.join(_BASE_DIR, "youtube_report.lock")  # 중복 실행 방지
 MAX_TRANSCRIPT_CHARS = 25000
-MAX_VIDEOS_PER_RUN   = 3     # 1회당 3편 제한 (Gemini 무료 쿼터 절약)
+MAX_VIDEOS_PER_RUN   = 15    # 유료 전환 후 제한 해제
 LOCK_MAX_AGE_HOURS   = 2     # lock 파일 최대 유효 시간
 
 KST = timezone(timedelta(hours=9))
@@ -348,7 +348,6 @@ def _main():
     today_new   = [v for v in new_videos if v["published"] == today]
     other_new   = [v for v in new_videos if v["published"] != today]
     # RSS는 최신순 정렬 → reverse하여 오래된 것부터 처리 (Notion에 최신이 아래 쌓이도록)
-    target      = list(reversed((today_new + other_new)[:MAX_VIDEOS_PER_RUN]))
     target      = list(reversed((today_new + other_new)[:MAX_VIDEOS_PER_RUN]))
 
     if not target:
