@@ -102,6 +102,8 @@ def analyze_with_gemini(title: str, transcript: str, date: str) -> str | None:
     prompt = f"""아래는 한국 주식 투자 유튜브 채널 3proTV 영상의 자막입니다.
 이 영상의 내용을 **최대한 누락 없이** 상세하게 정리해주세요.
 
+⚠️ 주의: 제목과 게시일은 별도로 표시되므로 **첫 줄에 제목을 반복하지 마세요**. 바로 내용 분석부터 시작해주세요.
+
 다음 항목을 보드락없이 포함해야 합니다:
 - 핵심 주제 및 결론
 - 언급된 종목명·섹터와 해당 분석 내용 (구체적 수치 포함)
@@ -204,30 +206,31 @@ def markdown_to_notion(text: str) -> list:
 
 
 def build_video_blocks(video: dict, analysis: str | None, transcript_len: int) -> list:
-    blocks = []
+    """영상 1편 = 토글 1개 (클릭하면 펼쳐지는 구조)"""
 
-    # 영상 제목 (H3, 링크 포함)
-    blocks.append({
-        "object": "block", "type": "heading_3",
-        "heading_3": {
+    # 토글 내부에 들어갈 children 블록
+    children = []
+    children.extend(_para(f"📅 {video['published']}  |  📝 자막 {transcript_len:,}자"))
+
+    if analysis:
+        children.extend(markdown_to_notion(analysis))
+    else:
+        children.extend(_para("⚠️ Gemini 분석 실패 (자막은 정상 수집됨)"))
+
+    # Notion 토글 블록 (children 최대 95개 제한)
+    toggle = {
+        "object": "block",
+        "type": "toggle",
+        "toggle": {
             "rich_text": [{
                 "type": "text",
                 "text": {"content": video["title"], "link": {"url": video["url"]}},
-            }]
+                "annotations": {"bold": True},
+            }],
+            "children": children[:95],
         },
-    })
-
-    # 메타
-    blocks.extend(_para(f"📅 {video['published']}  |  📝 자막 {transcript_len:,}자"))
-
-    # Gemini 분석 본문: 마크다운 → Notion 블록 변환
-    if analysis:
-        blocks.extend(markdown_to_notion(analysis))
-    else:
-        blocks.extend(_para("⚠️ Gemini 분석 실패 (자막은 정상 수집됨)"))
-
-    blocks.append({"object": "block", "type": "divider", "divider": {}})
-    return blocks
+    }
+    return [toggle]
 
 # ==========================
 # Notion 판리제: 일일 페이지 이어붙이기
