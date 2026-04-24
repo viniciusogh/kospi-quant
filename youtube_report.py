@@ -322,7 +322,10 @@ def main():
     try:
         _main()
     finally:
-        os.remove(LOCK_FILE)   # 정상/비정상 종료 시 모두 lock 해제
+        try:
+            os.remove(LOCK_FILE)
+        except FileNotFoundError:
+            pass  # 이미 삭제됨 → 무시
 
 
 def _main():
