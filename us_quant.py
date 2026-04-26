@@ -24,6 +24,11 @@ US_FIN_CACHE      = os.path.join(_BASE_DIR, "us_fin_cache.csv")
 US_FIN_CACHE_DAYS = 7
 OUTPUT_DIR        = os.environ.get("OUTPUT_DIR", os.path.expanduser("~/Desktop"))
 
+# 점수 시계열 평탄화 (단일 시점 노이즈 완화)
+US_SCORE_HISTORY  = os.path.join(_BASE_DIR, "us_score_history.csv")
+EMA_SPAN          = 5     # 영업일 기준
+HISTORY_RETAIN_D  = 60    # 이력 보관 기간 (일)
+
 # ==========================
 # 유틸
 # ==========================
@@ -154,33 +159,54 @@ def _cz(s: pd.Series, clip: float = 3.0) -> pd.Series:
     z = (s - s.mean()) / (s.std() + 1e-8)
     return z.clip(-clip, clip)
 
+# 섹터 중립화 임계값: 종목 수가 이보다 작으면 전체 풀 폴백
+_SECTOR_MIN_N = 5
+
+def _cz_by_sector(s: pd.Series, sector: pd.Series, min_n: int = _SECTOR_MIN_N) -> pd.Series:
+    """섹터 내 Z-score. 작은 섹터·섹터 결측 시 전체 풀 Z-score로 자연 폴백."""
+    if sector is None or sector.isna().all():
+        return _cz(s)
+    pool_z = _cz(s)
+    out = pd.Series(index=s.index, dtype=float)
+    for sec, idx in sector.groupby(sector).groups.items():
+        sub = s.loc[idx]
+        if len(sub) >= min_n and sub.std(skipna=True) > 1e-8:
+            out.loc[idx] = _cz(sub)
+        else:
+            out.loc[idx] = pool_z.loc[idx]
+    return out
+
 def compute_us_multifactor(df: pd.DataFrame) -> pd.Series:
     """
     모멘텀(20%) + 밸류(25%) + 퀄리티ROE(25%) + 성장(15%) + 안정성(15%)
+    밸류·퀄리티·안정성은 섹터 내 Z-score(섹터 중립), 모멘텀·성장은 시장 전체 Z-score.
     음수 PE/PB → 페널티(-1.0), 데이터 없음 → 중립(0)
     """
-    # 모멘텀 팩터
+    sec = df["sector"] if "sector" in df.columns else None
+
+    # 모멘텀 팩터 (섹터 회전 보존 → 시장 전체)
     z_mom = _cz(df["momentum"].fillna(0))
 
-    # 밸류 팩터
+    # 밸류 팩터 (섹터 중립)
     def inv_v(x):
         if pd.isna(x): return np.nan
         return 1/x if x > 0 else -1.0
 
     inv_pe = df["pe"].apply(inv_v)
     inv_pb = df["pb"].apply(inv_v)
-    z_val  = (_cz(inv_pe).fillna(0) + _cz(inv_pb).fillna(0)) / 2
+    z_val  = (_cz_by_sector(inv_pe, sec).fillna(0)
+            + _cz_by_sector(inv_pb, sec).fillna(0)) / 2
 
-    # 퀄리티 팩터 (ROE: 소수점 → % 변환)
-    z_quality = _cz(df["roe"] * 100).fillna(0)
+    # 퀄리티 팩터 (섹터 중립, ROE: 소수점 → % 변환)
+    z_quality = _cz_by_sector(df["roe"] * 100, sec).fillna(0)
 
-    # 성장 팩터
+    # 성장 팩터 (시장 전체)
     z_growth = (_cz(df["rev_growth"] * 100).fillna(0)
                 + _cz(df["earn_growth"] * 100).fillna(0)) / 2
 
-    # 안정성 팩터
+    # 안정성 팩터 (섹터 중립: 금융 ↔ 비금융 자본구조 차이 흡수)
     debt_filled = df["debt_equity"].fillna(df["debt_equity"].median()).fillna(100)
-    z_safety = _cz(-debt_filled).fillna(0)
+    z_safety = _cz_by_sector(-debt_filled, sec).fillna(0)
 
     return (
         0.20 * z_mom
@@ -189,6 +215,69 @@ def compute_us_multifactor(df: pd.DataFrame) -> pd.Series:
         + 0.15 * z_growth
         + 0.15 * z_safety
     )
+
+# ==========================
+# 점수 EMA 평탄화 + 순위 변동
+# ==========================
+def load_score_history() -> pd.DataFrame:
+    if not os.path.exists(US_SCORE_HISTORY):
+        return pd.DataFrame(columns=["date", "ticker", "raw_score"])
+    return pd.read_csv(US_SCORE_HISTORY, parse_dates=["date"])
+
+def smooth_with_ema(universe: pd.DataFrame, today: datetime) -> tuple[pd.Series, pd.DataFrame]:
+    """오늘 raw_score를 history에 누적하고, 티커별 EMA 점수를 반환.
+
+    첫 실행 시 history가 비어 있어도 EMA = raw_score 로 자연 폴백.
+    같은 날 재실행해도 안전 (today 행 덮어씀).
+    """
+    history = load_score_history()
+    today_ts = pd.Timestamp(today.date())
+
+    today_df = pd.DataFrame({
+        "date":      today_ts,
+        "ticker":    universe["ticker"].values,
+        "raw_score": universe["raw_score"].values,
+    })
+
+    history = history[history["date"] != today_ts]
+    history = (today_df if history.empty
+               else pd.concat([history, today_df], ignore_index=True))
+    history = history.sort_values(["ticker", "date"])
+
+    history["smoothed"] = history.groupby("ticker")["raw_score"].transform(
+        lambda x: x.ewm(span=EMA_SPAN, adjust=False).mean()
+    )
+
+    cutoff  = today_ts - pd.Timedelta(days=HISTORY_RETAIN_D)
+    history = history[history["date"] >= cutoff]
+
+    smoothed_today = (history[history["date"] == today_ts]
+                      .set_index("ticker")["smoothed"])
+    return smoothed_today, history
+
+def compute_rank_change(history: pd.DataFrame) -> dict:
+    """티커별 (오늘 순위 - 어제 순위) 부호 반전. + = 상승, None = 신규."""
+    if history["date"].nunique() < 2:
+        return {}
+
+    dates_sorted = sorted(history["date"].unique())
+    today_d, prev_d = dates_sorted[-1], dates_sorted[-2]
+
+    def rank_map(d):
+        rows = history[history["date"] == d].sort_values("smoothed", ascending=False)
+        return {t: i + 1 for i, t in enumerate(rows["ticker"].tolist())}
+
+    today_r = rank_map(today_d)
+    prev_r  = rank_map(prev_d)
+    return {t: (prev_r.get(t) - r if t in prev_r else None)
+            for t, r in today_r.items()}
+
+def fmt_rank_change(change) -> str:
+    if change is None:
+        return "🆕"
+    if change == 0:
+        return "—"
+    return f"📈+{change}" if change > 0 else f"📉{change}"
 
 # ==========================
 # Notion 업로드
@@ -201,7 +290,7 @@ def upload_us_to_notion(reco_df: pd.DataFrame):
     }
     today_str = datetime.today().strftime("%Y-%m-%d")
 
-    col_labels = ["랭킹", "티커", "종목명", "섹터", "정배열", "멀티팩터점수",
+    col_labels = ["랭킹", "전일대비", "티커", "종목명", "섹터", "정배열", "멀티팩터점수",
                   "3M수익률(%)", "시가총액(B$)", "PER", "PBR",
                   "ROE(%)", "부채비율(%)"]
 
@@ -226,6 +315,7 @@ def upload_us_to_notion(reco_df: pd.DataFrame):
 
         rows.append({"type": "table_row", "table_row": {"cells": [
             cell(rank),
+            cell(fmt_rank_change(row.get("rank_change"))),
             cell(row.get("ticker", "")),
             cell(row.get("name", "")[:30]),
             cell(row.get("sector", "")[:20]),
@@ -305,12 +395,24 @@ def main():
     universe = df.dropna(subset=["market_cap"]).nlargest(TOP_MCAP_N, "market_cap").copy()
     log(f"✅ 시총 상위 {TOP_MCAP_N}개 유니버스 확정")
 
-    # 멀티팩터 점수 계산
-    universe["multi_score"] = compute_us_multifactor(universe)
-    log("✅ 멀티팩터 점수 계산 완료")
+    # 멀티팩터 raw 점수 계산
+    universe["raw_score"] = compute_us_multifactor(universe)
+    log("✅ 멀티팩터 raw 점수 계산 완료")
+
+    # 5일 EMA 평탄화 (이력 누적, 단일 시점 노이즈 완화)
+    today_dt = datetime.today()
+    smoothed, history_updated = smooth_with_ema(universe, today_dt)
+    universe["multi_score"] = universe["ticker"].map(smoothed).fillna(universe["raw_score"])
+    history_updated.to_csv(US_SCORE_HISTORY, index=False)
+    n_days = history_updated["date"].nunique()
+    log(f"✅ EMA 평탄화 (span={EMA_SPAN}일, 누적 이력 {n_days}일치)")
+
+    # 어제 대비 순위 변동
+    rank_changes = compute_rank_change(history_updated)
 
     # 상위 TOP_RECO_N
     reco_df = universe.sort_values("multi_score", ascending=False).head(TOP_RECO_N).copy()
+    reco_df["rank_change"] = reco_df["ticker"].map(rank_changes)
 
     # 정배열 확인 (이미 다운로드된 가격 데이터 재사용, 추가 API 없음)
     reco_df["ma_aligned"] = reco_df["ticker"].apply(
@@ -322,8 +424,10 @@ def main():
     log(f"✅ 추천 종목 TOP {TOP_RECO_N} 선정:")
     for rank, (_, row) in enumerate(reco_df.iterrows(), 1):
         jb = "✅" if row["ma_aligned"] else "-"
+        rc = fmt_rank_change(row.get("rank_change"))
         log(f"  {rank:2d}. {row['ticker']:6s} {row['name'][:28]:28s} "
-            f"점수:{row['multi_score']:.3f}  3M:{row.get('momentum', 0)*100:.1f}%  정배열:{jb}")
+            f"점수:{row['multi_score']:.3f}  3M:{row.get('momentum', 0)*100:.1f}%  "
+            f"정배열:{jb}  전일:{rc}")
 
     # 엑셀 저장
     output_file = os.path.join(OUTPUT_DIR, f"{today_str}_US퀀트데이터.xlsx")
