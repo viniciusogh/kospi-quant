@@ -463,8 +463,10 @@ def _cz_by_sector(s: pd.Series, sector: pd.Series, min_n: int = _SECTOR_MIN_N) -
 
 def compute_multifactor_score(df: pd.DataFrame) -> pd.Series:
     """
-    수급 0.25 + 밸류 0.20 + 퀄리티 0.25 + 성장 0.15 + 안정성 0.15
+    수급 0.20 + 밸류 0.30 + 퀄리티 0.25 + 성장 0.15 + 안정성 0.10
     밸류·퀄리티·안정성은 섹터 내 Z-score (섹터 중립), 수급·성장은 시장 전체 Z-score.
+    가격 부담(밸류) 가중치를 0.20→0.30 으로 상향, 수급(0.25→0.20)·안정성(0.15→0.10) 살짝 하향.
+    "이미 오른 종목" 편향 완화 — 코스피와 동일 가중치.
     데이터 없는 종목은 해당 팩터 기여도 = 0 (중립) 처리.
     """
     sec = df["industry"] if "industry" in df.columns else None
@@ -498,11 +500,11 @@ def compute_multifactor_score(df: pd.DataFrame) -> pd.Series:
     z_safety = _cz_by_sector(-debt_filled, sec).fillna(0)
 
     return (
-        0.25 * z_supply
-        + 0.20 * z_val
+        0.20 * z_supply
+        + 0.30 * z_val
         + 0.25 * z_quality
         + 0.15 * z_growth
-        + 0.15 * z_safety
+        + 0.10 * z_safety
     )
 
 
