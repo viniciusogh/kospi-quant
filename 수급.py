@@ -236,7 +236,7 @@ def get_valuation_info(code: str, access_token: str):
     - hts_avls: 시가총액
     - per: PER
     - eps: EPS
-    를 가져온다.
+    - bstp_kor_isnm: 업종 한글명 (섹터 중립화·Notion 표시용)
     """
     url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-price"
     headers = {
@@ -253,7 +253,7 @@ def get_valuation_info(code: str, access_token: str):
     r = safe_request_get(url, headers, params, max_retry=3, timeout=3)
     polite_sleep()
     if r is None:
-        return None, None, None, None
+        return None, None, None, None, None
 
     try:
         data = r.json().get("output", {})
@@ -261,6 +261,10 @@ def get_valuation_info(code: str, access_token: str):
         per = data.get("per")
         eps = data.get("eps")
         pbr = data.get("pbr")
+        industry_raw = data.get("bstp_kor_isnm")
+        industry = (str(industry_raw).strip()
+                    if industry_raw and str(industry_raw).strip() not in ("", "0")
+                    else None)
 
         # 숫자 변환 시도, 실패하면 None
         def _safe(v):
@@ -273,9 +277,9 @@ def get_valuation_info(code: str, access_token: str):
         eps = _safe(eps)
         pbr = _safe(pbr)
 
-        return mktcap, per, eps, pbr
+        return mktcap, per, eps, pbr, industry
     except Exception:
-        return None, None, None, None
+        return None, None, None, None, None
 
 # ==========================
 # 일별 종가 조회 + 이동평균선 정배열 확인
@@ -434,38 +438,59 @@ def _cross_z(s: pd.Series, clip: float = 3.0) -> pd.Series:
     return z.clip(-clip, clip)
 
 
+# 섹터 중립화 임계값: 종목 수가 이보다 작으면 전체 풀 폴백
+_SECTOR_MIN_N = 5
+
+def _cz_by_sector(s: pd.Series, sector: pd.Series, min_n: int = _SECTOR_MIN_N) -> pd.Series:
+    """섹터 내 Z-score. 작은 섹터·섹터 결측 시 전체 풀 폴백."""
+    if sector is None or sector.isna().all():
+        return _cross_z(s)
+    pool_z = _cross_z(s)
+    out = pd.Series(index=s.index, dtype=float)
+    for sec, idx in sector.groupby(sector).groups.items():
+        sub = s.loc[idx]
+        if len(sub) >= min_n and sub.std(skipna=True) > 1e-8:
+            out.loc[idx] = _cross_z(sub)
+        else:
+            out.loc[idx] = pool_z.loc[idx]
+    return out
+
+
 def compute_multifactor_score(df: pd.DataFrame) -> pd.Series:
     """
-    수급 0.35 + 밸류 0.20 + 퀄리티 0.25 + 성장 0.15 + 안정성 0.05
-    각 팩터는 단면 Z-score 표준화 후 가중합산.
+    수급 0.25 + 밸류 0.20 + 퀄리티 0.25 + 성장 0.15 + 안정성 0.15
+    밸류·퀄리티·안정성은 섹터 내 Z-score (섹터 중립), 수급·성장은 시장 전체 Z-score.
     데이터 없는 종목은 해당 팩터 기여도 = 0 (중립) 처리.
     """
-    # 수급 팩터
+    sec = df["industry"] if "industry" in df.columns else None
+
+    # 수급 팩터 (시장 전체 — 섹터 회전 알파 보존)
     z_supply = _cross_z(df["strength_score"].fillna(0))
 
-    # 밸류 팩터: 1/PER + 1/PBR
-    # 음수 PER(적자) → 페널티(-1.0) / 양수 PER → 낙을수록 유리 / 데이터 없음 → 중립(NaN→0)
+    # 밸류 팩터: 1/PER + 1/PBR (섹터 중립)
     def _inv_per(x):
-        if pd.isna(x):   return np.nan   # 데이터 없음 → 중립
-        elif x > 0:      return 1 / x    # 정상 PER → 낙을수록 저평가
-        else:            return -1.0     # 적자(음수 PER) → 페널티
+        if pd.isna(x):   return np.nan
+        elif x > 0:      return 1 / x
+        else:            return -1.0
     def _inv_pbr(x):
-        if pd.isna(x):   return np.nan   # 데이터 없음 → 중립
-        elif x > 0:      return 1 / x    # 정상 PBR
-        else:            return -1.0     # 자본잠식(음수 PBR) → 페널티
+        if pd.isna(x):   return np.nan
+        elif x > 0:      return 1 / x
+        else:            return -1.0
     inv_per = df["per"].apply(_inv_per)
     inv_pbr = df["pbr"].apply(_inv_pbr)
-    z_val = (_cross_z(inv_per).fillna(0) + _cross_z(inv_pbr).fillna(0)) / 2
+    z_val = (_cz_by_sector(inv_per, sec).fillna(0)
+           + _cz_by_sector(inv_pbr, sec).fillna(0)) / 2
 
-    # 퀄리티 팩터: ROE
-    z_quality = _cross_z(df["roe"]).fillna(0)
+    # 퀄리티 팩터: ROE (섹터 중립)
+    z_quality = _cz_by_sector(df["roe"], sec).fillna(0)
 
-    # 성장 팩터: 매출증가율 + 영업이익증가율
-    z_growth = (_cross_z(df["rev_growth"]).fillna(0) + _cross_z(df["op_profit_growth"]).fillna(0)) / 2
+    # 성장 팩터 (시장 전체)
+    z_growth = (_cross_z(df["rev_growth"]).fillna(0)
+              + _cross_z(df["op_profit_growth"]).fillna(0)) / 2
 
-    # 안정성 팩터: 부채비율 낮을수록 유리 → 음수 취해 z-score
+    # 안정성 팩터 (섹터 중립: 금융 ↔ 비금융 자본구조 차이 흡수)
     debt_filled = df["debt_ratio"].fillna(df["debt_ratio"].median()).fillna(100)
-    z_safety = _cross_z(-debt_filled).fillna(0)
+    z_safety = _cz_by_sector(-debt_filled, sec).fillna(0)
 
     return (
         0.25 * z_supply
@@ -511,6 +536,7 @@ def to_korean_columns(df: pd.DataFrame) -> pd.DataFrame:
         "op_profit_growth": "영업이익증가율(%)",
         "multi_score": "멀티팩터점수",
         "jeong_baeyeol": "정배열",
+        "industry": "섹터",
     }
     return df.rename(columns={c: col_map.get(c, c) for c in df.columns})
 
@@ -526,7 +552,7 @@ def upload_to_notion(reco_kor: pd.DataFrame):
     }
     today_str = datetime.now(KST).strftime("%Y-%m-%d")
 
-    col_labels = ["랭킹", "종목코드", "종목명", "정배열", "멀티팩터점수", "수급강화점수",
+    col_labels = ["랭킹", "종목코드", "종목명", "섹터", "정배열", "멀티팩터점수", "수급강화점수",
                   "시가총액(억)", "외국인순매수(백만)", "기관순매수(백만)",
                   "PER", "PBR", "ROE(%)", "부채비율(%)", "매출증가율(%)", "영업이익증가율(%)"]
 
@@ -550,10 +576,12 @@ def upload_to_notion(reco_kor: pd.DataFrame):
             debt_val = _v(row.get("부채비율(%)", None))
             rev_val  = _v(row.get("매출증가율(%)", None))
             op_val   = _v(row.get("영업이익증가율(%)", None))
+            sector_val = row.get("섹터")
             rows.append({"type": "table_row", "table_row": {"cells": [
                 cell(int(row.get("랭킹", ""))),
                 cell(row.get("종목코드", "")),
                 cell(row.get("종목명", "")),
+                cell(sector_val if (sector_val and not pd.isna(sector_val)) else "-"),
                 cell("✅" if row.get("정배열") else "-"),
                 cell(f"{float(row.get('멀티팩터점수', 0)):.3f}"),
                 cell(f"{float(row.get('수급강화점수', 0)):.3f}"),
@@ -678,23 +706,25 @@ def main():
     pers = [None] * total
     epss = [None] * total
     pbrs = [None] * total
+    industries = [None] * total
     rows = list(base_df.reset_index(drop=True).iterrows())
 
     def cap_worker(pos_and_row):
         pos, row = pos_and_row
         code = row["단축코드"]
-        mktcap, per, eps, pbr = get_valuation_info(code, access_token)
+        mktcap, per, eps, pbr, industry = get_valuation_info(code, access_token)
         time.sleep(0.15)  # 호출 매너
-        return pos, mktcap, per, eps, pbr
+        return pos, mktcap, per, eps, pbr, industry
 
     with ThreadPoolExecutor(max_workers=WORKERS_MKTCAP) as ex:
         futures = {ex.submit(cap_worker, pr): pr[0] for pr in rows}
         for cnt, future in enumerate(as_completed(futures), start=1):
-            pos, cap, per, eps, pbr = future.result()
+            pos, cap, per, eps, pbr, industry = future.result()
             caps[pos] = cap
             pers[pos] = per
             epss[pos] = eps
             pbrs[pos] = pbr
+            industries[pos] = industry
 
             elapsed = time.time() - start_cap
             speed = cnt / elapsed if elapsed > 0 else 0
@@ -712,6 +742,7 @@ def main():
     cap_df["per"] = pers
     cap_df["eps"] = epss
     cap_df["pbr"] = pbrs
+    cap_df["industry"] = industries
     cap_df.rename(columns={"단축코드": "code", "한글명": "name"}, inplace=True)
 
     # 시총 결측/0 제거 후 상위 200
@@ -726,15 +757,19 @@ def main():
     # ------------------------------------
     # 3) 전체 점수표에 시총/밸류 붙이기 + 추천 N개 뽑기
     # ------------------------------------
-    all_df = score_df.merge(cap_df[["code", "market_cap", "per", "eps", "pbr"]], on="code", how="left")
+    all_df = score_df.merge(
+        cap_df[["code", "market_cap", "per", "eps", "pbr", "industry"]],
+        on="code", how="left",
+    )
 
     # ------------------------------------
     # 3.5) 재무비율 조회/캐시 + 멀티팩터 점수 계산
     # ------------------------------------
     fin_df = load_or_fetch_fin_ratios(all_df["code"].tolist(), access_token)
     all_df = all_df.merge(fin_df, on="code", how="left")
+
     all_df["multi_score"] = compute_multifactor_score(all_df)
-    log("✅ 멀티팩터 점수 계산 완료")
+    log("✅ 멀티팩터 점수 계산 완료 (섹터 중립화 적용)")
 
     # 추천: 시총 상위 200 유니버스에 포함되는 종목 중 점수 상위 TOP_RECO_N
     uni_df = all_df.merge(top200[["code"]], on="code", how="inner").copy()
