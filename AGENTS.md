@@ -5,17 +5,21 @@
 모든 결과는 Notion에 자동 업로드된다.
 
 ## 파일 구조
-- `수급.py` : 코스피 수급·재무 멀티팩터 점수 계산 + Notion 업로드 (KIS API)
+- `수급.py` : 코스피 수급·재무 멀티팩터 점수 계산 + Notion 업로드 (KIS API, 시총 상위 500 → TOP30)
+- `kosdaq.py` : 코스닥 수급·재무 멀티팩터 점수 계산 + Notion 업로드 (KIS API, 시총 상위 200 → TOP30, 수급.py 와 동일 로직)
 - `us_quant.py` : S&P 500 멀티팩터 퀀트 분석 (yfinance)
 - `youtube_report.py` : 3proTV 영상 자막 수집 → Gemini 분석 → Notion 업로드
+- `KOSPI재무데이터한투.csv` / `KOSDAQ재무데이터한투.csv` : 시장별 종목 마스터 (한투 .mst 에서 파싱)
 - `latest_results.csv` : 가장 최근 코스피 퀀트 결과 (종목 질문 시 이 파일 읽기)
-- `fin_ratio_cache.csv` : 재무비율 주간 캐시
+- `latest_kosdaq_results.csv` : 가장 최근 코스닥 퀀트 결과
+- `fin_ratio_cache.csv` / `kosdaq_fin_ratio_cache.csv` : 시장별 재무비율 주간 캐시
 - `us_fin_cache.csv` : US 재무비율 주간 캐시
+- `kospi_score_history.csv` / `kosdaq_score_history.csv` / `us_score_history.csv` : 5일 EMA 평탄화용 점수 이력
 - `processed_videos.json` : 이미 처리한 YouTube 영상 ID 목록
 - `notion_daily_pages.json` : 날짜별 Notion 페이지 ID 캐시
 
 ## 자동화 스케줄 (cron + launchd)
-- 코스피 퀀트 : 평일 17:30 KST (GitHub Actions)
+- 코스피 + 코스닥 퀀트 : 평일 17:30 KST (GitHub Actions, 동일 워크플로에서 순차 실행)
 - US 퀀트 : 매일 07:00 KST (GitHub Actions)
 - YouTube 분석 : 10분마다 (로컬 cron + launchd RunAtLoad)
 - git pull : 30분마다 (로컬 cron)
@@ -55,8 +59,9 @@
 - 크래시 시 수동 삭제: `rm youtube_report.lock`
 
 ## Notion 구조
-- 코스피 추천종목 : `3324a00632f880fbb014d766d87a1079` 하위에 날짜별 페이지
-- US 추천종목 : 동일 부모 페이지
+- 코스피 추천종목 : `3324a00632f880fbb014d766d87a1079` 하위에 날짜별 페이지 (제목: `📊 {date} 추천종목`)
+- 코스닥 추천종목 : 동일 부모 페이지 (제목: `🇰🇷 {date} KOSDAQ 추천종목`)
+- US 추천종목 : 동일 부모 페이지 (제목: `🇺🇸 {date} US 추천종목`)
 - YouTube 분석 : `3484a00632f880988b41e8b13d7fbb0b` 하위에 날짜별 페이지
   - 하루 1페이지, 영상별 토글 블록, 오래된 영상이 위/최신이 아래
 
