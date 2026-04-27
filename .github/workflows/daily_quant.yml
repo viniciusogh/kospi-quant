@@ -56,6 +56,14 @@ jobs:
           git diff --staged --quiet || git commit -m "Auto-update: latest_results.csv $(date +%Y-%m-%d)"
           git push
 
+      - name: Commit KOSPI score history CSV
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add kospi_score_history.csv
+          git diff --staged --quiet || git commit -m "Auto-update: kospi_score_history.csv $(date +%Y-%m-%d)"
+          git push
+
       - name: Upload Excel report as artifact
         uses: actions/upload-artifact@v4
         if: always()

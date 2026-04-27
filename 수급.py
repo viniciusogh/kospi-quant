@@ -40,6 +40,11 @@ FIN_RATIO_CACHE      = os.environ.get("FIN_RATIO_CACHE",
     os.path.join(_BASE_DIR, "fin_ratio_cache.csv"))
 FIN_RATIO_CACHE_DAYS = 7
 
+# 점수 시계열 평탄화 (단일 시점 노이즈 완화) - US 패턴 재사용
+KOSPI_SCORE_HISTORY = os.path.join(_BASE_DIR, "kospi_score_history.csv")
+EMA_SPAN            = 5     # 영업일 기준
+HISTORY_RETAIN_D    = 60    # 이력 보관 기간 (일)
+
 # 엑셀 출력 디렉토리 (로컬=Desktop, CI=스크립트 폴더)
 OUTPUT_DIR = os.environ.get("OUTPUT_DIR", os.path.expanduser("~/Desktop"))
 
@@ -502,6 +507,70 @@ def compute_multifactor_score(df: pd.DataFrame) -> pd.Series:
 
 
 # ==========================
+# 점수 EMA 평탄화 + 순위 변동 (US 모듈과 동일 패턴, 종목코드 기준)
+# ==========================
+def load_score_history() -> pd.DataFrame:
+    if not os.path.exists(KOSPI_SCORE_HISTORY):
+        return pd.DataFrame(columns=["date", "code", "raw_score"])
+    return pd.read_csv(KOSPI_SCORE_HISTORY, parse_dates=["date"], dtype={"code": str})
+
+def smooth_with_ema(universe: pd.DataFrame, today: datetime) -> tuple[pd.Series, pd.DataFrame]:
+    """오늘 raw_score를 history에 누적하고, 종목코드별 EMA 점수를 반환.
+
+    첫 실행 시 history가 비어 있어도 EMA = raw_score 로 자연 폴백.
+    같은 날 재실행해도 안전 (today 행 덮어씀).
+    """
+    history = load_score_history()
+    today_ts = pd.Timestamp(today.date())
+
+    today_df = pd.DataFrame({
+        "date":      today_ts,
+        "code":      universe["code"].values,
+        "raw_score": universe["raw_score"].values,
+    })
+
+    history = history[history["date"] != today_ts]
+    history = (today_df if history.empty
+               else pd.concat([history, today_df], ignore_index=True))
+    history = history.sort_values(["code", "date"])
+
+    history["smoothed"] = history.groupby("code")["raw_score"].transform(
+        lambda x: x.ewm(span=EMA_SPAN, adjust=False).mean()
+    )
+
+    cutoff  = today_ts - pd.Timedelta(days=HISTORY_RETAIN_D)
+    history = history[history["date"] >= cutoff]
+
+    smoothed_today = (history[history["date"] == today_ts]
+                      .set_index("code")["smoothed"])
+    return smoothed_today, history
+
+def compute_rank_change(history: pd.DataFrame) -> dict:
+    """종목코드별 (어제 순위 - 오늘 순위). + = 상승, None = 신규."""
+    if history["date"].nunique() < 2:
+        return {}
+
+    dates_sorted = sorted(history["date"].unique())
+    today_d, prev_d = dates_sorted[-1], dates_sorted[-2]
+
+    def rank_map(d):
+        rows = history[history["date"] == d].sort_values("smoothed", ascending=False)
+        return {c: i + 1 for i, c in enumerate(rows["code"].tolist())}
+
+    today_r = rank_map(today_d)
+    prev_r  = rank_map(prev_d)
+    return {c: (prev_r.get(c) - r if c in prev_r else None)
+            for c, r in today_r.items()}
+
+def fmt_rank_change(change) -> str:
+    if change is None or pd.isna(change):
+        return "🆕"
+    if change == 0:
+        return "—"
+    return f"📈+{int(change)}" if change > 0 else f"📉{int(change)}"
+
+
+# ==========================
 # 한국어 컬럼명(최종 출력용)
 # ==========================
 def to_korean_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -537,6 +606,7 @@ def to_korean_columns(df: pd.DataFrame) -> pd.DataFrame:
         "multi_score": "멀티팩터점수",
         "jeong_baeyeol": "정배열",
         "industry": "섹터",
+        "rank_change": "전일대비",
     }
     return df.rename(columns={c: col_map.get(c, c) for c in df.columns})
 
@@ -552,7 +622,7 @@ def upload_to_notion(reco_kor: pd.DataFrame):
     }
     today_str = datetime.now(KST).strftime("%Y-%m-%d")
 
-    col_labels = ["랭킹", "종목코드", "종목명", "섹터", "정배열", "멀티팩터점수", "수급강화점수",
+    col_labels = ["랭킹", "전일대비", "종목코드", "종목명", "섹터", "정배열", "멀티팩터점수", "수급강화점수",
                   "시가총액(억)", "외국인순매수(백만)", "기관순매수(백만)",
                   "PER", "PBR", "ROE(%)", "부채비율(%)", "매출증가율(%)", "영업이익증가율(%)"]
 
@@ -579,6 +649,7 @@ def upload_to_notion(reco_kor: pd.DataFrame):
             sector_val = row.get("섹터")
             rows.append({"type": "table_row", "table_row": {"cells": [
                 cell(int(row.get("랭킹", ""))),
+                cell(fmt_rank_change(row.get("전일대비"))),
                 cell(row.get("종목코드", "")),
                 cell(row.get("종목명", "")),
                 cell(sector_val if (sector_val and not pd.isna(sector_val)) else "-"),
@@ -768,8 +839,19 @@ def main():
     fin_df = load_or_fetch_fin_ratios(all_df["code"].tolist(), access_token)
     all_df = all_df.merge(fin_df, on="code", how="left")
 
-    all_df["multi_score"] = compute_multifactor_score(all_df)
-    log("✅ 멀티팩터 점수 계산 완료 (섹터 중립화 적용)")
+    all_df["raw_score"] = compute_multifactor_score(all_df)
+    log("✅ 멀티팩터 raw 점수 계산 완료 (섹터 중립화 적용)")
+
+    # 5일 EMA 평탄화 (이력 누적, 단일 시점 노이즈 완화)
+    today_dt = datetime.now(KST)
+    smoothed, history_updated = smooth_with_ema(all_df, today_dt)
+    all_df["multi_score"] = all_df["code"].map(smoothed).fillna(all_df["raw_score"])
+    history_updated.to_csv(KOSPI_SCORE_HISTORY, index=False)
+    n_days = history_updated["date"].nunique()
+    log(f"✅ EMA 평탄화 (span={EMA_SPAN}일, 누적 이력 {n_days}일치)")
+
+    # 어제 대비 순위 변동
+    rank_changes = compute_rank_change(history_updated)
 
     # 추천: 시총 상위 200 유니버스에 포함되는 종목 중 점수 상위 TOP_RECO_N
     uni_df = all_df.merge(top200[["code"]], on="code", how="inner").copy()
@@ -777,6 +859,7 @@ def main():
     uni_df.reset_index(drop=True, inplace=True)
     uni_df["rank"] = np.arange(1, len(uni_df) + 1)
     reco_df = uni_df.head(TOP_RECO_N).copy()
+    reco_df["rank_change"] = reco_df["code"].map(rank_changes)
 
     log(f"✅ 추천 유니버스(시총상위200) 내 유효 종목: {len(uni_df)}개")
     log(f"✅ 추천 종목(상위 {TOP_RECO_N}) 생성 완료")
