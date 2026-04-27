@@ -5,8 +5,10 @@ import pandas as pd
 from io import StringIO
 import numpy as np
 import yfinance as yf
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+KST = timezone(timedelta(hours=9))   # GitHub Actions 러너는 UTC, 모든 날짜·시각은 KST 기준
 
 # ==========================
 # 환경설정
@@ -33,7 +35,7 @@ HISTORY_RETAIN_D  = 60    # 이력 보관 기간 (일)
 # 유틸
 # ==========================
 def log(msg: str):
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+    print(f"[{datetime.now(KST).strftime('%H:%M:%S')}] {msg}")
 
 # ==========================
 # S&P 500 종목 리스트 (Wikipedia)
@@ -273,11 +275,11 @@ def compute_rank_change(history: pd.DataFrame) -> dict:
             for t, r in today_r.items()}
 
 def fmt_rank_change(change) -> str:
-    if change is None:
+    if change is None or pd.isna(change):
         return "🆕"
     if change == 0:
         return "—"
-    return f"📈+{change}" if change > 0 else f"📉{change}"
+    return f"📈+{int(change)}" if change > 0 else f"📉{int(change)}"
 
 # ==========================
 # Notion 업로드
@@ -288,7 +290,7 @@ def upload_us_to_notion(reco_df: pd.DataFrame):
         "Content-Type":   "application/json",
         "Notion-Version": "2022-06-28",
     }
-    today_str = datetime.today().strftime("%Y-%m-%d")
+    today_str = datetime.now(KST).strftime("%Y-%m-%d")
 
     col_labels = ["랭킹", "전일대비", "티커", "종목명", "섹터", "정배열", "멀티팩터점수",
                   "3M수익률(%)", "시가총액(B$)", "PER", "PBR",
@@ -364,7 +366,7 @@ def upload_us_to_notion(reco_df: pd.DataFrame):
 # 메인
 # ==========================
 def main():
-    today_str = datetime.today().strftime("%Y-%m-%d")
+    today_str = datetime.now(KST).strftime("%Y-%m-%d")
     log(f"▶ US 퀀트 분석 시작 ({today_str})")
 
     # S&P 500 종목 리스트
@@ -400,7 +402,7 @@ def main():
     log("✅ 멀티팩터 raw 점수 계산 완료")
 
     # 5일 EMA 평탄화 (이력 누적, 단일 시점 노이즈 완화)
-    today_dt = datetime.today()
+    today_dt = datetime.now(KST)
     smoothed, history_updated = smooth_with_ema(universe, today_dt)
     universe["multi_score"] = universe["ticker"].map(smoothed).fillna(universe["raw_score"])
     history_updated.to_csv(US_SCORE_HISTORY, index=False)

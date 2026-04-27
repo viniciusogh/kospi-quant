@@ -4,8 +4,10 @@ import numpy as np
 import time
 import random
 import os
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+KST = timezone(timedelta(hours=9))   # GitHub Actions 러너는 UTC, 모든 날짜·시각은 KST 기준
 
 # ==========================
 # 환경설정 (로컬 fallback + GitHub Secrets 겸용)
@@ -45,7 +47,7 @@ OUTPUT_DIR = os.environ.get("OUTPUT_DIR", os.path.expanduser("~/Desktop"))
 # 로그 유틸
 # ==========================
 def _ts() -> str:
-    return datetime.now().strftime("%H:%M:%S")
+    return datetime.now(KST).strftime("%H:%M:%S")
 
 def log(msg: str):
     print(f"[{_ts()}] {msg}")
@@ -282,7 +284,7 @@ def get_daily_prices(code: str, access_token: str, days: int = 160) -> list:
     """FHKST03010100: 일별 종가 리스트 반환 (오래된 순서)"""
     from datetime import timedelta
     url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
-    end_dt   = datetime.today()
+    end_dt   = datetime.now(KST)
     start_dt = end_dt - timedelta(days=days)
     headers = {
         "authorization": f"Bearer {access_token}",
@@ -385,11 +387,11 @@ def load_or_fetch_fin_ratios(codes: list, access_token: str) -> pd.DataFrame:
     """
     # 실적 시즌(1·2·4·5·7·8·10·11월)은 매일 갱신, 비시즌은 7일 캐시
     EARNINGS_MONTHS = {1, 2, 4, 5, 7, 8, 10, 11}
-    cache_days = 1 if datetime.now().month in EARNINGS_MONTHS else FIN_RATIO_CACHE_DAYS
+    cache_days = 1 if datetime.now(KST).month in EARNINGS_MONTHS else FIN_RATIO_CACHE_DAYS
 
     if os.path.exists(FIN_RATIO_CACHE):
         age_days = (time.time() - os.path.getmtime(FIN_RATIO_CACHE)) / 86400
-        season = "실적시즌" if datetime.now().month in EARNINGS_MONTHS else "비시즌"
+        season = "실적시즌" if datetime.now(KST).month in EARNINGS_MONTHS else "비시즌"
         if age_days < cache_days:
             log(f"✅ 재무비율 캐시 재사용 ({season} / 나이: {age_days:.1f}일 / 만료: {cache_days}일)")
             return pd.read_csv(FIN_RATIO_CACHE, dtype={"code": str})
@@ -522,7 +524,7 @@ def upload_to_notion(reco_kor: pd.DataFrame):
         "Content-Type": "application/json",
         "Notion-Version": "2022-06-28",
     }
-    today_str = datetime.today().strftime("%Y-%m-%d")
+    today_str = datetime.now(KST).strftime("%Y-%m-%d")
 
     col_labels = ["랭킹", "종목코드", "종목명", "정배열", "멀티팩터점수", "수급강화점수",
                   "시가총액(억)", "외국인순매수(백만)", "기관순매수(백만)",
@@ -761,7 +763,7 @@ def main():
     # ------------------------------------
     # 4) 엑셀 저장 규칙
     # ------------------------------------
-    today_str = datetime.today().strftime("%Y-%m-%d")
+    today_str = datetime.now(KST).strftime("%Y-%m-%d")
     output_file = os.path.join(OUTPUT_DIR, f"{today_str}_국내퀀트데이터.xlsx")
 
     # 시트: 전체 종목 / 추천 종목
