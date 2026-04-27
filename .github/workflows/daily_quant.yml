@@ -39,7 +39,15 @@ jobs:
           restore-keys: |
             fin-ratio-
 
-      - name: Run quant analysis
+      - name: Restore KOSDAQ financial ratio cache
+        uses: actions/cache@v4
+        with:
+          path: kosdaq_fin_ratio_cache.csv
+          key: kosdaq-fin-ratio-${{ github.run_id }}
+          restore-keys: |
+            kosdaq-fin-ratio-
+
+      - name: Run KOSPI quant analysis
         env:
           APP_KEY: ${{ secrets.APP_KEY }}
           APP_SECRET: ${{ secrets.APP_SECRET }}
@@ -47,6 +55,15 @@ jobs:
           NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
           OUTPUT_DIR: ${{ github.workspace }}
         run: python 수급.py
+
+      - name: Run KOSDAQ quant analysis
+        env:
+          APP_KEY: ${{ secrets.APP_KEY }}
+          APP_SECRET: ${{ secrets.APP_SECRET }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
+          OUTPUT_DIR: ${{ github.workspace }}
+        run: python kosdaq.py
 
       - name: Commit latest results CSV
         run: |
@@ -64,10 +81,20 @@ jobs:
           git diff --staged --quiet || git commit -m "Auto-update: kospi_score_history.csv $(date +%Y-%m-%d)"
           git push
 
-      - name: Upload Excel report as artifact
+      - name: Commit KOSDAQ score history + latest results CSV
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add kosdaq_score_history.csv latest_kosdaq_results.csv
+          git diff --staged --quiet || git commit -m "Auto-update: kosdaq results $(date +%Y-%m-%d)"
+          git push
+
+      - name: Upload Excel reports as artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: quant-report-${{ github.run_id }}
-          path: '*_국내퀀트데이터.xlsx'
+          path: |
+            *_국내퀀트데이터.xlsx
+            *_코스닥퀀트데이터.xlsx
           retention-days: 30
