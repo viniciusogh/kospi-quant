@@ -55,7 +55,8 @@
 
 ### Lock 파일
 - `youtube_report.lock` : 10분마다 실행되므로 중복 방지 필수
-- stale lock (2시간 이상) 자동 제거 로직 내장됨
+- stale lock (30분 이상) 자동 제거 로직 내장됨 — `LOCK_MAX_AGE_HOURS = 0.5`
+- 정상 실행은 1~2분 안에 끝나므로 30분 마진은 충분
 - 크래시 시 수동 삭제: `rm youtube_report.lock`
 
 ## Notion 구조

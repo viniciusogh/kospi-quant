@@ -25,7 +25,7 @@ COOKIES_FILE         = os.path.join(_BASE_DIR, "youtube_cookies.txt")
 LOCK_FILE            = os.path.join(_BASE_DIR, "youtube_report.lock")  # 중복 실행 방지
 MAX_TRANSCRIPT_CHARS = 25000
 MAX_VIDEOS_PER_RUN   = 15    # 유료 전환 후 제한 해제
-LOCK_MAX_AGE_HOURS   = 2     # lock 파일 최대 유효 시간
+LOCK_MAX_AGE_HOURS   = 0.5   # lock 파일 최대 유효 시간 (30분 — 정상 실행은 1~2분 내 완료)
 
 KST = timezone(timedelta(hours=9))
 
