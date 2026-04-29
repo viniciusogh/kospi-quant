@@ -64,12 +64,13 @@ def get_sp500_tickers() -> list[dict]:
 # ==========================
 # 가격 데이터 다운로드: 3개월 모멘텀 + 정배열 용 종가 로우데이터
 # ==========================
-def get_price_data(tickers: list[str]) -> tuple[dict, dict]:
+def get_price_data(tickers: list[str]) -> tuple[dict, dict, dict]:
     """
     yf.download()로 일괄 다운로드
-    반환: (momentum_dict, prices_dict)
-      - momentum_dict: {ticker: 3개월 수익률}
-      - prices_dict:   {ticker: pd.Series 종가 시계열} ← 정배열 계산용
+    반환: (momentum_dict, prices_dict, prdy_ctrt_dict)
+      - momentum_dict:   {ticker: 3개월 수익률 (소수)}
+      - prices_dict:     {ticker: pd.Series 종가 시계열} ← 정배열 계산용
+      - prdy_ctrt_dict:  {ticker: 전일 대비 등락률(%)} ← Notion 표시용
     """
     log(f"▶ 가격 데이터 다운로드 시작 ({len(tickers)}개 종목)")
     try:
@@ -78,21 +79,24 @@ def get_price_data(tickers: list[str]) -> tuple[dict, dict]:
             progress=False, auto_adjust=True,
             group_by="ticker", threads=True,
         )
-        momentum    = {}
-        prices_dict = {}
+        momentum       = {}
+        prices_dict    = {}
+        prdy_ctrt_dict = {}
         for t in tickers:
             try:
                 prices = (raw['Close'] if len(tickers) == 1 else raw[t]['Close']).dropna()
                 prices_dict[t] = prices
                 if len(prices) >= 60:
                     momentum[t] = float(prices.iloc[-1] / prices.iloc[-63] - 1)
+                if len(prices) >= 2:
+                    prdy_ctrt_dict[t] = float(prices.iloc[-1] / prices.iloc[-2] - 1) * 100
             except Exception:
                 pass
-        log(f"✅ 다운로드 완료: 모멘텀 {len(momentum)}개 / 종가데이터 {len(prices_dict)}개")
-        return momentum, prices_dict
+        log(f"✅ 다운로드 완료: 모멘텀 {len(momentum)}개 / 종가데이터 {len(prices_dict)}개 / 일일등락 {len(prdy_ctrt_dict)}개")
+        return momentum, prices_dict, prdy_ctrt_dict
     except Exception as e:
         log(f"❌ 가격 다운로드 실패: {e}")
-        return {}, {}
+        return {}, {}, {}
 
 
 def is_ma_aligned(prices: pd.Series) -> bool:
@@ -281,6 +285,13 @@ def fmt_rank_change(change) -> str:
         return "—"
     return f"📈+{int(change)}" if change > 0 else f"📉{int(change)}"
 
+def fmt_pct(v) -> str:
+    """전일 대비 가격 등락률(%) 포맷. 0/None/NaN 처리."""
+    if v is None or pd.isna(v):
+        return "-"
+    sign = "+" if v > 0 else ""
+    return f"{sign}{float(v):.2f}%"
+
 # ==========================
 # Notion 업로드
 # ==========================
@@ -292,7 +303,7 @@ def upload_us_to_notion(reco_df: pd.DataFrame):
     }
     today_str = datetime.now(KST).strftime("%Y-%m-%d")
 
-    col_labels = ["랭킹", "전일대비", "티커", "종목명", "섹터", "정배열", "멀티팩터점수",
+    col_labels = ["랭킹", "순위변동", "전일등락(%)", "티커", "종목명", "섹터", "정배열", "멀티팩터점수",
                   "3M수익률(%)", "시가총액(B$)", "PER", "PBR",
                   "ROE(%)", "부채비율(%)"]
 
@@ -318,6 +329,7 @@ def upload_us_to_notion(reco_df: pd.DataFrame):
         rows.append({"type": "table_row", "table_row": {"cells": [
             cell(rank),
             cell(fmt_rank_change(row.get("rank_change"))),
+            cell(fmt_pct(row.get("prdy_ctrt"))),
             cell(row.get("ticker", "")),
             cell(row.get("name", "")[:30]),
             cell(row.get("sector", "")[:20]),
@@ -381,7 +393,7 @@ def main():
     log(f"✅ S&P 500 종목 {len(tickers)}개 로드")
 
     # 가격 데이터 (모멘텀 + 정배열용 종가 데이터 동시 확보)
-    momentum, prices_dict = get_price_data(tickers)
+    momentum, prices_dict, prdy_ctrt_dict = get_price_data(tickers)
 
     # 재무 데이터 (캐시 or 새로 조회)
     fin_df = load_or_fetch_us_fundamentals(tickers)
@@ -415,6 +427,7 @@ def main():
     # 상위 TOP_RECO_N
     reco_df = universe.sort_values("multi_score", ascending=False).head(TOP_RECO_N).copy()
     reco_df["rank_change"] = reco_df["ticker"].map(rank_changes)
+    reco_df["prdy_ctrt"] = reco_df["ticker"].map(prdy_ctrt_dict)
 
     # 정배열 확인 (이미 다운로드된 가격 데이터 재사용, 추가 API 없음)
     reco_df["ma_aligned"] = reco_df["ticker"].apply(

@@ -242,6 +242,7 @@ def get_valuation_info(code: str, access_token: str):
     - per: PER
     - eps: EPS
     - bstp_kor_isnm: 업종 한글명 (섹터 중립화·Notion 표시용)
+    - prdy_ctrt: 전일 대비율(%) (Notion 표시용, 0% 도 유효값)
     """
     url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-price"
     headers = {
@@ -258,7 +259,7 @@ def get_valuation_info(code: str, access_token: str):
     r = safe_request_get(url, headers, params, max_retry=3, timeout=3)
     polite_sleep()
     if r is None:
-        return None, None, None, None, None
+        return None, None, None, None, None, None
 
     try:
         data = r.json().get("output", {})
@@ -271,20 +272,28 @@ def get_valuation_info(code: str, access_token: str):
                     if industry_raw and str(industry_raw).strip() not in ("", "0")
                     else None)
 
-        # 숫자 변환 시도, 실패하면 None
+        # 숫자 변환 시도, 실패하면 None ("0" 도 None 처리: PER/PBR/EPS 에서는 결측 의미)
         def _safe(v):
             try:
                 return float(v) if v not in (None, "", "0", "0.0") else None
             except Exception:
                 return None
 
+        # 등락률은 0 도 유효값 (가격 변동 없음)
+        def _safe_pct(v):
+            try:
+                return float(v) if v not in (None, "") else None
+            except Exception:
+                return None
+
         per = _safe(per)
         eps = _safe(eps)
         pbr = _safe(pbr)
+        prdy_ctrt = _safe_pct(data.get("prdy_ctrt"))
 
-        return mktcap, per, eps, pbr, industry
+        return mktcap, per, eps, pbr, industry, prdy_ctrt
     except Exception:
-        return None, None, None, None, None
+        return None, None, None, None, None, None
 
 # ==========================
 # 일별 종가 조회 + 이동평균선 정배열 확인
@@ -571,6 +580,13 @@ def fmt_rank_change(change) -> str:
         return "—"
     return f"📈+{int(change)}" if change > 0 else f"📉{int(change)}"
 
+def fmt_pct(v) -> str:
+    """전일 대비 가격 등락률(%) 포맷. 0/None/NaN 처리."""
+    if v is None or pd.isna(v):
+        return "-"
+    sign = "+" if v > 0 else ""
+    return f"{sign}{float(v):.2f}%"
+
 
 # ==========================
 # 한국어 컬럼명(최종 출력용)
@@ -608,7 +624,8 @@ def to_korean_columns(df: pd.DataFrame) -> pd.DataFrame:
         "multi_score": "멀티팩터점수",
         "jeong_baeyeol": "정배열",
         "industry": "섹터",
-        "rank_change": "전일대비",
+        "rank_change": "순위변동",
+        "prdy_ctrt": "전일등락(%)",
     }
     return df.rename(columns={c: col_map.get(c, c) for c in df.columns})
 
@@ -624,7 +641,7 @@ def upload_to_notion(reco_kor: pd.DataFrame):
     }
     today_str = datetime.now(KST).strftime("%Y-%m-%d")
 
-    col_labels = ["랭킹", "전일대비", "종목코드", "종목명", "섹터", "정배열", "멀티팩터점수", "수급강화점수",
+    col_labels = ["랭킹", "순위변동", "전일등락(%)", "종목코드", "종목명", "섹터", "정배열", "멀티팩터점수", "수급강화점수",
                   "시가총액(억)", "외국인순매수(백만)", "기관순매수(백만)",
                   "PER", "PBR", "ROE(%)", "부채비율(%)", "매출증가율(%)", "영업이익증가율(%)"]
 
@@ -651,7 +668,8 @@ def upload_to_notion(reco_kor: pd.DataFrame):
             sector_val = row.get("섹터")
             rows.append({"type": "table_row", "table_row": {"cells": [
                 cell(int(row.get("랭킹", ""))),
-                cell(fmt_rank_change(row.get("전일대비"))),
+                cell(fmt_rank_change(row.get("순위변동"))),
+                cell(fmt_pct(row.get("전일등락(%)"))),
                 cell(row.get("종목코드", "")),
                 cell(row.get("종목명", "")),
                 cell(sector_val if (sector_val and not pd.isna(sector_val)) else "-"),
@@ -780,24 +798,26 @@ def main():
     epss = [None] * total
     pbrs = [None] * total
     industries = [None] * total
+    prdy_ctrts = [None] * total
     rows = list(base_df.reset_index(drop=True).iterrows())
 
     def cap_worker(pos_and_row):
         pos, row = pos_and_row
         code = row["단축코드"]
-        mktcap, per, eps, pbr, industry = get_valuation_info(code, access_token)
+        mktcap, per, eps, pbr, industry, prdy_ctrt = get_valuation_info(code, access_token)
         time.sleep(0.15)  # 호출 매너
-        return pos, mktcap, per, eps, pbr, industry
+        return pos, mktcap, per, eps, pbr, industry, prdy_ctrt
 
     with ThreadPoolExecutor(max_workers=WORKERS_MKTCAP) as ex:
         futures = {ex.submit(cap_worker, pr): pr[0] for pr in rows}
         for cnt, future in enumerate(as_completed(futures), start=1):
-            pos, cap, per, eps, pbr, industry = future.result()
+            pos, cap, per, eps, pbr, industry, prdy_ctrt = future.result()
             caps[pos] = cap
             pers[pos] = per
             epss[pos] = eps
             pbrs[pos] = pbr
             industries[pos] = industry
+            prdy_ctrts[pos] = prdy_ctrt
 
             elapsed = time.time() - start_cap
             speed = cnt / elapsed if elapsed > 0 else 0
@@ -816,6 +836,7 @@ def main():
     cap_df["eps"] = epss
     cap_df["pbr"] = pbrs
     cap_df["industry"] = industries
+    cap_df["prdy_ctrt"] = prdy_ctrts
     cap_df.rename(columns={"단축코드": "code", "한글명": "name"}, inplace=True)
 
     # 시총 결측/0 제거 후 상위 200
@@ -831,7 +852,7 @@ def main():
     # 3) 전체 점수표에 시총/밸류 붙이기 + 추천 N개 뽑기
     # ------------------------------------
     all_df = score_df.merge(
-        cap_df[["code", "market_cap", "per", "eps", "pbr", "industry"]],
+        cap_df[["code", "market_cap", "per", "eps", "pbr", "industry", "prdy_ctrt"]],
         on="code", how="left",
     )
 
