@@ -7,6 +7,7 @@
 ## 파일 구조
 - `수급.py` : 코스피 수급·재무 멀티팩터 점수 계산 + Notion 업로드 (KIS API, 시총 상위 500 → TOP30)
 - `kosdaq.py` : 코스닥 수급·재무 멀티팩터 점수 계산 + Notion 업로드 (KIS API, 시총 상위 200 → TOP30, 수급.py 와 동일 로직)
+- `quality.py` : 코스피 Quality 모델 (ROE 0.40 + 1/PER 0.20 + 1/PBR 0.20 + 저부채 0.20). 수급/모멘텀/성장 미반영. 시총 상위 200 → TOP30. 자본잠식·부채>300% 종목 사전 제외, 매출 +100% 이상은 분할의심으로 ROE 신뢰성 0 처리. fin_ratio_cache.csv 공유 (수급 호출은 생략)
 - `us_quant.py` : S&P 500 멀티팩터 퀀트 분석 (yfinance)
 - `youtube_report.py` : 3proTV 영상 자막 수집 → Gemini 분석 → Notion 업로드
 - `KOSPI재무데이터한투.csv` / `KOSDAQ재무데이터한투.csv` : 시장별 종목 마스터 (한투 .mst 에서 파싱)
@@ -63,6 +64,7 @@
 - 코스피 추천종목 : `3324a00632f880fbb014d766d87a1079` 하위에 날짜별 페이지 (제목: `📊 {date} 추천종목`)
 - 코스닥 추천종목 : 동일 부모 페이지 (제목: `🇰🇷 {date} KOSDAQ 추천종목`)
 - US 추천종목 : 동일 부모 페이지 (제목: `🇺🇸 {date} US 추천종목`)
+- KOSPI Quality 추천종목 : 동일 부모 페이지 (제목: `💎 {date} KOSPI Quality 추천종목`)
 - YouTube 분석 : `3484a00632f880988b41e8b13d7fbb0b` 하위에 날짜별 페이지
   - 하루 1페이지, 영상별 토글 블록, 오래된 영상이 위/최신이 아래
 

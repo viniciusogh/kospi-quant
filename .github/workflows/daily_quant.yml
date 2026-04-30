@@ -65,6 +65,15 @@ jobs:
           OUTPUT_DIR: ${{ github.workspace }}
         run: python kosdaq.py
 
+      - name: Run KOSPI Quality analysis (별도 모델, fin_ratio_cache 공유)
+        env:
+          APP_KEY: ${{ secrets.APP_KEY }}
+          APP_SECRET: ${{ secrets.APP_SECRET }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
+          OUTPUT_DIR: ${{ github.workspace }}
+        run: python quality.py
+
       - name: Commit latest results CSV
         run: |
           git config user.name "github-actions[bot]"
@@ -89,6 +98,14 @@ jobs:
           git diff --staged --quiet || git commit -m "Auto-update: kosdaq results $(date +%Y-%m-%d)"
           git push
 
+      - name: Commit Quality score history + latest results CSV
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add quality_score_history.csv latest_quality_results.csv
+          git diff --staged --quiet || git commit -m "Auto-update: quality results $(date +%Y-%m-%d)"
+          git push
+
       - name: Upload Excel reports as artifact
         uses: actions/upload-artifact@v4
         if: always()
@@ -97,4 +114,5 @@ jobs:
           path: |
             *_국내퀀트데이터.xlsx
             *_코스닥퀀트데이터.xlsx
+            *_KOSPI_Quality퀀트데이터.xlsx
           retention-days: 30
