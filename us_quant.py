@@ -303,7 +303,7 @@ def upload_us_to_notion(reco_df: pd.DataFrame):
     }
     today_str = datetime.now(KST).strftime("%Y-%m-%d")
 
-    col_labels = ["랭킹", "순위변동", "전일등락(%)", "티커", "종목명", "섹터", "정배열", "멀티팩터점수",
+    col_labels = ["랭킹", "순위변동", "당일등락(%)", "티커", "종목명", "섹터", "정배열", "멀티팩터점수",
                   "3M수익률(%)", "시가총액(B$)", "PER", "PBR",
                   "ROE(%)", "부채비율(%)"]
 

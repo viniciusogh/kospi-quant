@@ -625,7 +625,7 @@ def to_korean_columns(df: pd.DataFrame) -> pd.DataFrame:
         "jeong_baeyeol": "정배열",
         "industry": "섹터",
         "rank_change": "순위변동",
-        "prdy_ctrt": "전일등락(%)",
+        "prdy_ctrt": "당일등락(%)",
     }
     return df.rename(columns={c: col_map.get(c, c) for c in df.columns})
 
@@ -641,7 +641,7 @@ def upload_to_notion(reco_kor: pd.DataFrame):
     }
     today_str = datetime.now(KST).strftime("%Y-%m-%d")
 
-    col_labels = ["랭킹", "순위변동", "전일등락(%)", "종목코드", "종목명", "섹터", "정배열", "멀티팩터점수", "수급강화점수",
+    col_labels = ["랭킹", "순위변동", "당일등락(%)", "종목코드", "종목명", "섹터", "정배열", "멀티팩터점수", "수급강화점수",
                   "시가총액(억)", "외국인순매수(백만)", "기관순매수(백만)",
                   "PER", "PBR", "ROE(%)", "부채비율(%)", "매출증가율(%)", "영업이익증가율(%)"]
 
@@ -669,7 +669,7 @@ def upload_to_notion(reco_kor: pd.DataFrame):
             rows.append({"type": "table_row", "table_row": {"cells": [
                 cell(int(row.get("랭킹", ""))),
                 cell(fmt_rank_change(row.get("순위변동"))),
-                cell(fmt_pct(row.get("전일등락(%)"))),
+                cell(fmt_pct(row.get("당일등락(%)"))),
                 cell(row.get("종목코드", "")),
                 cell(row.get("종목명", "")),
                 cell(sector_val if (sector_val and not pd.isna(sector_val)) else "-"),
