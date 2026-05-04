@@ -1,10 +1,42 @@
 fin_ratio_cache.csv
+kosdaq_fin_ratio_cache.csv
+us_fin_cache.csv
 youtube_cookies.txt
 processed_videos.json
 notion_daily_pages.json
 youtube_report.lock
-*_국내퀀트데이터.xlsx
 __pycache__/
 *.pyc
 .DS_Store
-quant_cron.log
+
+# 시크릿 (절대 커밋 X)
+.env
+.env.*
+!.env.example
+
+# 일별 출력 파일 (root)
+/202?-*.xlsx
+/202?-*.csv
+
+# 원본 데이터
+NAS.xlsx
+NYSE.xlsx
+*.cod
+*.zip
+KOSPI_재무데이터_*.xlsx
+KOSDAQ_재무데이터_*.xlsx
+해외주식상세.xlsx
+
+# 로그
+*.log
+*_cron.log
+*.lock
+
+# Excel 임시 파일 (Excel 열어둘 때 생기는 lock)
+~$*.xlsx
+~$*.xls
+
+# raw 데이터 파일 (원본, 너무 커서 GitHub 안 맞음)
+국내주식 *.xlsx
+해외주식 *.xlsx
+youtube_daily_report/reports/

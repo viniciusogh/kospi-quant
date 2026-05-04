@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.quantscore.dailyreport</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <!-- python3 경로: `which python3` 로 확인 후 수정 -->
+        <string>/usr/bin/python3</string>
+        <string>/Users/vinicius/Desktop/퀀트스코어/youtube_daily_report/main.py</string>
+    </array>
+
+    <!-- 매일 KST 22:00 (UTC 13:00) 실행 -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>13</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!-- 로그 저장 경로 -->
+    <key>StandardOutPath</key>
+    <string>/Users/vinicius/Desktop/퀀트스코어/youtube_daily_report/cron.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/vinicius/Desktop/퀀트스코어/youtube_daily_report/cron_error.log</string>
+
+    <!-- 실행 디렉토리 -->
+    <key>WorkingDirectory</key>
+    <string>/Users/vinicius/Desktop/퀀트스코어/youtube_daily_report</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

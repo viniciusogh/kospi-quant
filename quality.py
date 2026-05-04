@@ -896,6 +896,20 @@ def main():
     log(f"✅ latest_quality_results.csv 저장: {csv_path}")
 
     # ------------------------------------
+    # 4.7) 교집합용 CSV 저장 (시총 상위 200 유니버스 내 상위 100개)
+    # ------------------------------------
+    INTER_N = 100
+    reco_100 = uni_df.head(INTER_N).copy()
+    reco_100["rank_change"] = reco_100["code"].map(rank_changes)
+    reco_100["jeong_baeyeol"] = reco_100["code"].map(jb_map)
+    reco_100_kor = to_korean_columns(reco_100)
+    reco_100_kor["랭킹"] = np.arange(1, len(reco_100_kor) + 1)
+    reco_100_kor.drop(columns=["rank"], inplace=True, errors="ignore")
+    reco_csv_path = os.path.join(_BASE_DIR, "latest_quality_reco.csv")
+    reco_100_kor.to_csv(reco_csv_path, index=False, encoding="utf-8-sig")
+    log(f"✅ Quality 교집합용 CSV 저장: {INTER_N}개 ({reco_csv_path})")
+
+    # ------------------------------------
     # 5) Notion 업로드
     # ------------------------------------
     log("▶ Notion 업로드 시작")
