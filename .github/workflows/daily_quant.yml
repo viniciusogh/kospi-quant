@@ -74,6 +74,13 @@ jobs:
           OUTPUT_DIR: ${{ github.workspace }}
         run: python quality.py
 
+      - name: Run intersection (수급 × Quality 교집합)
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
+        run: python intersection.py
+        continue-on-error: true   # 교집합 없을 때도 워크플로 종료 안 됨
+
       - name: Commit latest results CSV
         run: |
           git config user.name "github-actions[bot]"

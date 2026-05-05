@@ -632,6 +632,69 @@ def to_korean_columns(df: pd.DataFrame) -> pd.DataFrame:
 # ==========================
 # Notion 업로드
 # ==========================
+def _get_or_create_date_page(date_str: str, headers: dict, root_parent_id: str) -> str:
+    """루트 부모 하위에 'YYYY-MM-DD' 날짜 페이지를 찾거나 만들어 ID 반환.
+    존재 X 시 새로 생성. 모든 카테고리 페이지를 이 날짜 페이지 하위에 둠."""
+    try:
+        r = requests.post(
+            "https://api.notion.com/v1/search", headers=headers, timeout=15,
+            json={"query": date_str, "filter": {"property": "object", "value": "page"}},
+        )
+        if r.status_code == 200:
+            target_parent = root_parent_id.replace("-", "")
+            for result in r.json().get("results", []):
+                p = result.get("parent", {})
+                if p.get("type") != "page_id":
+                    continue
+                if p.get("page_id", "").replace("-", "") != target_parent:
+                    continue
+                t_arr = result.get("properties", {}).get("title", {}).get("title", [])
+                actual = t_arr[0]["text"]["content"] if t_arr else ""
+                if actual.strip() == date_str.strip() and not result.get("archived", False):
+                    return result["id"]
+    except Exception:
+        pass
+    body = {
+        "parent": {"page_id": root_parent_id},
+        "properties": {"title": {"title": [{"text": {"content": date_str}}]}},
+    }
+    r = requests.post("https://api.notion.com/v1/pages", headers=headers, json=body, timeout=15)
+    if r.status_code == 200:
+        log(f"  📅 날짜 페이지 생성: {date_str}")
+        return r.json()["id"]
+    log(f"  ❌ 날짜 페이지 생성 실패: {r.text[:200]}")
+    return root_parent_id  # 실패 시 루트로 fallback
+
+
+def _archive_same_title_pages(title: str, headers: dict, parent_id: str):
+    """동일 제목 페이지가 부모 하위에 이미 있으면 archive — 중복 방지."""
+    try:
+        r = requests.post(
+            "https://api.notion.com/v1/search", headers=headers, timeout=15,
+            json={"query": title, "filter": {"property": "object", "value": "page"}},
+        )
+        if r.status_code != 200:
+            return
+        target_parent = parent_id.replace("-", "")
+        for result in r.json().get("results", []):
+            parent = result.get("parent", {})
+            if parent.get("type") != "page_id":
+                continue
+            if parent.get("page_id", "").replace("-", "") != target_parent:
+                continue
+            t_arr = result.get("properties", {}).get("title", {}).get("title", [])
+            actual = t_arr[0]["text"]["content"] if t_arr else ""
+            if actual.strip() == title.strip() and not result.get("archived", False):
+                page_id = result["id"]
+                requests.patch(
+                    f"https://api.notion.com/v1/pages/{page_id}",
+                    headers=headers, json={"archived": True}, timeout=15,
+                )
+                log(f"  기존 동일 제목 페이지 archive: {page_id}")
+    except Exception as e:
+        log(f"  기존 페이지 확인 중 오류 (무시): {e}")
+
+
 def upload_to_notion(reco_kor: pd.DataFrame):
     """추천종목 표를 Notion 새 페이지에 업로드"""
     headers = {
@@ -689,9 +752,12 @@ def upload_to_notion(reco_kor: pd.DataFrame):
         except Exception:
             continue
 
+    # 날짜별 부모 페이지 (없으면 자동 생성)
+    date_parent_id = _get_or_create_date_page(today_str, headers, NOTION_PARENT_PAGE_ID)
+
     body = {
-        "parent": {"page_id": NOTION_PARENT_PAGE_ID},
-        "properties": {"title": {"title": [{"text": {"content": f"📊 {today_str} 추천종목"}}]}},
+        "parent": {"page_id": date_parent_id},
+        "properties": {"title": {"title": [{"text": {"content": f"📊 {today_str} KOSPI 수급 추천종목"}}]}},
         "children": [
             {
                 "object": "block",
@@ -710,6 +776,9 @@ def upload_to_notion(reco_kor: pd.DataFrame):
             },
         ],
     }
+
+    # 동일 제목 페이지 있으면 archive (중복 방지)
+    _archive_same_title_pages(f"📊 {today_str} KOSPI 수급 추천종목", headers, date_parent_id)
 
     try:
         r = requests.post("https://api.notion.com/v1/pages", headers=headers, json=body, timeout=15)
