@@ -9,7 +9,7 @@
 - `kosdaq.py` : 코스닥 수급·재무 멀티팩터 점수 계산 + Notion 업로드 (KIS API, 시총 상위 200 → TOP30, 수급.py 와 동일 로직)
 - `quality.py` : 코스피 Quality 모델 (ROE 0.40 + 1/PER 0.20 + 1/PBR 0.20 + 저부채 0.20). 수급/모멘텀/성장 미반영. 시총 상위 200 → TOP30. 자본잠식·부채>300% 종목 사전 제외, 매출 +100% 이상은 분할의심으로 ROE 신뢰성 0 처리. fin_ratio_cache.csv 공유 (수급 호출은 생략)
 - `us_quant.py` : S&P 500 멀티팩터 퀀트 분석 (yfinance)
-- `youtube_report.py` : 3proTV 영상 자막 수집 → Gemini 분석 → Notion 업로드
+- `youtube_report.py` : 다채널 영상 자막 수집 → Gemini 분석 → Notion 업로드 (채널별 일일 페이지). 채널 목록은 파일 상단 `CHANNELS` 리스트 참조 (현재 6개: 3proTV, 오선의 미국 증시 라이브, 머니인사이드, 강민우 돈깡TV, 전인구경제연구소, 채국장의 코스피 1만 코스닥 3천)
 - `KOSPI재무데이터한투.csv` / `KOSDAQ재무데이터한투.csv` : 시장별 종목 마스터 (한투 .mst 에서 파싱)
 - `latest_results.csv` : 가장 최근 코스피 퀀트 결과 (종목 질문 시 이 파일 읽기)
 - `latest_kosdaq_results.csv` : 가장 최근 코스닥 퀀트 결과
@@ -31,6 +31,7 @@
 - Gemini API : gemini-2.5-flash 사용, **유료 플랜** (쿼터 걱정 불필요)
 - Notion API : 모든 결과물 업로드
 - GitHub Actions : 코스피/US 퀀트는 GitHub에서 실행 (노트북 불필요)
+- **yt-dlp** (`brew install yt-dlp`) : YouTube 채널 영상 목록 수집. RSS endpoint(`feeds/videos.xml`)가 2026-05-09 경 무인증 접근 차단되어 RSS → yt-dlp `--flat-playlist` 로 전환. flat 모드는 timestamp 안 주므로 `published` 는 today 하드코딩 (cutoff 로직 사실상 무력화 — 영향 미미, yt-dlp 도 최근 15편만 가져옴).
 
 ## 핵심 제약사항 (반드시 지킬 것)
 
@@ -65,8 +66,10 @@
 - 코스닥 추천종목 : 동일 부모 페이지 (제목: `🇰🇷 {date} KOSDAQ 추천종목`)
 - US 추천종목 : 동일 부모 페이지 (제목: `🇺🇸 {date} US 추천종목`)
 - KOSPI Quality 추천종목 : 동일 부모 페이지 (제목: `💎 {date} KOSPI Quality 추천종목`)
-- YouTube 분석 : `3484a00632f880988b41e8b13d7fbb0b` 하위에 날짜별 페이지
-  - 하루 1페이지, 영상별 토글 블록, 오래된 영상이 위/최신이 아래
+- YouTube 분석 : `3484a00632f880988b41e8b13d7fbb0b` 하위에 **채널별 일일 페이지** (제목: `{emoji} {date} {channel_name} 분석`)
+  - 하루에 채널 수만큼 페이지 (현재 6개), 영상별 토글 블록, 오래된 영상이 위/최신이 아래
+  - `notion_daily_pages.json` 키 형식: `f"{date}_{slug}"` (예: `2026-05-07_3proTV`). 레거시 날짜-only 키는 3proTV 호환 fallback 으로만 처리됨.
+  - Notion API 100 블록/요청 한도 회피: `append_to_page` 가 외부 블록 1개씩 전송 (토글 1 + nested children 95 = 96 < 100)
 
 ## 종목 질문 답변 방법
 사용자가 종목을 물어보면:

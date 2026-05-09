@@ -2,6 +2,7 @@ import os
 import json
 import re
 import time
+import subprocess
 import requests
 import urllib.request
 from http.cookiejar import MozillaCookieJar
@@ -14,7 +15,14 @@ from youtube_transcript_api import YouTubeTranscriptApi
 # ==========================
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-CHANNEL_ID            = "UChlv4GSd7OQl3js-jkLOnFA"   # @3protv
+CHANNELS = [
+    {"slug": "3proTV",       "name": "3proTV",                       "channel_id": "UChlv4GSd7OQl3js-jkLOnFA", "emoji": "📊"},
+    {"slug": "futuresnow",   "name": "오선의 미국 증시 라이브",          "channel_id": "UC_JJ_NhRqPKcIOj5Ko3W_3w", "emoji": "🇺🇸"},
+    {"slug": "moneyinside",  "name": "머니인사이드",                   "channel_id": "UCxfko2YOD6DODYRGzeOPhIQ", "emoji": "💰"},
+    {"slug": "donkkang",     "name": "강민우 돈깡TV",                 "channel_id": "UCI6C5V4J8FWRcLcOdh1yElw", "emoji": "🥊"},
+    {"slug": "moneydo",      "name": "전인구경제연구소",               "channel_id": "UCznImSIaxZR7fdLCICLdgaQ", "emoji": "📈"},
+    {"slug": "chaegookjang", "name": "채국장의 코스피 1만 코스닥 3천", "channel_id": "UCl7_Zg4RdQbHx0kXaiKL-5g", "emoji": "🎯"},
+]
 GEMINI_API_KEY        = os.environ.get("GEMINI_API_KEY",        "AIzaSyBRAHYt5C38MIHObIoJ8tIzeAlRXArO_J0")
 NOTION_API_KEY        = os.environ.get("NOTION_API_KEY",        "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")
 NOTION_PARENT_PAGE_ID = os.environ.get("NOTION_YT_PARENT_PAGE_ID", "3484a00632f880988b41e8b13d7fbb0b")
@@ -48,24 +56,42 @@ def save_processed(processed: set):
 # ==========================
 # YouTube RSS 영상 목록 수집
 # ==========================
-def get_channel_videos() -> list:
-    url = f"https://www.youtube.com/feeds/videos.xml?channel_id={CHANNEL_ID}"
+def get_channel_videos(channel_id: str) -> list:
+    """yt-dlp 로 채널 최근 영상 15개의 ID/title 수집.
+    YouTube RSS endpoint 가 막힌 이후 (2026-05 경) 대체 경로. flat-playlist 모드는
+    timestamp 를 안 주므로 published 는 오늘 날짜로 하드코딩 (cutoff 로직과 호환).
+    """
+    url = f"https://www.youtube.com/channel/{channel_id}/videos"
     try:
-        content = urllib.request.urlopen(url, timeout=10).read().decode()
+        result = subprocess.run(
+            ["yt-dlp", "--flat-playlist", "--dump-json",
+             "--playlist-items", "1-15", "--no-warnings", url],
+            capture_output=True, text=True, timeout=60,
+        )
     except Exception as e:
-        log(f"❌ RSS 수집 실패: {e}")
+        log(f"❌ yt-dlp 호출 실패: {e}")
+        return []
+    if result.returncode != 0:
+        log(f"❌ yt-dlp 실패: {result.stderr[:200]}")
         return []
 
-    video_ids = re.findall(r"<yt:videoId>(.+?)</yt:videoId>", content)
-    titles    = re.findall(r"<title>(.+?)</title>", content)
-    published = re.findall(r"<published>(.+?)</published>", content)
-
+    today = datetime.now(KST).strftime("%Y-%m-%d")
     videos = []
-    for i, vid in enumerate(video_ids):
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        vid = d.get("id")
+        if not vid:
+            continue
         videos.append({
             "id":        vid,
-            "title":     titles[i + 1] if i + 1 < len(titles) else "",
-            "published": published[i + 1][:10] if i + 1 < len(published) else "",
+            "title":     d.get("title", ""),
+            "published": today,
             "url":       f"https://youtu.be/{vid}",
         })
     return videos
@@ -96,10 +122,10 @@ def get_transcript(video_id: str) -> str | None:
 # ==========================
 # Gemini 분석
 # ==========================
-def analyze_with_gemini(title: str, transcript: str, date: str) -> str | None:
+def analyze_with_gemini(title: str, transcript: str, date: str, channel_name: str) -> str | None:
     client = genai.Client(api_key=GEMINI_API_KEY)
 
-    prompt = f"""아래는 한국 주식 투자 유튜브 채널 3proTV 영상의 자막입니다.
+    prompt = f"""아래는 한국 주식 투자 유튜브 채널 {channel_name} 영상의 자막입니다.
 이 영상의 내용을 **최대한 누락 없이** 상세하게 정리해주세요.
 
 ⚠️ 주의: 제목과 게시일은 별도로 표시되므로 **첫 줄에 제목을 반복하지 마세요**. 바로 내용 분석부터 시작해주세요.
@@ -247,24 +273,44 @@ def _save_daily_pages(pages: dict):
         json.dump(pages, f, indent=2)
 
 
-def get_or_create_daily_page(today: str) -> str | None:
-    """
-    오늘 날짜의 Notion 페이지 ID 반환.
-    없으면 새 페이지 생성 후 notion_daily_pages.json에 저장.
-    """
-    pages = {}
+def _load_pages() -> dict:
     if os.path.exists(NOTION_DAILY_PAGES):
         with open(NOTION_DAILY_PAGES) as f:
-            pages = json.load(f)
+            return json.load(f)
+    return {}
 
-    if today in pages:
-        log(f"✅ 오늘 페이지 재사용: {pages[today]}")
-        return pages[today]
 
-    # 새 페이지 생성 (빈 페이지, 이후 이어붙이기)
+def _get_entry(pages: dict, today: str) -> dict | None:
+    """notion_daily_pages.json 엔트리 가져오기. 레거시 string(page_id) → dict 자동 승격."""
+    entry = pages.get(today)
+    if entry is None:
+        return None
+    if isinstance(entry, str):
+        # 옛 형식 (단일 채널 시절: 값이 page_id 문자열). dict 로 승격.
+        return {"page_id": entry, "channels": {}}
+    return entry
+
+
+def get_or_create_daily_page(today: str) -> str | None:
+    """
+    오늘 날짜의 통합 Notion 페이지 ID 반환 (채널 무관, 1개/일).
+    없으면 새 페이지 생성 후 notion_daily_pages.json 에 저장.
+    제목: 📺 {today} 유튜브 분석
+    """
+    pages = _load_pages()
+    entry = _get_entry(pages, today)
+
+    if entry is not None:
+        log(f"✅ 오늘 통합 페이지 재사용: {entry['page_id']}")
+        # 옛 형식이었으면 dict 로 정상화 후 저장
+        if not isinstance(pages.get(today), dict):
+            pages[today] = entry
+            _save_daily_pages(pages)
+        return entry["page_id"]
+
     body = {
         "parent":     {"page_id": NOTION_PARENT_PAGE_ID},
-        "properties": {"title": {"title": [{"text": {"content": f"📺 {today} 3proTV 분석"}}]}},
+        "properties": {"title": {"title": [{"text": {"content": f"📺 {today} 유튜브 분석"}}]}},
     }
     r = requests.post("https://api.notion.com/v1/pages", headers=_nh(), json=body, timeout=15)
     if r.status_code != 200:
@@ -272,27 +318,75 @@ def get_or_create_daily_page(today: str) -> str | None:
         return None
 
     page_id = r.json()["id"]
-    log(f"✅ 새 페이지 생성: {r.json().get('url', '')}")
+    log(f"✅ 새 통합 페이지 생성: {r.json().get('url', '')}")
 
-    pages[today] = page_id
+    pages[today] = {"page_id": page_id, "channels": {}}
     _save_daily_pages(pages)
     return page_id
 
 
-def append_to_page(page_id: str, blocks: list, today: str) -> bool:
+def get_or_create_channel_toggle(today: str, channel: dict) -> str | None:
     """
-    Notion 페이지에 블록 이어붙이기 (100개씨).
-    아카이브/삭제된 페이지라면 notion_daily_pages.json에서 제거 후 False 반환.
+    오늘 통합 페이지 안의 채널 토글 block_id 반환.
+    없으면 빈 토글 새로 만들고 ID 캐시한 뒤 반환.
     """
-    for i in range(0, len(blocks), 100):
+    pages = _load_pages()
+    entry = _get_entry(pages, today)
+    if entry is None:
+        log(f"❌ 통합 페이지 entry 없음 — get_or_create_daily_page 먼저 호출되어야 함")
+        return None
+
+    slug = channel["slug"]
+    if slug in entry.get("channels", {}):
+        return entry["channels"][slug]
+
+    # 빈 채널 토글을 페이지에 추가
+    page_id = entry["page_id"]
+    toggle_block = {
+        "object": "block",
+        "type":   "toggle",
+        "toggle": {
+            "rich_text": [{
+                "type": "text",
+                "text": {"content": f"{channel['emoji']} {channel['name']}"},
+                "annotations": {"bold": True},
+            }],
+            "children": [],
+        },
+    }
+    r = requests.patch(
+        f"https://api.notion.com/v1/blocks/{page_id}/children",
+        headers=_nh(),
+        json={"children": [toggle_block]},
+        timeout=15,
+    )
+    if r.status_code != 200:
+        log(f"❌ 채널 토글 생성 실패 ({r.status_code}): {r.text[:200]}")
+        return None
+
+    toggle_id = r.json()["results"][0]["id"]
+    entry.setdefault("channels", {})[slug] = toggle_id
+    pages[today] = entry
+    _save_daily_pages(pages)
+    log(f"  ➕ 새 채널 토글 생성: {channel['name']}")
+    return toggle_id
+
+
+def append_to_block(parent_block_id: str, blocks: list, today: str) -> bool:
+    """
+    Notion 블록(페이지 또는 토글)에 자식 블록 이어붙이기.
+    아카이브 감지 시 notion_daily_pages.json 의 today 엔트리 제거 후 False 반환.
+    """
+    # 외부 블록 1개씩 전송 — 토글 1개 + nested children 95개 = 96 < 100 (Notion API 한도)
+    for i in range(0, len(blocks), 1):
         r = requests.patch(
-            f"https://api.notion.com/v1/blocks/{page_id}/children",
+            f"https://api.notion.com/v1/blocks/{parent_block_id}/children",
             headers=_nh(),
-            json={"children": blocks[i:i+100]},
+            json={"children": blocks[i:i+1]},
             timeout=30,
         )
         if r.status_code == 400 and "archived" in r.text:
-            log(f"⚠️ 페이지가 아카이브 상태 → 저장된 ID 제거 후 재실행 필요")
+            log(f"⚠️ 부모 블록이 아카이브 상태 → 저장된 today 엔트리 제거 후 재실행 필요")
             if os.path.exists(NOTION_DAILY_PAGES):
                 with open(NOTION_DAILY_PAGES) as f:
                     pages = json.load(f)
@@ -330,10 +424,27 @@ def main():
 
 def _main():
     today = datetime.now(KST).strftime("%Y-%m-%d")
-    log(f"▶ 3proTV 분석 시작 (KST 기준: {today})")
+    log(f"▶ 다채널 분석 시작 (KST 기준: {today}, {len(CHANNELS)}개 채널)")
 
+    # 통합 페이지 한 번만 만들거나 가져옴 (채널 무관)
+    page_id = get_or_create_daily_page(today)
+    if not page_id:
+        log("❌ 통합 페이지 가져오기 실패. 종료.")
+        return
+
+    for channel in CHANNELS:
+        log(f"")
+        log(f"=== [{channel['name']}] ===")
+        try:
+            _process_channel(channel, today, page_id)
+        except Exception as e:
+            log(f"❌ {channel['name']} 처리 실패: {e}")
+            continue
+
+
+def _process_channel(channel: dict, today: str, page_id: str):
     # RSS 영상 수집
-    videos = get_channel_videos()
+    videos = get_channel_videos(channel["channel_id"])
     log(f"✅ RSS 영상 {len(videos)}개 수집")
 
     # 미처리 영상 선별
@@ -377,7 +488,7 @@ def _main():
 
         # Gemini 분석 (요청 간격 유지 - 분당 한도 여유)
         time.sleep(5)
-        analysis = analyze_with_gemini(video["title"], transcript, video["published"])
+        analysis = analyze_with_gemini(video["title"], transcript, video["published"], channel["name"])
         log(f"    Gemini {'✅' if analysis else '❌'}")
 
         all_blocks.extend(build_video_blocks(video, analysis, len(transcript)))
@@ -399,10 +510,10 @@ def _main():
     ]
     all_blocks = update_header + all_blocks
 
-    # 일일 페이지 가져오거나 생성 후 이어붙이기
+    # 채널 토글 가져오거나 생성 후 그 안에 이어붙이기
     log(f"▶ Notion 업로드 시작 (블록 {len(all_blocks)}개)")
-    page_id = get_or_create_daily_page(today)
-    if page_id and append_to_page(page_id, all_blocks, today):
+    toggle_id = get_or_create_channel_toggle(today, channel)
+    if toggle_id and append_to_block(toggle_id, all_blocks, today):
         processed.update(processed_now)
         save_processed(processed)
         log(f"🎉 완료! {len(processed_now)}개 영상 분석 이어붙이기 완료")
