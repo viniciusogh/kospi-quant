@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import shutil
 import time
 import subprocess
 import requests
@@ -35,6 +36,9 @@ MAX_TRANSCRIPT_CHARS = 25000
 MAX_VIDEOS_PER_RUN   = 15    # 유료 전환 후 제한 해제
 LOCK_MAX_AGE_HOURS   = 0.5   # lock 파일 최대 유효 시간 (30분 — 정상 실행은 1~2분 내 완료)
 
+# cron 환경의 PATH 가 minimal 이라 Homebrew 경로 안 잡힘 → 절대 경로 폴백
+YT_DLP_BIN = shutil.which("yt-dlp") or "/opt/homebrew/bin/yt-dlp"
+
 KST = timezone(timedelta(hours=9))
 
 # ==========================
@@ -64,7 +68,7 @@ def get_channel_videos(channel_id: str) -> list:
     url = f"https://www.youtube.com/channel/{channel_id}/videos"
     try:
         result = subprocess.run(
-            ["yt-dlp", "--flat-playlist", "--dump-json",
+            [YT_DLP_BIN, "--flat-playlist", "--dump-json",
              "--playlist-items", "1-15", "--no-warnings", url],
             capture_output=True, text=True, timeout=60,
         )
