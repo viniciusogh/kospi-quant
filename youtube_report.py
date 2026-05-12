@@ -316,7 +316,7 @@ def get_or_create_daily_page(today: str) -> str | None:
         "parent":     {"page_id": NOTION_PARENT_PAGE_ID},
         "properties": {"title": {"title": [{"text": {"content": f"📺 {today} 유튜브 분석"}}]}},
     }
-    r = requests.post("https://api.notion.com/v1/pages", headers=_nh(), json=body, timeout=15)
+    r = requests.post("https://api.notion.com/v1/pages", headers=_nh(), json=body, timeout=30)
     if r.status_code != 200:
         log(f"❌ 페이지 생성 실패 ({r.status_code}): {r.text[:200]}")
         return None
@@ -362,7 +362,7 @@ def get_or_create_channel_toggle(today: str, channel: dict) -> str | None:
         f"https://api.notion.com/v1/blocks/{page_id}/children",
         headers=_nh(),
         json={"children": [toggle_block]},
-        timeout=15,
+        timeout=30,
     )
     if r.status_code != 200:
         log(f"❌ 채널 토글 생성 실패 ({r.status_code}): {r.text[:200]}")
@@ -387,7 +387,7 @@ def append_to_block(parent_block_id: str, blocks: list, today: str) -> bool:
             f"https://api.notion.com/v1/blocks/{parent_block_id}/children",
             headers=_nh(),
             json={"children": blocks[i:i+1]},
-            timeout=30,
+            timeout=60,
         )
         if r.status_code == 400 and "archived" in r.text:
             log(f"⚠️ 부모 블록이 아카이브 상태 → 저장된 today 엔트리 제거 후 재실행 필요")
