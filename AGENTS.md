@@ -9,7 +9,8 @@
 - `kosdaq.py` : 코스닥 수급·재무 멀티팩터 점수 계산 + Notion 업로드 (KIS API, 시총 상위 200 → TOP30, 수급.py 와 동일 로직)
 - `quality.py` : 코스피 Quality 모델 (ROE 0.40 + 1/PER 0.20 + 1/PBR 0.20 + 저부채 0.20). 수급/모멘텀/성장 미반영. 시총 상위 200 → TOP30. 자본잠식·부채>300% 종목 사전 제외, 매출 +100% 이상은 분할의심으로 ROE 신뢰성 0 처리. fin_ratio_cache.csv 공유 (수급 호출은 생략)
 - `us_quant.py` : S&P 500 멀티팩터 퀀트 분석 (yfinance)
-- `youtube_report.py` : 다채널 영상 자막 수집 → Gemini 분석 → Notion 업로드 (채널별 일일 페이지). 채널 목록은 파일 상단 `CHANNELS` 리스트 참조 (현재 6개: 3proTV, 오선의 미국 증시 라이브, 머니인사이드, 강민우 돈깡TV, 전인구경제연구소, 채국장의 코스피 1만 코스닥 3천)
+- `youtube_report.py` : 다채널 영상 자막 수집 → Gemini 분석 → Notion 업로드 (채널별 일일 페이지). 채널 목록은 파일 상단 `CHANNELS` 리스트 참조 (현재 6개: 3proTV, 오선의 미국 증시 라이브, 머니인사이드, 강민우 돈깡TV, 전인구경제연구소, 채국장의 코스피 1만 코스닥 3천). 분석본은 `latest_youtube_analysis.json` 에도 누적 저장 (3일 보존, `daily_recommend.py` 가 자막 원본 대신 이걸 읽어 Gemini 토큰 절약)
+- `daily_recommend.py` : 일일 종합 종목 추천 — 정량 데이터 (한투 TOP 30 × 3 모델) + 유튜브 화자 의견 (`latest_youtube_analysis.json`) 의 교집합을 Gemini 가 분석. 매일 22:30 KST cron 권장. 노션 페이지 `💎 {date} 종합 추천` 으로 push. 비용 절감: 자막 원본 대신 분석본 사용 + TOP 30 만 입력 + `max_output_tokens=1500`.
 - `KOSPI재무데이터한투.csv` / `KOSDAQ재무데이터한투.csv` : 시장별 종목 마스터 (한투 .mst 에서 파싱)
 - `latest_results.csv` : 가장 최근 코스피 퀀트 결과 (종목 질문 시 이 파일 읽기)
 - `latest_kosdaq_results.csv` : 가장 최근 코스닥 퀀트 결과

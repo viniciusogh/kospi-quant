@@ -43,11 +43,13 @@ NOTION_PARENT_PAGE_ID = os.environ.get("NOTION_YT_PARENT_PAGE_ID", "3484a00632f8
 
 PROCESSED_FILE       = os.path.join(_BASE_DIR, "processed_videos.json")
 NOTION_DAILY_PAGES   = os.path.join(_BASE_DIR, "notion_daily_pages.json")
+ANALYSIS_CACHE       = os.path.join(_BASE_DIR, "latest_youtube_analysis.json")  # daily_recommend.py 가 사용
 COOKIES_FILE         = os.path.join(_BASE_DIR, "youtube_cookies.txt")
 LOCK_FILE            = os.path.join(_BASE_DIR, "youtube_report.lock")  # 중복 실행 방지
 MAX_TRANSCRIPT_CHARS = 25000
 MAX_VIDEOS_PER_RUN   = 15    # 유료 전환 후 제한 해제
 LOCK_MAX_AGE_HOURS   = 0.5   # lock 파일 최대 유효 시간 (30분 — 정상 실행은 1~2분 내 완료)
+ANALYSIS_CACHE_DAYS  = 3     # 분석본 캐시 보존 기간 (daily_recommend 가 어제+오늘만 쓰니 3일이면 충분)
 
 # cron 환경의 PATH 가 minimal 이라 Homebrew 경로 안 잡힘 → 절대 경로 폴백
 YT_DLP_BIN = shutil.which("yt-dlp") or "/opt/homebrew/bin/yt-dlp"
@@ -69,6 +71,33 @@ def load_processed() -> set:
 def save_processed(processed: set):
     with open(PROCESSED_FILE, "w") as f:
         json.dump(sorted(processed), f, indent=2)
+
+
+def _save_analysis_cache(today: str, channel: dict, video: dict, analysis: str):
+    """일일 분석 결과 누적 캐시. 3일 이상 오래된 데이터 자동 삭제 (입력 토큰 유지).
+    daily_recommend.py 가 이 파일을 읽음 — 자막 원본 대신 요약본 재사용해 Gemini 비용 절감.
+    """
+    data = {}
+    if os.path.exists(ANALYSIS_CACHE):
+        try:
+            with open(ANALYSIS_CACHE) as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+
+    cutoff = (datetime.now(KST) - timedelta(days=ANALYSIS_CACHE_DAYS)).strftime("%Y-%m-%d")
+    data = {d: v for d, v in data.items() if d >= cutoff}
+
+    data.setdefault(today, {}).setdefault(channel["slug"], []).append({
+        "video_id":     video["id"],
+        "title":        video["title"],
+        "url":          video["url"],
+        "channel_name": channel["name"],
+        "analysis":     analysis,
+    })
+
+    with open(ANALYSIS_CACHE, "w") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 # ==========================
 # YouTube RSS 영상 목록 수집
@@ -519,6 +548,10 @@ def _process_channel(channel: dict, today: str, page_id: str):
 
         all_blocks.extend(build_video_blocks(video, analysis, len(transcript)))
         processed_now.append(video["id"])
+
+        # 분석 성공한 영상만 캐시 (daily_recommend.py 가 이걸로 종목 추천)
+        if analysis:
+            _save_analysis_cache(today, channel, video, analysis)
 
     if not all_blocks:
         log("⚠️ 업로드할 내용 없음. 종료.")
