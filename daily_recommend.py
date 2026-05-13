@@ -31,19 +31,29 @@ NOTION_PARENT_PAGE_ID = os.environ.get("NOTION_REC_PARENT_ID",  "3324a00632f880f
 
 ANALYSIS_CACHE     = os.path.join(_BASE_DIR, "latest_youtube_analysis.json")
 NOTION_DAILY_PAGES = os.path.join(_BASE_DIR, "notion_daily_pages.json")
-TOP_N              = 30
+LOCK_FILE          = os.path.join(_BASE_DIR, "daily_recommend.lock")
+LOCK_MAX_AGE_HOURS = 0.5  # 30분 (정상 실행은 1~2분)
+TOP_N              = 100        # TOP 100 까지 입력 (밖은 자동 제외)
+MIN_MCAP_KOSPI     = 500_000    # 백만원 단위 = 5,000억 이상 (소형주 노이즈 제외)
+MIN_MCAP_KOSDAQ    = 100_000    # 1,000억 이상 (KOSDAQ 은 대형주도 5천억 미만 많음)
 
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
 
-def load_top_csv(path: str, n: int = TOP_N) -> str:
+def load_top_json(path: str, n: int = TOP_N, min_mcap: int = 0) -> str:
+    """CSV TOP N (시총 필터 적용) 을 종목별 JSON record 리스트로 변환.
+    min_mcap: 시가총액 최소값 (백만원 단위). 0 이면 필터 없음. 소형주 노이즈 제거용.
+    """
     if not os.path.exists(path):
         return ""
     try:
         df = pd.read_csv(path)
-        return df.head(n).to_csv(index=False)
+        if min_mcap > 0 and "시가총액" in df.columns:
+            df = df[df["시가총액"] >= min_mcap]
+        records = df.head(n).to_dict(orient="records")
+        return json.dumps(records, ensure_ascii=False, indent=1)
     except Exception as e:
         log(f"  ⚠️ {path} 읽기 실패: {e}")
         return ""
@@ -146,13 +156,20 @@ def load_youtube_analysis_from_notion() -> str:
 
 
 def load_youtube_analysis() -> tuple[str, str]:
-    """cache 우선, 비었으면 노션 fallback. (text, source) 튜플 반환."""
-    text = load_youtube_analysis_from_cache()
-    if text:
-        return text, "cache"
-    text = load_youtube_analysis_from_notion()
-    if text:
-        return text, "notion"
+    """cache + 노션 fallback 둘 다 사용 (cache 풍부해질 때까지 임시).
+    cache 가 50,000자 이상이면 cache 만, 미만이면 노션 fallback 도 합쳐서 보완.
+    """
+    text_cache = load_youtube_analysis_from_cache()
+    if len(text_cache) >= 50000:
+        return text_cache, "cache"
+
+    text_notion = load_youtube_analysis_from_notion()
+    if text_notion and text_cache:
+        return text_cache + "\n\n---\n\n" + text_notion, "cache+notion"
+    if text_notion:
+        return text_notion, "notion"
+    if text_cache:
+        return text_cache, "cache"
     return "", "none"
 
 
@@ -162,9 +179,13 @@ def analyze_and_recommend(quant_csv: str, youtube_text: str) -> str | None:
 
     prompt = f"""당신은 한국 주식 시장 종합 분석가입니다.
 
-아래 두 종류 데이터를 바탕으로 **오늘({today}) 추천할 3~5 종목** 을 골라주세요.
+오늘({today}) **KOSPI 7~9 종목 + KOSDAQ 5~7 종목, 총 12~16 종목** 을 추천하세요.
 
-## 데이터 1: 정량 모델 TOP 30 (한국투자증권 데이터 기반)
+## 데이터 1: 정량 모델 TOP 100 (한국투자증권, 시총 필터 적용)
+- KOSPI: 시총 5,000억 이상만 (소형주 제외)
+- KOSDAQ: 시총 3,000억 이상만
+- 각 종목은 별도 JSON 객체. **종목명/코드/지표를 해당 record 에서 정확히 인용**하세요.
+
 {quant_csv}
 
 ## 데이터 2: 유튜브 화자 의견 (최근 2일 영상 분석본)
@@ -172,36 +193,59 @@ def analyze_and_recommend(quant_csv: str, youtube_text: str) -> str | None:
 
 ## 추천 규칙 (엄격히 지킬 것)
 
-1. **두 데이터 모두에서 시그널 있는 종목만** 추천. 한쪽만 강한 종목은 제외.
-   - 정량: TOP 30 안에 들거나 명확한 모델 신호.
-   - 유튜브: 화자가 구체적으로 추천/긍정 의견 낸 종목 (단순 언급 X).
-2. **3~5 종목**. 이보다 많거나 적으면 안 됨.
-3. 각 종목별 다음 형식:
-   - 정량 시그널: 모델 점수, 랭킹, 핵심 재무 지표 1~2개
-   - 유튜브 시그널: 화자명·채널명 + 직접 인용 (한 문장)
-   - 결론: 한 줄 추천 이유
-4. 출력 형식 (마크다운):
+1. **시장 분리**: KOSPI 추천과 KOSDAQ 추천을 **별도 섹션**으로.
+   - KOSPI: 7~9 종목
+   - KOSDAQ: 5~7 종목
+2. **후보 = 정량 데이터에 있는 종목만** (TOP 100 + 시총 필터 통과). 유튜브에서 강추되어도 데이터에 없으면 제외.
+
+3. **유튜브 시그널 필수 요건 (가장 중요)**:
+   - 각 추천 종목에 **반드시 2명 이상의 화자 인용** 필수. 1명만 인용 가능한 종목은 추천 X.
+   - 인용 못 찾으면 **그 종목 빼고 다른 종목 선택**. "직접 언급 없지만…" 같은 빈 인용 절대 금지.
+   - **유튜브 분석본 전체를 끝까지 훑고**, 해당 종목명·종목 코드·섹터(반도체/조선/금융/방산/이차전지/제약 등)·관련 키워드(예: HBM, 로봇, 보스턴 다이내믹스, AI 메모리)를 모두 검색해서 화자가 언급한 부분을 다 모아 오세요.
+   - 한 부분만 보고 인용 끝내지 말고, **여러 영상·여러 화자에 분산된 의견을 종합**하여 가장 적합한 2~3개를 인용.
+   - 직접 인용 + 화자명·채널명 명시. (예: 김장열·3proTV — "...")
+
+4. 각 종목별 형식:
+   - **정량 시그널**: JSON record 에서 그대로 인용 — 랭킹(어느 모델/몇 위), ROE, PER, PBR, 멀티팩터/퀄리티 점수, 매출/영업이익 증가율 등 의미 있는 것 4~6개.
+   - **유튜브 시그널**: 화자명·채널명 — "직접 인용1"  /  다른화자명·채널명 — "직접 인용2"
+   - **결론**: 1~2 줄.
+
+5. **KOSDAQ 데이터 처리**: KOSDAQ 수급 모델만 있고 Quality 모델은 없음 (KOSPI 전용). KOSDAQ 추천은 수급 모델만 근거로 사용 가능. 유튜브에서 KOSDAQ 종목 언급 적으면 솔직히 "유튜브에서 KOSDAQ 언급 빈약" 명시하고 추천 수 줄이세요 (0개 가능).
+
+## 데이터 정확성 (절대 지킬 것)
+
+- 종목명·종목코드는 JSON 의 그 필드에서 그대로 인용. 환각 금지.
+- 정량 지표 값은 해당 종목 record 에서 그대로 인용. 다른 종목 값으로 채우지 마세요.
+- TOP 100 + 시총 필터 안에 없는 종목은 추천 X.
+
+## 출력 형식
 
 ## 오늘의 핵심
-(3~4줄. 오늘 추천 3~5종목 + 공통 테마.)
+(4~6줄. 오늘 KOSPI/KOSDAQ 추천 종목의 공통 테마 + 시장 분위기.)
 
-## 추천 종목
+## KOSPI 추천 (대형주)
 
 ### 1. 종목명 (코드)
-- **정량 시그널**: ...
-- **유튜브 시그널**: 화자명·채널명 — "직접 인용"
+- **정량 시그널**: 모델 X 랭킹 N위, ROE x%, PER x, PBR x, 멀티팩터 x ...
+- **유튜브 시그널**: 화자명·채널명 — "인용1"  /  다른화자명·채널명 — "인용2"
 - **결론**: ...
 
-### 2. 종목명 (코드)
-...
+### 2. ... (7~9번까지)
+
+## KOSDAQ 추천
+
+### 1. 종목명 (코드)
+- ...
+
+### 2. ... (5~7번까지)
 
 ## ⚠️ 주의
-1~2줄. 이 추천의 한계 (예: 유튜브 편향, 모델 시차 등).
+2~3줄. 추천의 한계 (유튜브 편향, 모델 시차 등).
 
 규칙:
-- 마크다운 형식 그대로 출력 (** 로 강조 표시). 노션이 자동 변환함.
-- bullet 안에 sub-bullet 만들지 마세요. flat bullet 만.
-- 의견 인용 시 화자명 + 채널명 + 직접 인용 부호 포함.
+- 마크다운 ** 강조 그대로. 노션이 자동 변환.
+- flat bullet 만 (sub-bullet X).
+- 유튜브 인용 없는 종목 추천 X.
 """
 
     for attempt in range(2):
@@ -212,7 +256,7 @@ def analyze_and_recommend(quant_csv: str, youtube_text: str) -> str | None:
                 # gemini-2.5-flash 는 thinking 모델 — thinking 토큰이 max_output 을 잡아먹어
                 # 출력 짧아지는 문제 (90자 truncated 케이스). thinking 끄고 출력 토큰 충분히 확보.
                 config={
-                    "max_output_tokens": 3000,
+                    "max_output_tokens": 12000,  # 12~16종목 × ~300자 + 핵심 + 주의 = 여유 있게
                     "thinking_config": {"thinking_budget": 0},
                 },
             )
@@ -302,23 +346,43 @@ def push_to_notion(text: str) -> str | None:
 
 
 def main():
+    # 중복 실행 방지 (cron + manual 동시 실행 → 2번 push 되던 문제)
+    if os.path.exists(LOCK_FILE):
+        lock_age_h = (time.time() - os.path.getmtime(LOCK_FILE)) / 3600
+        if lock_age_h < LOCK_MAX_AGE_HOURS:
+            log(f"⚠️ 이전 실행 진행 중 (lock 나이 {lock_age_h:.1f}h). 스킵.")
+            return
+        log(f"⚠️ stale lock 제거 ({lock_age_h:.1f}h)")
+        os.remove(LOCK_FILE)
+    open(LOCK_FILE, "w").close()
+
+    try:
+        _run()
+    finally:
+        try:
+            os.remove(LOCK_FILE)
+        except FileNotFoundError:
+            pass
+
+
+def _run():
     log("▶ 일일 종합 추천 시작")
 
-    # 1. 정량 데이터 (TOP 30 만)
+    # 1. 정량 데이터 (TOP 100 + 시총 필터 — 짜바리 소형주 제외)
     parts = []
-    for fname, label in [
-        ("latest_results.csv",         "KOSPI 수급 모델"),
-        ("latest_kosdaq_results.csv",  "KOSDAQ 수급 모델"),
-        ("latest_quality_results.csv", "KOSPI Quality 모델"),
+    for fname, label, mcap in [
+        ("latest_results.csv",         "KOSPI 수급 모델",     MIN_MCAP_KOSPI),
+        ("latest_quality_results.csv", "KOSPI Quality 모델", MIN_MCAP_KOSPI),
+        ("latest_kosdaq_results.csv",  "KOSDAQ 수급 모델",   MIN_MCAP_KOSDAQ),
     ]:
-        csv = load_top_csv(os.path.join(_BASE_DIR, fname), TOP_N)
-        if csv:
-            parts.append(f"### {label} TOP {TOP_N}\n{csv}")
+        rec = load_top_json(os.path.join(_BASE_DIR, fname), TOP_N, mcap)
+        if rec:
+            parts.append(f"### {label} TOP {TOP_N} (시총 필터 적용, 각 객체가 1 종목)\n{rec}")
     quant_csv = "\n\n".join(parts)
-    log(f"✅ 정량 데이터 수집: {len(quant_csv):,}자")
+    log(f"✅ 정량 데이터 수집: {len(quant_csv):,}자 (KOSPI ≥{MIN_MCAP_KOSPI//10000}억, KOSDAQ ≥{MIN_MCAP_KOSDAQ//10000}억)")
 
     if not quant_csv:
-        log("❌ 정량 CSV 없음. 종료.")
+        log("❌ 정량 데이터 없음. 종료.")
         return
 
     # 2. 유튜브 분석본 (어제+오늘) — cache 우선, 비었으면 노션 fallback
