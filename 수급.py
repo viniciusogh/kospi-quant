@@ -471,19 +471,18 @@ def _cz_by_sector(s: pd.Series, sector: pd.Series, min_n: int = _SECTOR_MIN_N) -
 
 
 def compute_multifactor_score(df: pd.DataFrame) -> pd.Series:
+    """수급 점수 단일 — strength_score 의 시장 전체 Z-score.
+    Why: Quality 모델 (quality.py) 이 별도로 재무 평가하므로 중복 회피 (2026-05-13).
+    이전: 수급 0.20 + 밸류 0.30 + 퀄리티 0.25 + 성장 0.15 + 안정성 0.10 (재무 80%).
     """
-    수급 0.20 + 밸류 0.30 + 퀄리티 0.25 + 성장 0.15 + 안정성 0.10
-    밸류·퀄리티·안정성은 섹터 내 Z-score (섹터 중립), 수급·성장은 시장 전체 Z-score.
-    가격 부담(밸류) 가중치를 0.20→0.30 으로 상향, 수급(0.25→0.20)·안정성(0.15→0.10) 살짝 하향.
-    "이미 오른 종목" 편향 완화 — 동일 가중치 변경을 코스닥에도 적용.
-    데이터 없는 종목은 해당 팩터 기여도 = 0 (중립) 처리.
-    """
-    sec = df["industry"] if "industry" in df.columns else None
+    return _cross_z(df["strength_score"].fillna(0))
 
-    # 수급 팩터 (시장 전체 — 섹터 회전 알파 보존)
+
+def _compute_multifactor_score_legacy(df: pd.DataFrame) -> pd.Series:
+    """[보존용] 이전 멀티팩터 계산식. 호출 위치 없음 — 롤백 시 참조용."""
+    sec = df["industry"] if "industry" in df.columns else None
     z_supply = _cross_z(df["strength_score"].fillna(0))
 
-    # 밸류 팩터: 1/PER + 1/PBR (섹터 중립)
     def _inv_per(x):
         if pd.isna(x):   return np.nan
         elif x > 0:      return 1 / x
@@ -496,15 +495,9 @@ def compute_multifactor_score(df: pd.DataFrame) -> pd.Series:
     inv_pbr = df["pbr"].apply(_inv_pbr)
     z_val = (_cz_by_sector(inv_per, sec).fillna(0)
            + _cz_by_sector(inv_pbr, sec).fillna(0)) / 2
-
-    # 퀄리티 팩터: ROE (섹터 중립)
     z_quality = _cz_by_sector(df["roe"], sec).fillna(0)
-
-    # 성장 팩터 (시장 전체)
     z_growth = (_cross_z(df["rev_growth"]).fillna(0)
               + _cross_z(df["op_profit_growth"]).fillna(0)) / 2
-
-    # 안정성 팩터 (섹터 중립: 금융 ↔ 비금융 자본구조 차이 흡수)
     debt_filled = df["debt_ratio"].fillna(df["debt_ratio"].median()).fillna(100)
     z_safety = _cz_by_sector(-debt_filled, sec).fillna(0)
 
@@ -762,7 +755,7 @@ def upload_to_notion(reco_kor: pd.DataFrame):
             {
                 "object": "block",
                 "type": "heading_2",
-                "heading_2": {"rich_text": [{"type": "text", "text": {"content": f"코스피 멀티팩터 추천종목 TOP{len(reco_kor)} ({today_str})"}}]},
+                "heading_2": {"rich_text": [{"type": "text", "text": {"content": f"코스피 수급 추천종목 TOP{len(reco_kor)} ({today_str})"}}]},
             },
             {
                 "object": "block",
