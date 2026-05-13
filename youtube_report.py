@@ -2,6 +2,8 @@ import os
 import json
 import re
 import shutil
+import signal
+import socket
 import time
 import subprocess
 import requests
@@ -10,6 +12,17 @@ from http.cookiejar import MozillaCookieJar
 from datetime import datetime, timezone, timedelta
 from google import genai
 from youtube_transcript_api import YouTubeTranscriptApi
+
+# 모든 socket 작업에 60초 default timeout — 외부 API hang 으로 인한 좀비 누적 방지
+socket.setdefaulttimeout(60)
+
+
+class _TranscriptTimeout(Exception):
+    pass
+
+
+def _transcript_alarm_handler(signum, frame):
+    raise _TranscriptTimeout("자막 호출 30초 초과")
 
 # ==========================
 # 환경설정
@@ -114,14 +127,23 @@ def get_transcript(video_id: str) -> str | None:
             log("    쿠키 로드 완료")
         except Exception as e:
             log(f"    쿠키 로드 실패: {e}")
+
+    # 30초 강제 timeout — youtube-transcript-api 가 timeout 옵션 없어서 hang 시 좀비화됨
+    signal.signal(signal.SIGALRM, _transcript_alarm_handler)
+    signal.alarm(30)
     try:
         api  = YouTubeTranscriptApi(http_client=session)
         t    = api.fetch(video_id, languages=["ko", "ko-KR"])
         text = " ".join(x.text for x in t)
         return text[:MAX_TRANSCRIPT_CHARS]
+    except _TranscriptTimeout as e:
+        log(f"    ⏱️ 자막 timeout: {e}")
+        return None
     except Exception as e:
         log(f"    자막 오류: {e}")
         return None
+    finally:
+        signal.alarm(0)
 
 # ==========================
 # Gemini 분석
