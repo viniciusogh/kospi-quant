@@ -373,8 +373,8 @@ def _run():
     # 1. 정량 데이터 (수급 모델만 — Quality 는 별도 페이지 (💎 KOSPI Quality 추천종목) 있음)
     parts = []
     for fname, label, mcap in [
-        ("latest_results.csv",         "KOSPI 수급 모델",  MIN_MCAP_KOSPI),
-        ("latest_kosdaq_results.csv",  "KOSDAQ 수급 모델", MIN_MCAP_KOSDAQ),
+        ("latest_kospi_supply.csv",         "KOSPI 수급 모델",  MIN_MCAP_KOSPI),
+        ("latest_kosdaq.csv",  "KOSDAQ 수급 모델", MIN_MCAP_KOSDAQ),
     ]:
         rec = load_top_json(os.path.join(_BASE_DIR, fname), TOP_N, mcap)
         if rec:

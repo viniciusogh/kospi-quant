@@ -991,12 +991,12 @@ def main():
     log(f"🎉 엑셀 저장 완료: {output_file}")
 
     # ------------------------------------
-    # 4.5) latest_kosdaq_results.csv 저장 (AI 조회용, 코스피와 별도)
+    # 4.5) latest_kosdaq.csv 저장 (AI 조회용, 코스피와 별도)
     # ------------------------------------
-    csv_path = os.path.join(_BASE_DIR, "latest_kosdaq_results.csv")
+    csv_path = os.path.join(_BASE_DIR, "latest_kosdaq.csv")
     all_kor["기준일자"] = today_str
     all_kor.to_csv(csv_path, index=False, encoding="utf-8-sig")
-    log(f"✅ latest_kosdaq_results.csv 저장: {csv_path}")
+    log(f"✅ latest_kosdaq.csv 저장: {csv_path}")
 
     # ------------------------------------
     # 5) Notion 업로드

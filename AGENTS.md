@@ -12,8 +12,9 @@
 - `youtube_report.py` : 다채널 영상 자막 수집 → Gemini 분석 → Notion 업로드 (채널별 일일 페이지). 채널 목록은 파일 상단 `CHANNELS` 리스트 참조 (현재 6개: 3proTV, 오선의 미국 증시 라이브, 머니인사이드, 강민우 돈깡TV, 전인구경제연구소, 채국장의 코스피 1만 코스닥 3천). 분석본은 `latest_youtube_analysis.json` 에도 누적 저장 (3일 보존, `daily_recommend.py` 가 자막 원본 대신 이걸 읽어 Gemini 토큰 절약)
 - `daily_recommend.py` : 일일 종합 종목 추천 — 정량 데이터 (한투 TOP 30 × 3 모델) + 유튜브 화자 의견 (`latest_youtube_analysis.json`) 의 교집합을 Gemini 가 분석. 매일 22:30 KST cron 권장. 노션 페이지 `💎 {date} 종합 추천` 으로 push. 비용 절감: 자막 원본 대신 분석본 사용 + TOP 30 만 입력 + `max_output_tokens=1500`.
 - `KOSPI재무데이터한투.csv` / `KOSDAQ재무데이터한투.csv` : 시장별 종목 마스터 (한투 .mst 에서 파싱)
-- `latest_results.csv` : 가장 최근 코스피 퀀트 결과 (종목 질문 시 이 파일 읽기)
-- `latest_kosdaq_results.csv` : 가장 최근 코스닥 퀀트 결과
+- `latest_kospi_supply.csv` : 가장 최근 코스피 수급 추천종목 (📊 KOSPI 수급 추천종목 페이지 데이터)
+- `latest_kosdaq.csv` : 가장 최근 코스닥 추천종목 (🇰🇷 KOSDAQ 추천종목 페이지 데이터)
+- `latest_kospi_quality.csv` : 가장 최근 KOSPI Quality 추천종목 (💎 KOSPI Quality 추천종목 페이지 데이터)
 - `fin_ratio_cache.csv` / `kosdaq_fin_ratio_cache.csv` : 시장별 재무비율 주간 캐시
 - `us_fin_cache.csv` : US 재무비율 주간 캐시
 - `kospi_score_history.csv` / `kosdaq_score_history.csv` / `us_score_history.csv` : 5일 EMA 평탄화용 점수 이력
@@ -74,7 +75,7 @@
 
 ## 종목 질문 답변 방법
 사용자가 종목을 물어보면:
-1. `latest_results.csv` 읽어서 해당 종목 조회
+1. `latest_kospi_supply.csv` 읽어서 해당 종목 조회
 2. `fin_ratio_cache.csv`에서 추가 재무 데이터 확인
 3. 기준일자 먼저 알려주기
 

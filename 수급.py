@@ -986,12 +986,12 @@ def main():
     log(f"🎉 엑셀 저장 완료: {output_file}")
 
     # ------------------------------------
-    # 4.5) latest_results.csv 저장 (AI 조회용)
+    # 4.5) latest_kospi_supply.csv 저장 (AI 조회용)
     # ------------------------------------
-    csv_path = os.path.join(_BASE_DIR, "latest_results.csv")
+    csv_path = os.path.join(_BASE_DIR, "latest_kospi_supply.csv")
     all_kor["기준일자"] = today_str
     all_kor.to_csv(csv_path, index=False, encoding="utf-8-sig")
-    log(f"✅ latest_results.csv 저장: {csv_path}")
+    log(f"✅ latest_kospi_supply.csv 저장: {csv_path}")
 
     # ------------------------------------
     # 4.7) 교집합용 CSV 저장 (시총 상위 200 유니버스 내 상위 100개)
