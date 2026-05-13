@@ -11,6 +11,7 @@
 - gemini-2.5-flash (저렴한 모델)
 """
 import os
+import re
 import json
 import socket
 import time
@@ -28,8 +29,9 @@ GEMINI_API_KEY        = os.environ.get("GEMINI_API_KEY",        "AIzaSyBRAHYt5C3
 NOTION_API_KEY        = os.environ.get("NOTION_API_KEY",        "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")
 NOTION_PARENT_PAGE_ID = os.environ.get("NOTION_REC_PARENT_ID",  "3324a00632f880fbb014d766d87a1079")  # 코스피 추천종목 부모
 
-ANALYSIS_CACHE = os.path.join(_BASE_DIR, "latest_youtube_analysis.json")
-TOP_N          = 30
+ANALYSIS_CACHE     = os.path.join(_BASE_DIR, "latest_youtube_analysis.json")
+NOTION_DAILY_PAGES = os.path.join(_BASE_DIR, "notion_daily_pages.json")
+TOP_N              = 30
 
 
 def log(msg):
@@ -47,8 +49,8 @@ def load_top_csv(path: str, n: int = TOP_N) -> str:
         return ""
 
 
-def load_youtube_analysis() -> str:
-    """어제+오늘 분석본을 markdown 형식으로 합쳐 반환."""
+def load_youtube_analysis_from_cache() -> str:
+    """1차: json cache 에서 분석본 추출 (빠르고 무료)."""
     if not os.path.exists(ANALYSIS_CACHE):
         return ""
     try:
@@ -68,6 +70,90 @@ def load_youtube_analysis() -> str:
             for v in videos:
                 out.append(f"### [{date}] {v['channel_name']} — {v['title']}\n\n{v['analysis']}\n")
     return "\n---\n\n".join(out)
+
+
+def _fetch_block_text(block_id: str, depth: int = 0, max_depth: int = 4) -> str:
+    """재귀로 노션 블록의 모든 자식 텍스트 추출 (토글도 펼쳐서)."""
+    if depth >= max_depth:
+        return ""
+
+    out = []
+    cursor = None
+    while True:
+        params = {"start_cursor": cursor} if cursor else {}
+        try:
+            r = requests.get(
+                f"https://api.notion.com/v1/blocks/{block_id}/children",
+                headers=_nh(), params=params, timeout=30,
+            )
+        except Exception:
+            break
+        if r.status_code != 200:
+            break
+        data = r.json()
+
+        for block in data.get("results", []):
+            btype = block.get("type")
+            if btype == "toggle":
+                title = "".join(t.get("plain_text", "") for t in block["toggle"].get("rich_text", []))
+                if title:
+                    out.append(f"\n{'#' * min(depth + 2, 6)} {title}")
+                child = _fetch_block_text(block["id"], depth + 1, max_depth)
+                if child:
+                    out.append(child)
+            elif btype in ("paragraph", "heading_1", "heading_2", "heading_3",
+                           "bulleted_list_item", "numbered_list_item", "quote"):
+                rt = block[btype].get("rich_text", [])
+                text = "".join(t.get("plain_text", "") for t in rt)
+                if text:
+                    out.append(text)
+            # divider, image, 기타: 무시
+        if not data.get("has_more"):
+            break
+        cursor = data.get("next_cursor")
+    return "\n".join(out)
+
+
+def load_youtube_analysis_from_notion() -> str:
+    """2차 fallback: notion_daily_pages.json 의 어제·오늘 페이지에서 직접 분석본 추출.
+    cache 비었거나 손상된 경우만 호출. 노션 API 호출 N번 — 캐시보단 느림.
+    """
+    if not os.path.exists(NOTION_DAILY_PAGES):
+        return ""
+    try:
+        with open(NOTION_DAILY_PAGES) as f:
+            pages = json.load(f)
+    except Exception:
+        return ""
+
+    today     = datetime.now(KST).strftime("%Y-%m-%d")
+    yesterday = (datetime.now(KST) - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    out = []
+    for date in [yesterday, today]:
+        entry = pages.get(date)
+        if entry is None:
+            continue
+        page_id = entry if isinstance(entry, str) else entry.get("page_id")
+        if not page_id:
+            continue
+        log(f"  ↪ 노션 페이지 fetch: {date}")
+        text = _fetch_block_text(page_id, depth=0)
+        if text:
+            out.append(f"### [{date}]\n\n{text}\n")
+
+    return "\n---\n\n".join(out)
+
+
+def load_youtube_analysis() -> tuple[str, str]:
+    """cache 우선, 비었으면 노션 fallback. (text, source) 튜플 반환."""
+    text = load_youtube_analysis_from_cache()
+    if text:
+        return text, "cache"
+    text = load_youtube_analysis_from_notion()
+    if text:
+        return text, "notion"
+    return "", "none"
 
 
 def analyze_and_recommend(quant_csv: str, youtube_text: str) -> str | None:
@@ -96,14 +182,14 @@ def analyze_and_recommend(quant_csv: str, youtube_text: str) -> str | None:
    - 결론: 한 줄 추천 이유
 4. 출력 형식 (마크다운):
 
-## TL;DR
+## 오늘의 핵심
 (3~4줄. 오늘 추천 3~5종목 + 공통 테마.)
 
 ## 추천 종목
 
 ### 1. 종목명 (코드)
 - **정량 시그널**: ...
-- **유튜브 시그널**: ...
+- **유튜브 시그널**: 화자명·채널명 — "직접 인용"
 - **결론**: ...
 
 ### 2. 종목명 (코드)
@@ -111,6 +197,11 @@ def analyze_and_recommend(quant_csv: str, youtube_text: str) -> str | None:
 
 ## ⚠️ 주의
 1~2줄. 이 추천의 한계 (예: 유튜브 편향, 모델 시차 등).
+
+규칙:
+- 마크다운 형식 그대로 출력 (** 로 강조 표시). 노션이 자동 변환함.
+- bullet 안에 sub-bullet 만들지 마세요. flat bullet 만.
+- 의견 인용 시 화자명 + 채널명 + 직접 인용 부호 포함.
 """
 
     for attempt in range(2):
@@ -118,7 +209,12 @@ def analyze_and_recommend(quant_csv: str, youtube_text: str) -> str | None:
             response = client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=prompt,
-                config={"max_output_tokens": 1500},
+                # gemini-2.5-flash 는 thinking 모델 — thinking 토큰이 max_output 을 잡아먹어
+                # 출력 짧아지는 문제 (90자 truncated 케이스). thinking 끄고 출력 토큰 충분히 확보.
+                config={
+                    "max_output_tokens": 3000,
+                    "thinking_config": {"thinking_budget": 0},
+                },
             )
             return response.text.strip()
         except Exception as e:
@@ -140,6 +236,19 @@ def _nh():
     }
 
 
+def _parse_bold(text: str) -> list:
+    """**bold** 마크다운을 Notion rich_text bold annotation 으로 변환."""
+    parts = re.split(r'(\*\*[^*]+\*\*)', text)
+    out = []
+    for p in parts:
+        if p.startswith("**") and p.endswith("**"):
+            out.append({"type": "text", "text": {"content": p[2:-2]},
+                        "annotations": {"bold": True}})
+        elif p:
+            out.append({"type": "text", "text": {"content": p}})
+    return out or [{"type": "text", "text": {"content": text}}]
+
+
 def push_to_notion(text: str) -> str | None:
     today = datetime.now(KST).strftime("%Y-%m-%d")
     title = f"💎 {today} 종합 추천"
@@ -155,25 +264,26 @@ def push_to_notion(text: str) -> str | None:
     page_id  = r.json()["id"]
     page_url = r.json().get("url", "")
 
-    # markdown → 단순 paragraph 변환 (heading/bullet 만 분기)
+    # markdown → 노션 블록 변환 (heading/bullet/bold 처리)
     blocks = []
     for raw in text.split("\n"):
-        line = raw.rstrip()
+        line = raw.strip()  # 양쪽 공백 제거 (들여쓰기 sub-bullet 도 정상 처리)
         if not line:
             continue
         if line.startswith("### "):
             blocks.append({"object": "block", "type": "heading_3",
-                           "heading_3": {"rich_text": [{"type": "text", "text": {"content": line[4:]}}]}})
+                           "heading_3": {"rich_text": _parse_bold(line[4:])}})
         elif line.startswith("## "):
             blocks.append({"object": "block", "type": "heading_2",
-                           "heading_2": {"rich_text": [{"type": "text", "text": {"content": line[3:]}}]}})
+                           "heading_2": {"rich_text": _parse_bold(line[3:])}})
         elif line.startswith("- "):
             blocks.append({"object": "block", "type": "bulleted_list_item",
-                           "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": line[2:]}}]}})
+                           "bulleted_list_item": {"rich_text": _parse_bold(line[2:])}})
+        elif line.startswith("---") or line.startswith("***"):
+            blocks.append({"object": "block", "type": "divider", "divider": {}})
         else:
-            for chunk in [line[i:i+1900] for i in range(0, len(line), 1900)]:
-                blocks.append({"object": "block", "type": "paragraph",
-                               "paragraph": {"rich_text": [{"type": "text", "text": {"content": chunk}}]}})
+            blocks.append({"object": "block", "type": "paragraph",
+                           "paragraph": {"rich_text": _parse_bold(line)}})
 
     # 외부 블록 1개씩 (youtube_report 패턴 — 100블록/요청 한도 회피, 여기선 어차피 적지만 안전)
     for i in range(0, len(blocks), 1):
@@ -211,12 +321,12 @@ def main():
         log("❌ 정량 CSV 없음. 종료.")
         return
 
-    # 2. 유튜브 분석본 (어제+오늘)
-    youtube_text = load_youtube_analysis()
-    log(f"✅ 유튜브 분석본: {len(youtube_text):,}자")
+    # 2. 유튜브 분석본 (어제+오늘) — cache 우선, 비었으면 노션 fallback
+    youtube_text, source = load_youtube_analysis()
+    log(f"✅ 유튜브 분석본: {len(youtube_text):,}자 (소스: {source})")
 
     if not youtube_text:
-        log("⚠️ 유튜브 분석본 비었음 — 어제·오늘 처리된 영상이 없거나 캐시 미생성. 종료.")
+        log("⚠️ 유튜브 분석본 비었음 — 어제·오늘 처리된 영상 없음. 종료.")
         return
 
     # 3. Gemini 호출
