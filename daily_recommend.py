@@ -181,10 +181,12 @@ def analyze_and_recommend(quant_csv: str, youtube_text: str) -> str | None:
 
 오늘({today}) **KOSPI 7~9 종목 + KOSDAQ 5~7 종목, 총 12~16 종목** 을 추천하세요.
 
-## 데이터 1: 정량 모델 TOP 100 (한국투자증권, 시총 필터 적용)
+## 데이터 1: 수급 모델 TOP 100 (한국투자증권, 시총 필터 적용)
+- KOSPI 수급 모델 + KOSDAQ 수급 모델 (외국인·기관 순매수, 수급 강도 점수 기반)
 - KOSPI: 시총 5,000억 이상만 (소형주 제외)
-- KOSDAQ: 시총 3,000억 이상만
+- KOSDAQ: 시총 1,000억 이상만
 - 각 종목은 별도 JSON 객체. **종목명/코드/지표를 해당 record 에서 정확히 인용**하세요.
+- (Quality 모델은 별도 페이지 (💎 KOSPI Quality 추천종목) 에 있으므로 여기선 다루지 않음)
 
 {quant_csv}
 
@@ -206,11 +208,11 @@ def analyze_and_recommend(quant_csv: str, youtube_text: str) -> str | None:
    - 직접 인용 + 화자명·채널명 명시. (예: 김장열·3proTV — "...")
 
 4. 각 종목별 형식:
-   - **정량 시그널**: JSON record 에서 그대로 인용 — 랭킹(어느 모델/몇 위), ROE, PER, PBR, 멀티팩터/퀄리티 점수, 매출/영업이익 증가율 등 의미 있는 것 4~6개.
+   - **수급 시그널**: JSON record 에서 그대로 인용 — 수급 모델 랭킹(KOSPI/KOSDAQ 몇 위), 외국인+기관 순매수대금, 수급강화점수, 멀티팩터점수, 매수우위비율(10일) 등 **수급 관련 지표** 4~6개. (재무 지표는 보조 정보로만, 핵심 X)
    - **유튜브 시그널**: 화자명·채널명 — "직접 인용1"  /  다른화자명·채널명 — "직접 인용2"
    - **결론**: 1~2 줄.
 
-5. **KOSDAQ 데이터 처리**: KOSDAQ 수급 모델만 있고 Quality 모델은 없음 (KOSPI 전용). KOSDAQ 추천은 수급 모델만 근거로 사용 가능. 유튜브에서 KOSDAQ 종목 언급 적으면 솔직히 "유튜브에서 KOSDAQ 언급 빈약" 명시하고 추천 수 줄이세요 (0개 가능).
+5. **KOSDAQ 처리**: 유튜브에서 KOSDAQ 종목 언급 적으면 솔직히 "유튜브에서 KOSDAQ 언급 빈약" 명시하고 추천 수 줄이세요 (0개 가능).
 
 ## 데이터 정확성 (절대 지킬 것)
 
@@ -226,7 +228,7 @@ def analyze_and_recommend(quant_csv: str, youtube_text: str) -> str | None:
 ## KOSPI 추천 (대형주)
 
 ### 1. 종목명 (코드)
-- **정량 시그널**: 모델 X 랭킹 N위, ROE x%, PER x, PBR x, 멀티팩터 x ...
+- **수급 시그널**: KOSPI 수급 N위, 외인+기관 +XXX억, 수급강화점수 X, 멀티팩터 X, 매수우위비율(10일) X ...
 - **유튜브 시그널**: 화자명·채널명 — "인용1"  /  다른화자명·채널명 — "인용2"
 - **결론**: ...
 
@@ -295,7 +297,7 @@ def _parse_bold(text: str) -> list:
 
 def push_to_notion(text: str) -> str | None:
     today = datetime.now(KST).strftime("%Y-%m-%d")
-    title = f"💎 {today} 종합 추천"
+    title = f"💎 {today} 수급+유튜브 종합 추천"
 
     body = {
         "parent":     {"page_id": NOTION_PARENT_PAGE_ID},
@@ -368,12 +370,11 @@ def main():
 def _run():
     log("▶ 일일 종합 추천 시작")
 
-    # 1. 정량 데이터 (TOP 100 + 시총 필터 — 짜바리 소형주 제외)
+    # 1. 정량 데이터 (수급 모델만 — Quality 는 별도 페이지 (💎 KOSPI Quality 추천종목) 있음)
     parts = []
     for fname, label, mcap in [
-        ("latest_results.csv",         "KOSPI 수급 모델",     MIN_MCAP_KOSPI),
-        ("latest_quality_results.csv", "KOSPI Quality 모델", MIN_MCAP_KOSPI),
-        ("latest_kosdaq_results.csv",  "KOSDAQ 수급 모델",   MIN_MCAP_KOSDAQ),
+        ("latest_results.csv",         "KOSPI 수급 모델",  MIN_MCAP_KOSPI),
+        ("latest_kosdaq_results.csv",  "KOSDAQ 수급 모델", MIN_MCAP_KOSDAQ),
     ]:
         rec = load_top_json(os.path.join(_BASE_DIR, fname), TOP_N, mcap)
         if rec:
