@@ -2,9 +2,8 @@ fin_ratio_cache.csv
 kosdaq_fin_ratio_cache.csv
 us_fin_cache.csv
 youtube_cookies.txt
-processed_videos.json
-notion_daily_pages.json
 youtube_report.lock
+# processed_videos.json, notion_daily_pages.json: daily_recommend 가 의존하므로 commit 필요
 __pycache__/
 *.pyc
 .DS_Store

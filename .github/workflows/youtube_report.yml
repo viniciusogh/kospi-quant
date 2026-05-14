@@ -52,3 +52,11 @@ jobs:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           NOTION_YT_PARENT_PAGE_ID: ${{ secrets.NOTION_YT_PARENT_PAGE_ID }}
         run: python youtube_report.py
+
+      - name: Commit state files (daily_recommend 가 의존)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add latest_youtube_analysis.json notion_daily_pages.json processed_videos.json
+          git diff --staged --quiet || git commit -m "Auto-update: youtube state $(date +%Y-%m-%d_%H:%M)"
+          for i in 1 2 3; do git pull --rebase && git push && break || sleep 5; done
