@@ -1,4 +1,5 @@
 import os
+import _env  # .env 자동 로드
 import json
 import re
 import shutil
@@ -37,8 +38,8 @@ CHANNELS = [
     {"slug": "moneydo",      "name": "전인구경제연구소",               "channel_id": "UCznImSIaxZR7fdLCICLdgaQ", "emoji": "📈"},
     {"slug": "chaegookjang", "name": "채국장의 코스피 1만 코스닥 3천", "channel_id": "UCl7_Zg4RdQbHx0kXaiKL-5g", "emoji": "🎯"},
 ]
-GEMINI_API_KEY        = os.environ.get("GEMINI_API_KEY",        "AIzaSyBRAHYt5C38MIHObIoJ8tIzeAlRXArO_J0")
-NOTION_API_KEY        = os.environ.get("NOTION_API_KEY",        "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")
+GEMINI_API_KEY        = os.environ["GEMINI_API_KEY"]
+NOTION_API_KEY        = os.environ["NOTION_API_KEY"]
 NOTION_PARENT_PAGE_ID = os.environ.get("NOTION_YT_PARENT_PAGE_ID", "3484a00632f880988b41e8b13d7fbb0b")
 
 PROCESSED_FILE       = os.path.join(_BASE_DIR, "processed_videos.json")

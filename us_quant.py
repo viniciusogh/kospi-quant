@@ -1,4 +1,5 @@
 import os
+import _env  # .env 자동 로드
 import time
 import requests
 import pandas as pd
@@ -15,7 +16,7 @@ KST = timezone(timedelta(hours=9))   # GitHub Actions 러너는 UTC, 모든 날�
 # ==========================
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-NOTION_API_KEY        = os.environ.get("NOTION_API_KEY",        "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")
+NOTION_API_KEY        = os.environ["NOTION_API_KEY"]
 NOTION_PARENT_PAGE_ID = os.environ.get("NOTION_PARENT_PAGE_ID", "3324a00632f880fbb014d766d87a1079")
 
 TOP_MCAP_N        = 300   # 시총 상위 N개에서 필터

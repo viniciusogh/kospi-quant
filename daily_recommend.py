@@ -11,6 +11,7 @@
 - gemini-2.5-flash (저렴한 모델)
 """
 import os
+import _env  # .env 자동 로드
 import re
 import json
 import socket
@@ -25,8 +26,8 @@ socket.setdefaulttimeout(60)
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 KST = timezone(timedelta(hours=9))
 
-GEMINI_API_KEY        = os.environ.get("GEMINI_API_KEY",        "AIzaSyBRAHYt5C38MIHObIoJ8tIzeAlRXArO_J0")
-NOTION_API_KEY        = os.environ.get("NOTION_API_KEY",        "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")
+GEMINI_API_KEY        = os.environ["GEMINI_API_KEY"]
+NOTION_API_KEY        = os.environ["NOTION_API_KEY"]
 NOTION_PARENT_PAGE_ID = os.environ.get("NOTION_REC_PARENT_ID",  "3324a00632f880fbb014d766d87a1079")  # 코스피 추천종목 부모
 
 ANALYSIS_CACHE     = os.path.join(_BASE_DIR, "latest_youtube_analysis.json")

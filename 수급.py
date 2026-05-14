@@ -4,6 +4,7 @@ import numpy as np
 import time
 import random
 import os
+import _env  # .env 자동 로드
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -14,14 +15,14 @@ KST = timezone(timedelta(hours=9))   # GitHub Actions 러너는 UTC, 모든 날�
 # ==========================
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-APP_KEY    = os.environ.get("APP_KEY",    "PSF96Bj6V3iGD0QtAtdkN1oRSfP8vt3Eu3cJ")
-APP_SECRET = os.environ.get("APP_SECRET", "B3zd/+MjbJLSGBHOHzXeyAl3zVAMs3Od0F2dpF6s0yINTP5+7tkMLRRijsD8CKR2YPcU/bp7nxS1K8wrvirCEm0EIyKuBGVOZcSCw+uCmmPAVIzsQTWA3wR7KgPFYIZEKmw37HzAIxn1wMy8H1DHxPsu6A2s9gpGptPK2W94f1hpHcVPqiQ=")
+APP_KEY    = os.environ["APP_KEY"]
+APP_SECRET = os.environ["APP_SECRET"]
 
 input_csv = os.environ.get("INPUT_CSV",
     os.path.join(_BASE_DIR, "KOSPI재무데이터한투.csv"))
 
 # Notion
-NOTION_API_KEY        = os.environ.get("NOTION_API_KEY",        "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")
+NOTION_API_KEY        = os.environ["NOTION_API_KEY"]
 NOTION_PARENT_PAGE_ID = os.environ.get("NOTION_PARENT_PAGE_ID", "3324a00632f880fbb014d766d87a1079")
 
 # 코스피

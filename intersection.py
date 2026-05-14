@@ -6,6 +6,7 @@
 """
 
 import os
+import _env  # .env 자동 로드
 import sys
 import requests
 import pandas as pd
@@ -18,7 +19,7 @@ SUGUP_CSV   = os.path.join(_BASE_DIR, "latest_수급_reco.csv")
 QUALITY_CSV = os.path.join(_BASE_DIR, "latest_quality_reco.csv")
 
 # ─── Notion ──────────────────────────────────────────────────────────────────
-NOTION_API_KEY        = os.environ.get("NOTION_API_KEY",        "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")
+NOTION_API_KEY        = os.environ["NOTION_API_KEY"]
 NOTION_PARENT_PAGE_ID = os.environ.get("NOTION_PARENT_PAGE_ID", "3324a00632f880fbb014d766d87a1079")
 
 KST = pytz.timezone("Asia/Seoul")
