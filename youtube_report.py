@@ -14,6 +14,7 @@ from datetime import datetime, timezone, timedelta
 from google import genai
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api.proxies import WebshareProxyConfig
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # 모든 socket 작업에 60초 default timeout — 외부 API hang 으로 인한 좀비 누적 방지
 socket.setdefaulttimeout(60)
@@ -538,30 +539,40 @@ def _process_channel(channel: dict, today: str, page_id: str):
 
     log(f"▶ 처리 대상 {len(target)}개 (오늘: {len(today_new)}개, 이전: {len(other_new[:MAX_VIDEOS_PER_RUN - len(today_new)])}개)")
 
-    all_blocks      = []
-    processed_now   = []
+    # 영상 5개 병렬 처리 (자막 fetch + Gemini 분석). Webshare paid plan 500 동시 한도 안에서 안전.
+    def _process_video(v):
+        t = get_transcript(v["id"])
+        if t is None:
+            return {"video": v, "transcript_len": 0, "analysis": None, "ok": False}
+        a = analyze_with_gemini(v["title"], t, v["published"], channel["name"])
+        return {"video": v, "transcript_len": len(t), "analysis": a, "ok": True}
 
-    for i, video in enumerate(target, 1):
-        log(f"  [{i}/{len(target)}] {video['title'][:50]}")
+    results = []
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        futures = {ex.submit(_process_video, v): v for v in target}
+        for fut in as_completed(futures):
+            v = futures[fut]
+            try:
+                r = fut.result()
+                if not r["ok"]:
+                    log(f"    ⚠️ 자막 없음: {v['title'][:50]}")
+                else:
+                    results.append(r)
+                    log(f"    ✅ {v['title'][:50]} (자막 {r['transcript_len']:,}자, Gemini {'✅' if r['analysis'] else '❌'})")
+            except Exception as e:
+                log(f"    ❌ 처리 실패 {v['title'][:50]}: {e}")
 
-        # 자막 추출
-        transcript = get_transcript(video["id"])
-        if transcript is None:
-            log("    ⚠️ 자막 없음 → 스킵 (다음 실행 재시도)")
-            continue
-        log(f"    자막 {len(transcript):,}자")
+    # target 순서로 재정렬 (Notion 에 시간순으로 쌓이도록)
+    order = {v["id"]: i for i, v in enumerate(target)}
+    results.sort(key=lambda r: order[r["video"]["id"]])
 
-        # Gemini 분석 (요청 간격 유지 - 분당 한도 여유)
-        time.sleep(5)
-        analysis = analyze_with_gemini(video["title"], transcript, video["published"], channel["name"])
-        log(f"    Gemini {'✅' if analysis else '❌'}")
-
-        all_blocks.extend(build_video_blocks(video, analysis, len(transcript)))
-        processed_now.append(video["id"])
-
-        # 분석 성공한 영상만 캐시 (daily_recommend.py 가 이걸로 종목 추천)
-        if analysis:
-            _save_analysis_cache(today, channel, video, analysis)
+    all_blocks = []
+    processed_now = []
+    for r in results:
+        all_blocks.extend(build_video_blocks(r["video"], r["analysis"], r["transcript_len"]))
+        processed_now.append(r["video"]["id"])
+        if r["analysis"]:
+            _save_analysis_cache(today, channel, r["video"], r["analysis"])
 
     if not all_blocks:
         log("⚠️ 업로드할 내용 없음. 종료.")
