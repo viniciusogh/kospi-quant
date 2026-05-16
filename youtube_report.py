@@ -14,6 +14,7 @@ from datetime import datetime, timezone, timedelta
 from google import genai
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api.proxies import WebshareProxyConfig
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # 모든 socket 작업에 60초 default timeout — 외부 API hang 으로 인한 좀비 누적 방지
@@ -160,9 +161,12 @@ def get_transcript(video_id: str) -> str | None:
         except Exception as e:
             log(f"    쿠키 로드 실패: {e}")
 
-    # 30초 강제 timeout — youtube-transcript-api 가 timeout 옵션 없어서 hang 시 좀비화됨
-    signal.signal(signal.SIGALRM, _transcript_alarm_handler)
-    signal.alarm(30)
+    # 30초 강제 timeout — main thread 에서만 작동. worker thread (ThreadPoolExecutor) 는
+    # socket.setdefaulttimeout(60) 에만 의존 (위험은 30초→60초 단일 영상 hang 정도).
+    is_main = threading.current_thread() is threading.main_thread()
+    if is_main:
+        signal.signal(signal.SIGALRM, _transcript_alarm_handler)
+        signal.alarm(30)
     try:
         # Webshare proxy 설정 (GitHub Actions 등 cloud IP 차단 우회).
         # 환경변수 없으면 proxy 없이 직접 호출 (로컬 실행 시).
@@ -183,7 +187,8 @@ def get_transcript(video_id: str) -> str | None:
         log(f"    자막 오류: {e}")
         return None
     finally:
-        signal.alarm(0)
+        if is_main:
+            signal.alarm(0)
 
 # ==========================
 # Gemini 분석
