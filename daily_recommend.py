@@ -314,12 +314,50 @@ def _parse_bold(text: str) -> list:
     return out or [{"type": "text", "text": {"content": text}}]
 
 
+def _get_or_create_date_page(today: str) -> str | None:
+    """🤖 Claude / {today} 날짜 페이지 찾거나 생성. 다른 워크플로우들이 만드는 것과 같은 패턴."""
+    cursor = None
+    while True:
+        url = f"https://api.notion.com/v1/blocks/{NOTION_PARENT_PAGE_ID}/children?page_size=100"
+        if cursor:
+            url += f"&start_cursor={cursor}"
+        r = requests.get(url, headers=_nh(), timeout=15)
+        if r.status_code != 200:
+            log(f"⚠️ 부모 children 조회 실패 ({r.status_code}): {r.text[:200]}")
+            break
+        j = r.json()
+        for b in j.get("results", []):
+            if b.get("type") == "child_page" and b.get("child_page", {}).get("title") == today:
+                log(f"✅ 날짜 페이지 재사용: {today}")
+                return b["id"]
+        if not j.get("has_more"):
+            break
+        cursor = j.get("next_cursor")
+
+    body = {
+        "parent":     {"page_id": NOTION_PARENT_PAGE_ID},
+        "properties": {"title": {"title": [{"text": {"content": today}}]}},
+    }
+    r = requests.post("https://api.notion.com/v1/pages", headers=_nh(), json=body, timeout=30)
+    if r.status_code != 200:
+        log(f"❌ 날짜 페이지 생성 실패 ({r.status_code}): {r.text[:200]}")
+        return None
+    log(f"✅ 날짜 페이지 생성: {today}")
+    return r.json()["id"]
+
+
 def push_to_notion(text: str) -> str | None:
     today = datetime.now(KST).strftime("%Y-%m-%d")
     title = f"🎯 {today} 최종 추천종목"
 
+    # 다른 추천 페이지들과 같이 "YYYY-MM-DD" 날짜 페이지 안에 넣기
+    date_page_id = _get_or_create_date_page(today)
+    if not date_page_id:
+        log("❌ 날짜 페이지 가져오기 실패. 최종 추천 페이지 생성 중단.")
+        return None
+
     body = {
-        "parent":     {"page_id": NOTION_PARENT_PAGE_ID},
+        "parent":     {"page_id": date_page_id},
         "properties": {"title": {"title": [{"text": {"content": title}}]}},
     }
     r = requests.post("https://api.notion.com/v1/pages", headers=_nh(), json=body, timeout=30)
