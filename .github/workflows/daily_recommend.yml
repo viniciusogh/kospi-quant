@@ -31,16 +31,6 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Restore YouTube analysis cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            latest_youtube_analysis.json
-            notion_daily_pages.json
-          key: yt-state-${{ github.run_id }}
-          restore-keys: |
-            yt-state-
-
       - name: Run daily recommendation
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
