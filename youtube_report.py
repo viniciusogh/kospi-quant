@@ -13,6 +13,7 @@ from http.cookiejar import MozillaCookieJar
 from datetime import datetime, timezone, timedelta
 from google import genai
 from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api.proxies import WebshareProxyConfig
 
 # 모든 socket 작업에 60초 default timeout — 외부 API hang 으로 인한 좀비 누적 방지
 socket.setdefaulttimeout(60)
@@ -162,7 +163,15 @@ def get_transcript(video_id: str) -> str | None:
     signal.signal(signal.SIGALRM, _transcript_alarm_handler)
     signal.alarm(30)
     try:
-        api  = YouTubeTranscriptApi(http_client=session)
+        # Webshare proxy 설정 (GitHub Actions 등 cloud IP 차단 우회).
+        # 환경변수 없으면 proxy 없이 직접 호출 (로컬 실행 시).
+        proxy_config = None
+        if os.environ.get("WEBSHARE_USER") and os.environ.get("WEBSHARE_PASS"):
+            proxy_config = WebshareProxyConfig(
+                proxy_username=os.environ["WEBSHARE_USER"],
+                proxy_password=os.environ["WEBSHARE_PASS"],
+            )
+        api  = YouTubeTranscriptApi(http_client=session, proxy_config=proxy_config)
         t    = api.fetch(video_id, languages=["ko", "ko-KR"])
         text = " ".join(x.text for x in t)
         return text[:MAX_TRANSCRIPT_CHARS]

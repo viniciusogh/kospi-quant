@@ -54,6 +54,8 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           NOTION_YT_PARENT_PAGE_ID: ${{ secrets.NOTION_YT_PARENT_PAGE_ID }}
+          WEBSHARE_USER: ${{ secrets.WEBSHARE_USER }}
+          WEBSHARE_PASS: ${{ secrets.WEBSHARE_PASS }}
         run: python youtube_report.py
 
       - name: Commit state files (daily_recommend 가 의존)
