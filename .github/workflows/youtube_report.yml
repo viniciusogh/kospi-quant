@@ -34,16 +34,6 @@ jobs:
       - name: Install yt-dlp (RSS 우회용, /usr/local/bin 으로 설치)
         run: pip install --upgrade yt-dlp
 
-      - name: Restore state files
-        uses: actions/cache@v4
-        with:
-          path: |
-            processed_videos.json
-            notion_daily_pages.json
-          key: yt-state-${{ github.run_id }}
-          restore-keys: |
-            yt-state-
-
       - name: Write YouTube cookies file
         env:
           YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
