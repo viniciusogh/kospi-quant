@@ -108,8 +108,7 @@ def _fetch_block_text(block_id: str, depth: int = 0, max_depth: int = 4) -> str:
             if btype == "toggle":
                 title = "".join(t.get("plain_text", "") for t in block["toggle"].get("rich_text", []))
                 if title:
-                    out.append(f"
-{'#' * min(depth + 2, 6)} {title}")
+                    out.append(f"\n{'#' * min(depth + 2, 6)} {title}")
                 child = _fetch_block_text(block["id"], depth + 1, max_depth)
                 if child:
                     out.append(child)
@@ -123,8 +122,7 @@ def _fetch_block_text(block_id: str, depth: int = 0, max_depth: int = 4) -> str:
         if not data.get("has_more"):
             break
         cursor = data.get("next_cursor")
-    return "
-".join(out)
+    return "\n".join(out)
 
 
 def load_youtube_analysis_from_notion() -> str:
@@ -153,15 +151,9 @@ def load_youtube_analysis_from_notion() -> str:
         log(f"  ↪ 노션 페이지 fetch: {date}")
         text = _fetch_block_text(page_id, depth=0)
         if text:
-            out.append(f"### [{date}]
+            out.append(f"### [{date}]\n\n{text}\n")
 
-{text}
-")
-
-    return "
----
-
-".join(out)
+    return "\n---\n\n".join(out)
 
 
 def load_youtube_analysis() -> tuple[str, str]:
@@ -174,11 +166,7 @@ def load_youtube_analysis() -> tuple[str, str]:
 
     text_notion = load_youtube_analysis_from_notion()
     if text_notion and text_cache:
-        return text_cache + "
-
----
-
-" + text_notion, "cache+notion"
+        return text_cache + "\n\n---\n\n" + text_notion, "cache+notion"
     if text_notion:
         return text_notion, "notion"
     if text_cache:
@@ -363,8 +351,7 @@ def push_to_notion(text: str) -> str | None:
 
     # markdown → 노션 블록 변환 (heading/bullet/bold 처리)
     blocks = []
-    for raw in text.split("
-"):
+    for raw in text.split("\n"):
         line = raw.strip()  # 양쪽 공백 제거 (들여쓰기 sub-bullet 도 정상 처리)
         if not line:
             continue
@@ -430,11 +417,8 @@ def _run():
     ]:
         rec = load_top_json(os.path.join(_BASE_DIR, fname), TOP_N, mcap)
         if rec:
-            parts.append(f"### {label} TOP {TOP_N} (시총 필터 적용, 각 객체가 1 종목)
-{rec}")
-    quant_csv = "
-
-".join(parts)
+            parts.append(f"### {label} TOP {TOP_N} (시총 필터 적용, 각 객체가 1 종목)\n{rec}")
+    quant_csv = "\n\n".join(parts)
     log(f"✅ 정량 데이터 수집: {len(quant_csv):,}자 (KOSPI ≥{MIN_MCAP_KOSPI//10000}억, KOSDAQ ≥{MIN_MCAP_KOSDAQ//10000}억)")
 
     if not quant_csv:
