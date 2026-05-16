@@ -79,14 +79,8 @@ def load_youtube_analysis_from_cache() -> str:
             continue
         for slug, videos in data[date].items():
             for v in videos:
-                out.append(f"### [{date}] {v['channel_name']} — {v['title']}
-
-{v['analysis']}
-")
-    return "
----
-
-".join(out)
+                out.append(f"### [{date}] {v['channel_name']} — {v['title']}\n\n{v['analysis']}\n")
+    return "\n---\n\n".join(out)
 
 
 def _fetch_block_text(block_id: str, depth: int = 0, max_depth: int = 4) -> str:
