@@ -5,6 +5,9 @@ on:
     - cron: '0 8-15 * * *'  # 17:00~00:00 KST (UTC+9), 매시간
   workflow_dispatch:         # 수동 실행 가능
 
+permissions:
+  contents: write
+
 jobs:
   analyze:
     runs-on: ubuntu-latest
