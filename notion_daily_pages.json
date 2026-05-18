@@ -89,6 +89,11 @@
   },
   "2026-05-18": {
     "page_id": "3634a006-32f8-81b3-a1f5-c0c5fdb5916e",
-    "channels": {}
+    "channels": {
+      "3proTV": "3644a006-32f8-815b-a800-e51cf3a42450",
+      "moneyinside": "3644a006-32f8-81f6-aebb-c92444e495e4",
+      "moneydo": "3644a006-32f8-8119-b676-c7ca4bc49a6b",
+      "chaegookjang": "3644a006-32f8-813c-9a05-ee8100d18b4f"
+    }
   }
 }
