@@ -353,18 +353,63 @@ def push_to_notion(text: str) -> str | None:
     page_id  = r.json()["id"]
     page_url = r.json().get("url", "")
 
-    # markdown → 노션 블록 변환 (heading/bullet/bold 처리)
+    # markdown → 노션 블록 변환 (heading/bullet/bold/표 처리)
     blocks = []
-    for raw in text.split("\n"):
-        line = raw.strip()  # 양쪽 공백 제거 (들여쓰기 sub-bullet 도 정상 처리)
+    src_lines = text.split("\n")
+    idx = 0
+    while idx < len(src_lines):
+        raw = src_lines[idx]
+        line = raw.strip()
         if not line:
+            idx += 1
             continue
+        # 마크다운 표: | a | b | + 다음 줄 |---|---|
+        if line.startswith("|") and line.endswith("|") and idx + 1 < len(src_lines):
+            next_line = src_lines[idx + 1].strip()
+            if next_line.startswith("|") and "---" in next_line:
+                header_cells = [c.strip() for c in line.strip("|").split("|")]
+                col_count = len(header_cells)
+                data_rows = []
+                j = idx + 2
+                while j < len(src_lines):
+                    row_line = src_lines[j].strip()
+                    if not row_line.startswith("|"):
+                        break
+                    cells = [c.strip() for c in row_line.strip("|").split("|")]
+                    while len(cells) < col_count:
+                        cells.append("")
+                    cells = cells[:col_count]
+                    data_rows.append(cells)
+                    j += 1
+                children = [{
+                    "object": "block", "type": "table_row",
+                    "table_row": {"cells": [_parse_bold(c) for c in header_cells]}
+                }]
+                for row in data_rows:
+                    children.append({
+                        "object": "block", "type": "table_row",
+                        "table_row": {"cells": [_parse_bold(c) for c in row]}
+                    })
+                blocks.append({
+                    "object": "block", "type": "table",
+                    "table": {
+                        "table_width": col_count,
+                        "has_column_header": True,
+                        "has_row_header": False,
+                        "children": children,
+                    },
+                })
+                idx = j
+                continue
         if line.startswith("### "):
             blocks.append({"object": "block", "type": "heading_3",
                            "heading_3": {"rich_text": _parse_bold(line[4:])}})
         elif line.startswith("## "):
             blocks.append({"object": "block", "type": "heading_2",
                            "heading_2": {"rich_text": _parse_bold(line[3:])}})
+        elif line.startswith("# "):
+            blocks.append({"object": "block", "type": "heading_1",
+                           "heading_1": {"rich_text": _parse_bold(line[2:])}})
         elif line.startswith("- "):
             blocks.append({"object": "block", "type": "bulleted_list_item",
                            "bulleted_list_item": {"rich_text": _parse_bold(line[2:])}})
@@ -373,6 +418,7 @@ def push_to_notion(text: str) -> str | None:
         else:
             blocks.append({"object": "block", "type": "paragraph",
                            "paragraph": {"rich_text": _parse_bold(line)}})
+        idx += 1
 
     # 외부 블록 1개씩 (youtube_report 패턴 — 100블록/요청 한도 회피, 여기선 어차피 적지만 안전)
     for i in range(0, len(blocks), 1):
