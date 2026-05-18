@@ -43,7 +43,7 @@ CHANNELS = [
 ]
 GEMINI_API_KEY        = os.environ["GEMINI_API_KEY"]
 NOTION_API_KEY        = os.environ["NOTION_API_KEY"]
-NOTION_PARENT_PAGE_ID = os.environ.get("NOTION_YT_PARENT_PAGE_ID", "3484a00632f880988b41e8b13d7fbb0b")
+NOTION_DATE_ROOT = os.environ.get("NOTION_PARENT_PAGE_ID", "3324a00632f880fbb014d766d87a1079")  # Claude 페이지. 그 안에 날짜 페이지 자식
 
 PROCESSED_FILE       = os.path.join(_BASE_DIR, "processed_videos.json")
 NOTION_DAILY_PAGES   = os.path.join(_BASE_DIR, "notion_daily_pages.json")
@@ -362,10 +362,41 @@ def _get_entry(pages: dict, today: str) -> dict | None:
     return entry
 
 
+def _get_or_create_date_page(today: str) -> str | None:
+    """🤖 Claude / {today} 날짜 페이지 찾거나 생성. 다른 워크플로우들과 동일 패턴."""
+    cursor = None
+    while True:
+        url = f"https://api.notion.com/v1/blocks/{NOTION_DATE_ROOT}/children?page_size=100"
+        if cursor:
+            url += f"&start_cursor={cursor}"
+        r = requests.get(url, headers=_nh(), timeout=15)
+        if r.status_code != 200:
+            log(f"⚠️ 날짜 부모 children 조회 실패 ({r.status_code}): {r.text[:200]}")
+            return None
+        j = r.json()
+        for b in j.get("results", []):
+            if b.get("type") == "child_page" and b.get("child_page", {}).get("title") == today:
+                return b["id"]
+        if not j.get("has_more"):
+            break
+        cursor = j.get("next_cursor")
+
+    body = {
+        "parent":     {"page_id": NOTION_DATE_ROOT},
+        "properties": {"title": {"title": [{"text": {"content": today}}]}},
+    }
+    r = requests.post("https://api.notion.com/v1/pages", headers=_nh(), json=body, timeout=30)
+    if r.status_code != 200:
+        log(f"❌ 날짜 페이지 생성 실패 ({r.status_code}): {r.text[:200]}")
+        return None
+    log(f"✅ 날짜 페이지 생성: {today}")
+    return r.json()["id"]
+
+
 def get_or_create_daily_page(today: str) -> str | None:
     """
-    오늘 날짜의 통합 Notion 페이지 ID 반환 (채널 무관, 1개/일).
-    없으면 새 페이지 생성 후 notion_daily_pages.json 에 저장.
+    오늘 날짜의 통합 유튜브 분석 페이지 ID 반환 (채널 무관, 1개/일).
+    날짜 페이지 ({today}) 안에 자식으로 만듦. 다른 추천 페이지들과 같은 위치.
     제목: 📺 {today} 유튜브 분석
     """
     pages = _load_pages()
@@ -373,14 +404,19 @@ def get_or_create_daily_page(today: str) -> str | None:
 
     if entry is not None:
         log(f"✅ 오늘 통합 페이지 재사용: {entry['page_id']}")
-        # 옛 형식이었으면 dict 로 정상화 후 저장
         if not isinstance(pages.get(today), dict):
             pages[today] = entry
             _save_daily_pages(pages)
         return entry["page_id"]
 
+    # 날짜 페이지 (다른 추천들과 같은 위치) 안에 만들기
+    date_page_id = _get_or_create_date_page(today)
+    if not date_page_id:
+        log("❌ 날짜 페이지 가져오기 실패. 유튜브 분석 페이지 생성 중단.")
+        return None
+
     body = {
-        "parent":     {"page_id": NOTION_PARENT_PAGE_ID},
+        "parent":     {"page_id": date_page_id},
         "properties": {"title": {"title": [{"text": {"content": f"📺 {today} 유튜브 분석"}}]}},
     }
     r = requests.post("https://api.notion.com/v1/pages", headers=_nh(), json=body, timeout=30)
@@ -394,7 +430,6 @@ def get_or_create_daily_page(today: str) -> str | None:
     pages[today] = {"page_id": page_id, "channels": {}}
     _save_daily_pages(pages)
     return page_id
-
 
 def get_or_create_channel_toggle(today: str, channel: dict) -> str | None:
     """
