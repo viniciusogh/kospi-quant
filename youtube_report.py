@@ -53,7 +53,7 @@ LOCK_FILE            = os.path.join(_BASE_DIR, "youtube_report.lock")  # 중복 
 MAX_TRANSCRIPT_CHARS = 25000
 MAX_VIDEOS_PER_RUN   = 15    # 유료 전환 후 제한 해제
 LOCK_MAX_AGE_HOURS   = 0.5   # lock 파일 최대 유효 시간 (30분 — 정상 실행은 1~2분 내 완료)
-ANALYSIS_CACHE_DAYS  = 3     # 분석본 캐시 보존 기간 (daily_recommend 가 어제+오늘만 쓰니 3일이면 충분)
+ANALYSIS_CACHE_DAYS  = 7     # 분석본 캐시 보존 기간 (daily_recommend 가 최근 7일 사용)
 
 # cron 환경의 PATH 가 minimal 이라 Homebrew 경로 안 잡힘 → 절대 경로 폴백
 YT_DLP_BIN = shutil.which("yt-dlp") or "/opt/homebrew/bin/yt-dlp"
