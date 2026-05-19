@@ -202,6 +202,8 @@ def analyze_and_recommend(quant_csv: str, youtube_text: str) -> str | None:
 
 ## 출력 형식 (정확히 이대로)
 
+SUMMARY: <한 줄 (40자 이내). 5개 추천 종목을 관통하는 핵심 테마 요약. 예: "AI/반도체 견조, 방산·바이오 신규 모멘텀">
+
 # 🎯 {today} 최종 5개 추천종목
 
 ## 종목 비교표 (정량 + 성격 통합)
@@ -430,6 +432,20 @@ def push_to_notion(text: str) -> str | None:
             log(f"⚠️ 블록 추가 실패 ({i}): {r.status_code} {r.text[:120]}")
             return page_url
         time.sleep(0.2)
+
+    # 응답에서 SUMMARY 추출 후 database row 의 '이름' (title) UPDATE
+    m = re.search(r"^SUMMARY:\s*(.+)$", text, re.MULTILINE)
+    summary = m.group(1).strip()[:80] if m else f"{today} 분석 완료"
+    try:
+        requests.patch(
+            f"https://api.notion.com/v1/pages/{date_page_id}",
+            headers=_nh(),
+            json={"properties": {"이름": {"title": [{"type": "text", "text": {"content": summary}}]}}},
+            timeout=15,
+        )
+        log(f"✅ row 제목 update: {summary[:60]}")
+    except Exception as e:
+        log(f"⚠️ row 제목 update 실패: {e}")
 
     return page_url
 
