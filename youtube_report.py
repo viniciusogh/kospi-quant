@@ -395,34 +395,34 @@ def _get_entry(pages: dict, today: str) -> dict | None:
 
 
 def _get_or_create_date_page(today: str) -> str | None:
-    """🤖 Claude / {today} 날짜 페이지 찾거나 생성. 다른 워크플로우들과 동일 패턴."""
-    cursor = None
-    while True:
-        url = f"https://api.notion.com/v1/blocks/{NOTION_DATE_ROOT}/children?page_size=100"
-        if cursor:
-            url += f"&start_cursor={cursor}"
-        r = requests.get(url, headers=_nh(), timeout=15)
-        if r.status_code != 200:
-            log(f"⚠️ 날짜 부모 children 조회 실패 ({r.status_code}): {r.text[:200]}")
-            return None
-        j = r.json()
-        for b in j.get("results", []):
-            if b.get("type") == "child_page" and b.get("child_page", {}).get("title") == today:
-                return b["id"]
-        if not j.get("has_more"):
-            break
-        cursor = j.get("next_cursor")
+    """노션 database 의 today row 찾거나 생성. NOTION_DAILY_DB_ID 사용."""
+    db_id = os.environ.get("NOTION_DAILY_DB_ID", "")
+    if not db_id:
+        log("❌ NOTION_DAILY_DB_ID 미설정. database 패턴 사용 불가.")
+        return None
+
+    r = requests.post(
+        f"https://api.notion.com/v1/databases/{db_id}/query",
+        headers=_nh(),
+        json={"filter": {"property": "Date", "title": {"equals": today}}, "page_size": 1},
+        timeout=15,
+    )
+    if r.status_code == 200:
+        results = r.json().get("results", [])
+        if results:
+            return results[0]["id"]
 
     body = {
-        "parent":     {"page_id": NOTION_DATE_ROOT},
-        "properties": {"title": {"title": [{"text": {"content": today}}]}},
+        "parent": {"database_id": db_id},
+        "properties": {"Date": {"title": [{"type": "text", "text": {"content": today}}]}},
     }
     r = requests.post("https://api.notion.com/v1/pages", headers=_nh(), json=body, timeout=30)
     if r.status_code != 200:
-        log(f"❌ 날짜 페이지 생성 실패 ({r.status_code}): {r.text[:200]}")
+        log(f"❌ database row 생성 실패 ({r.status_code}): {r.text[:200]}")
         return None
-    log(f"✅ 날짜 페이지 생성: {today}")
+    log(f"✅ database row 생성: {today}")
     return r.json()["id"]
+
 
 
 def get_or_create_daily_page(today: str) -> str | None:
