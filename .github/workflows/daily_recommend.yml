@@ -36,4 +36,5 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           NOTION_REC_PARENT_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
+          NOTION_DAILY_DB_ID: ${{ secrets.NOTION_DAILY_DB_ID }}
         run: python daily_recommend.py
