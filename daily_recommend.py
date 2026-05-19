@@ -34,9 +34,9 @@ ANALYSIS_CACHE     = os.path.join(_BASE_DIR, "latest_youtube_analysis.json")
 NOTION_DAILY_PAGES = os.path.join(_BASE_DIR, "notion_daily_pages.json")
 LOCK_FILE          = os.path.join(_BASE_DIR, "daily_recommend.lock")
 LOCK_MAX_AGE_HOURS = 0.5  # 30분 (정상 실행은 1~2분)
-TOP_N              = 100        # TOP 100 까지 입력 (밖은 자동 제외)
-MIN_MCAP_KOSPI     = 500_000    # 백만원 단위 = 5,000억 이상 (소형주 노이즈 제외)
-MIN_MCAP_KOSDAQ    = 100_000    # 1,000억 이상 (KOSDAQ 은 대형주도 5천억 미만 많음)
+TOP_N              = 100        # TOP 100 까지 입력 (수급 점수 순)
+MIN_MCAP_KOSPI     = 0          # 시총 필터 제거 (사용자 요청 — 소형주도 후보)
+MIN_MCAP_KOSDAQ    = 0          # 동일
 
 
 def log(msg):
@@ -190,6 +190,7 @@ def analyze_and_recommend(quant_csv: str, youtube_text: str) -> str | None:
 3. **유튜브 화자 언급 필수**: 5개 종목 모두 **데이터 2 (최근 7일 유튜브 분석본) 에서 화자가 언급한 종목** 이어야 함. 언급 없는 종목 선정 금지. 단 언급은 단순 등장이 아니라 화자 의견 (긍정/부정/관심) 이 있어야 함.
 4. **시장 비율**: 가능하면 KOSPI 3 + KOSDAQ 2 또는 KOSPI 4 + KOSDAQ 1. 사정 없으면 자유.
 5. **종목명/코드 정확히 인용**: 데이터 1 의 record 에서 그대로 가져올 것. 추측/생성 금지.
+6. **시총 다양성**: 시총 큰 종목만 5개 고르지 말 것. 가능하면 대형주 + 중형주 + 소형주 섞어서. 작은 종목도 화자 언급 + 정량 신호 있으면 우선 선정.
 
 ## 데이터 1: 정량 모델 후보 (KOSPI 수급/Quality + KOSDAQ 수급)
 
@@ -203,7 +204,7 @@ def analyze_and_recommend(quant_csv: str, youtube_text: str) -> str | None:
 
 # 🎯 {today} 최종 5개 추천종목
 
-## 정량 데이터 비교표
+## 종목 비교표 (정량 + 성격 통합)
 
 | 항목 | 종목1 | 종목2 | 종목3 | 종목4 | 종목5 |
 |---|---|---|---|---|---|
@@ -222,6 +223,11 @@ def analyze_and_recommend(quant_csv: str, youtube_text: str) -> str | None:
 | 당일등락(%) | ... | ... | ... | ... | ... |
 | 5일 외인+기관(백만) | ... | ... | ... | ... | ... |
 | 수급강도 | ... | ... | ... | ... | ... |
+| 유형 | 자산형/실적형 가치주, 성장주, 모멘텀 등 | ... | ... | ... | ... |
+| 매력 포인트 | 1~2 키워드 (예: PBR 0.3 청산가치) | ... | ... | ... | ... |
+| 리스크 | 1~2 키워드 (예: ROE 0.34% 부진) | ... | ... | ... | ... |
+| 수급 신호 | 매수 유입 / 매수 이탈 / 혼조 | ... | ... | ... | ... |
+| 화자 관심도 | 강함 / 보통 / 약함 | ... | ... | ... | ... |
 
 ## 종목별 화자 의견 (최근 7일)
 
@@ -232,16 +238,6 @@ def analyze_and_recommend(quant_csv: str, youtube_text: str) -> str | None:
 - 화자 의견 요약: 1~2줄
 
 (2~5 종목도 같은 형식)
-
-## 종목 성격 비교표
-
-| 항목 | 종목1 | 종목2 | 종목3 | 종목4 | 종목5 |
-|---|---|---|---|---|---|
-| 유형 | 자산형 가치주 / 실적형 가치주 / 성장주 / 모멘텀 등 | ... | ... | ... | ... |
-| 매력 포인트 | 1~2 키워드 | ... | ... | ... | ... |
-| 리스크 | 1~2 키워드 | ... | ... | ... | ... |
-| 수급 신호 | 매수 유입/이탈/혼조 | ... | ... | ... | ... |
-| 화자 관심도 | 강함/보통/약함 | ... | ... | ... | ... |
 
 ## 핵심 한 줄 요약
 
@@ -469,7 +465,7 @@ def _run():
         if rec:
             parts.append(f"### {label} TOP {TOP_N} (시총 필터 적용, 각 객체가 1 종목)\n{rec}")
     quant_csv = "\n\n".join(parts)
-    log(f"✅ 정량 데이터 수집: {len(quant_csv):,}자 (KOSPI ≥{MIN_MCAP_KOSPI//10000}억, KOSDAQ ≥{MIN_MCAP_KOSDAQ//10000}억)")
+    log(f"✅ 정량 데이터 수집: {len(quant_csv):,}자 (시총 필터 없음, 수급 TOP {TOP_N})")
 
     if not quant_csv:
         log("❌ 정량 데이터 없음. 종료.")
