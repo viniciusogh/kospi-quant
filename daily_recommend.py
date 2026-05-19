@@ -306,7 +306,7 @@ def _get_or_create_date_page(today: str) -> str | None:
     r = requests.post(
         f"https://api.notion.com/v1/databases/{db_id}/query",
         headers=_nh(),
-        json={"filter": {"property": "이름", "title": {"equals": today}}, "page_size": 1},
+        json={"filter": {"property": "날짜", "date": {"equals": today}}, "page_size": 1},
         timeout=15,
     )
     if r.status_code == 200:
@@ -316,7 +316,10 @@ def _get_or_create_date_page(today: str) -> str | None:
 
     body = {
         "parent": {"database_id": db_id},
-        "properties": {"이름": {"title": [{"type": "text", "text": {"content": today}}]}},
+        "properties": {
+            "이름": {"title": [{"type": "text", "text": {"content": "준비 중"}}]},
+            "날짜": {"date": {"start": today}},
+        },
     }
     r = requests.post("https://api.notion.com/v1/pages", headers=_nh(), json=body, timeout=30)
     if r.status_code != 200:
