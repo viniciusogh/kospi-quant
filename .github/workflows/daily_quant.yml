@@ -63,6 +63,7 @@ jobs:
           APP_SECRET: ${{ secrets.APP_SECRET }}
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
+          NOTION_DAILY_DB_ID: ${{ secrets.NOTION_DAILY_DB_ID }}
           OUTPUT_DIR: ${{ github.workspace }}
         run: python kosdaq.py
 
@@ -72,6 +73,7 @@ jobs:
           APP_SECRET: ${{ secrets.APP_SECRET }}
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
+          NOTION_DAILY_DB_ID: ${{ secrets.NOTION_DAILY_DB_ID }}
           OUTPUT_DIR: ${{ github.workspace }}
         run: python quality.py
 
@@ -79,6 +81,7 @@ jobs:
         env:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
+          NOTION_DAILY_DB_ID: ${{ secrets.NOTION_DAILY_DB_ID }}
         run: python intersection.py
         continue-on-error: true   # 교집합 없을 때도 워크플로 종료 안 됨
 
