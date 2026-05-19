@@ -635,36 +635,41 @@ def to_korean_columns(df: pd.DataFrame) -> pd.DataFrame:
 # Notion 업로드
 # ==========================
 def _get_or_create_date_page(date_str: str, headers: dict, root_parent_id: str) -> str:
-    """루트 부모 하위에 'YYYY-MM-DD' 날짜 페이지를 찾거나 만들어 ID 반환."""
-    try:
-        r = requests.post(
-            "https://api.notion.com/v1/search", headers=headers, timeout=15,
-            json={"query": date_str, "filter": {"property": "object", "value": "page"}},
-        )
-        if r.status_code == 200:
-            target_parent = root_parent_id.replace("-", "")
-            for result in r.json().get("results", []):
-                p = result.get("parent", {})
-                if p.get("type") != "page_id":
-                    continue
-                if p.get("page_id", "").replace("-", "") != target_parent:
-                    continue
-                t_arr = result.get("properties", {}).get("title", {}).get("title", [])
-                actual = t_arr[0]["text"]["content"] if t_arr else ""
-                if actual.strip() == date_str.strip() and not result.get("archived", False):
-                    return result["id"]
-    except Exception:
-        pass
+    """노션 database 의 today row 찾거나 생성. row ID = 그 날짜 페이지 ID.
+    NOTION_DAILY_DB_ID 환경변수 = database ID."""
+    import os
+    db_id = os.environ.get("NOTION_DAILY_DB_ID", "")
+    if not db_id:
+        # fallback (옛 페이지 구조) - 이 파일이 root_parent_id 아래 child_page 검색
+        try:
+            r = requests.post(
+                "https://api.notion.com/v1/databases/" + root_parent_id + "/query",
+                headers=headers, timeout=15
+            )
+        except Exception:
+            pass
+        raise RuntimeError("NOTION_DAILY_DB_ID 가 설정되지 않음")
+
+    # database 에서 today row 찾기
+    r = requests.post(
+        f"https://api.notion.com/v1/databases/{db_id}/query",
+        headers=headers,
+        json={"filter": {"property": "Date", "title": {"equals": date_str}}, "page_size": 1},
+        timeout=15,
+    )
+    if r.status_code == 200:
+        results = r.json().get("results", [])
+        if results:
+            return results[0]["id"]
+
+    # 없으면 새 row 생성
     body = {
-        "parent": {"page_id": root_parent_id},
-        "properties": {"title": {"title": [{"text": {"content": date_str}}]}},
+        "parent": {"database_id": db_id},
+        "properties": {"Date": {"title": [{"type": "text", "text": {"content": date_str}}]}},
     }
     r = requests.post("https://api.notion.com/v1/pages", headers=headers, json=body, timeout=15)
-    if r.status_code == 200:
-        log(f"  📅 날짜 페이지 생성: {date_str}")
-        return r.json()["id"]
-    log(f"  ❌ 날짜 페이지 생성 실패: {r.text[:200]}")
-    return root_parent_id
+    r.raise_for_status()
+    return r.json()["id"]
 
 
 def _archive_same_title_pages(title: str, headers: dict, parent_id: str):
