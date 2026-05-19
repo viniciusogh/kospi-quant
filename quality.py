@@ -654,7 +654,7 @@ def _get_or_create_date_page(date_str: str, headers: dict, root_parent_id: str) 
     r = requests.post(
         f"https://api.notion.com/v1/databases/{db_id}/query",
         headers=headers,
-        json={"filter": {"property": "이름", "title": {"equals": date_str}}, "page_size": 1},
+        json={"filter": {"property": "날짜", "date": {"equals": date_str}}, "page_size": 1},
         timeout=15,
     )
     if r.status_code == 200:
@@ -665,7 +665,10 @@ def _get_or_create_date_page(date_str: str, headers: dict, root_parent_id: str) 
     # 없으면 새 row 생성
     body = {
         "parent": {"database_id": db_id},
-        "properties": {"이름": {"title": [{"type": "text", "text": {"content": date_str}}]}},
+        "properties": {
+            "이름": {"title": [{"type": "text", "text": {"content": "준비 중"}}]},
+            "날짜": {"date": {"start": date_str}},
+        },
     }
     r = requests.post("https://api.notion.com/v1/pages", headers=headers, json=body, timeout=15)
     r.raise_for_status()
