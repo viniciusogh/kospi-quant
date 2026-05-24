@@ -240,6 +240,7 @@ def get_valuation_info(code: str, access_token: str):
     """
     inquire-price (FHKST01010100) output에서
     - hts_avls: 시가총액
+    - stck_prpr: 주식 현재가 (당일 종가)
     - per: PER
     - eps: EPS
     - bstp_kor_isnm: 업종 한글명 (섹터 중립화·Notion 표시용)
@@ -260,7 +261,7 @@ def get_valuation_info(code: str, access_token: str):
     r = safe_request_get(url, headers, params, max_retry=3, timeout=3)
     polite_sleep()
     if r is None:
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None
 
     try:
         data = r.json().get("output", {})
@@ -291,10 +292,11 @@ def get_valuation_info(code: str, access_token: str):
         eps = _safe(eps)
         pbr = _safe(pbr)
         prdy_ctrt = _safe_pct(data.get("prdy_ctrt"))
+        price = _safe_pct(data.get("stck_prpr"))  # 종가는 0 가능성 X 라 _safe_pct 패턴 충분
 
-        return mktcap, per, eps, pbr, industry, prdy_ctrt
+        return mktcap, per, eps, pbr, industry, prdy_ctrt, price
     except Exception:
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None
 
 # ==========================
 # 일별 종가 조회 + 이동평균선 정배열 확인
@@ -620,6 +622,7 @@ def to_korean_columns(df: pd.DataFrame) -> pd.DataFrame:
         "industry": "섹터",
         "rank_change": "순위변동",
         "prdy_ctrt": "당일등락(%)",
+        "price": "주가",
     }
     return df.rename(columns={c: col_map.get(c, c) for c in df.columns})
 
@@ -869,25 +872,27 @@ def main():
     pbrs = [None] * total
     industries = [None] * total
     prdy_ctrts = [None] * total
+    prices = [None] * total
     rows = list(base_df.reset_index(drop=True).iterrows())
 
     def cap_worker(pos_and_row):
         pos, row = pos_and_row
         code = row["단축코드"]
-        mktcap, per, eps, pbr, industry, prdy_ctrt = get_valuation_info(code, access_token)
+        mktcap, per, eps, pbr, industry, prdy_ctrt, price = get_valuation_info(code, access_token)
         time.sleep(0.15)  # 호출 매너
-        return pos, mktcap, per, eps, pbr, industry, prdy_ctrt
+        return pos, mktcap, per, eps, pbr, industry, prdy_ctrt, price
 
     with ThreadPoolExecutor(max_workers=WORKERS_MKTCAP) as ex:
         futures = {ex.submit(cap_worker, pr): pr[0] for pr in rows}
         for cnt, future in enumerate(as_completed(futures), start=1):
-            pos, cap, per, eps, pbr, industry, prdy_ctrt = future.result()
+            pos, cap, per, eps, pbr, industry, prdy_ctrt, price = future.result()
             caps[pos] = cap
             pers[pos] = per
             epss[pos] = eps
             pbrs[pos] = pbr
             industries[pos] = industry
             prdy_ctrts[pos] = prdy_ctrt
+            prices[pos] = price
 
             elapsed = time.time() - start_cap
             speed = cnt / elapsed if elapsed > 0 else 0
@@ -907,6 +912,7 @@ def main():
     cap_df["pbr"] = pbrs
     cap_df["industry"] = industries
     cap_df["prdy_ctrt"] = prdy_ctrts
+    cap_df["price"] = prices
     cap_df.rename(columns={"단축코드": "code", "한글명": "name"}, inplace=True)
 
     # 시총 결측/0 제거 후 상위 200
