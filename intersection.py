@@ -57,10 +57,13 @@ def find_intersection(df_sugup: pd.DataFrame, df_quality: pd.DataFrame) -> pd.Da
     # 수급 데이터에서 교집합 추출
     inter = df_sugup[df_sugup["종목코드"].isin(common_codes)].copy()
 
-    # quality 점수 병합
+    # quality 점수 + 재무 지표 병합
+    # (수급_reco 가 순수 수급만 가지도록 변경됨 — 2026-05-24)
     q_cols = ["종목코드"]
-    if "퀄리티점수" in df_quality.columns:
-        q_cols.append("퀄리티점수")
+    for c in ["퀄리티점수", "PER", "PBR", "EPS", "ROE(%)", "부채비율(%)",
+              "매출증가율(%)", "영업이익증가율(%)"]:
+        if c in df_quality.columns:
+            q_cols.append(c)
     inter = inter.merge(df_quality[q_cols], on="종목코드", how="left")
 
     # 멀티팩터점수 기준 정렬

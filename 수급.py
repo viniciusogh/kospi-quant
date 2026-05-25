@@ -1004,8 +1004,11 @@ def main():
     # ------------------------------------
     csv_path = os.path.join(_BASE_DIR, "latest_kospi_supply.csv")
     all_kor["기준일자"] = today_str
-    all_kor.to_csv(csv_path, index=False, encoding="utf-8-sig")
-    log(f"✅ latest_kospi_supply.csv 저장: {csv_path}")
+    # 수급 모델 = 순수 수급만. 재무 지표는 Quality CSV 로 분리 (2026-05-24).
+    fin_cols_drop = ["PER", "PBR", "EPS", "ROE(%)", "부채비율(%)", "매출증가율(%)", "영업이익증가율(%)"]
+    all_kor_supply_only = all_kor.drop(columns=[c for c in fin_cols_drop if c in all_kor.columns])
+    all_kor_supply_only.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    log(f"✅ latest_kospi_supply.csv 저장 (수급 only): {csv_path}")
 
     # ------------------------------------
     # 4.7) 교집합용 CSV 저장 (시총 상위 200 유니버스 내 상위 100개)
@@ -1018,8 +1021,10 @@ def main():
     reco_100_kor["랭킹"] = np.arange(1, len(reco_100_kor) + 1)
     reco_100_kor.drop(columns=["rank"], inplace=True, errors="ignore")
     reco_csv_path = os.path.join(_BASE_DIR, "latest_수급_reco.csv")
-    reco_100_kor.to_csv(reco_csv_path, index=False, encoding="utf-8-sig")
-    log(f"✅ 수급 교집합용 CSV 저장: {INTER_N}개 ({reco_csv_path})")
+    # 수급 모델 = 순수 수급. 재무 컬럼 drop (intersection.py 가 quality_reco 에서 가져옴)
+    reco_100_supply_only = reco_100_kor.drop(columns=[c for c in fin_cols_drop if c in reco_100_kor.columns])
+    reco_100_supply_only.to_csv(reco_csv_path, index=False, encoding="utf-8-sig")
+    log(f"✅ 수급 교집합용 CSV 저장 (수급 only): {INTER_N}개 ({reco_csv_path})")
 
     # ------------------------------------
     # 5) Notion 업로드
