@@ -2,11 +2,16 @@ name: Daily Quant Analysis
 
 on:
   schedule:
-    - cron: '30 8 * * 1-5'  # 17:30 KST (UTC+9), 평일만
-  workflow_dispatch:          # GitHub UI에서 수동 실행 가능
+    - cron: '30 8 * * 1-5'  # 17:30 KST (UTC+9), 평일만 (backup)
+  workflow_dispatch:          # cron-job.org 가 매일 16:45 KST trigger
 
 permissions:
   contents: write
+
+# 동시 실행 차단 — schedule + workflow_dispatch race 방지 (2026-05-22 conflict 이슈)
+concurrency:
+  group: daily-quant
+  cancel-in-progress: false   # 큐 대기 (이미 도는 거 끝날 때까지)
 
 jobs:
   run-quant:
