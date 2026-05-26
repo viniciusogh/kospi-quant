@@ -212,6 +212,8 @@ def analyze_with_gemini(title: str, transcript: str, date: str, channel_name: st
 자막의 흐름을 따라가며 중요한 내용이 빠지지 않게 작성하되, 반복 내용은 한 번만 정리해주세요.
 독자가 영상을 보지 않아도 전체 내용을 완전히 파악할 수 있도록 상세하게 작성해주세요.
 
+**스타일** (CAVEMAN MODE): 군더더기 / 완곡어 / 감탄사 / 미사여구 X. 명사구 + 단편 OK. 종목·숫자·팩트 위주. 길게 풀어 쓰지 말 것. 단 누락 X. 모든 사실 보존하되 짧게.
+
 영상 제목: {title}
 게시일: {date}
 
