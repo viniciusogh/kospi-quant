@@ -1,9 +1,9 @@
 name: Daily Recommendation
 
 on:
-  schedule:
-    - cron: '0 13 * * *'  # 22:00 KST (UTC+9), 매일 — 마지막 영상 fetch 후 종합
-  workflow_dispatch:        # 수동 실행 가능
+  workflow_dispatch:  # cron-job.org 가 매일 22:00 KST 정확 trigger
+                      # schedule 라인 제거 — GitHub Actions free tier 지연 (~3h)
+                      # 으로 새벽 발동 noise 발생 (2026-06-04 fix)
 
 permissions:
   contents: write
