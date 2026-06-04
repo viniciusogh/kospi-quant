@@ -216,6 +216,10 @@
   },
   "2026-06-04": {
     "page_id": "3744a006-32f8-816f-bcd4-cf3294e24a5f",
-    "channels": {}
+    "channels": {
+      "3proTV": "3754a006-32f8-81c1-b7bd-c79c18f74d59",
+      "futuresnow": "3754a006-32f8-81de-ab35-f8e8badc6770",
+      "moneydo": "3754a006-32f8-81bc-995f-c4b8ff05cba8"
+    }
   }
 }
