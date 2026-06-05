@@ -235,6 +235,8 @@
   },
   "2026-06-06": {
     "page_id": "3764a006-32f8-81fd-9951-efa0a241cbc9",
-    "channels": {}
+    "channels": {
+      "moneyinside": "3764a006-32f8-8156-a2d2-dd513e43d7ca"
+    }
   }
 }
