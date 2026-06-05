@@ -509,13 +509,14 @@ def compute_multifactor_score(df: pd.DataFrame) -> pd.Series:
     debt_filled = df["debt_ratio"].fillna(df["debt_ratio"].median()).fillna(100)
     z_safety = _cz_by_sector(-debt_filled, sec).fillna(0)
 
-    return (
-        0.20 * z_supply
-        + 0.30 * z_val
-        + 0.25 * z_quality
-        + 0.15 * z_growth
-        + 0.10 * z_safety
-    )
+    # 팩터별 가중 기여도 노출 (리포트 카드용 — 합 = raw_score)
+    df["f_supply"]  = 0.20 * z_supply
+    df["f_value"]   = 0.30 * z_val
+    df["f_quality"] = 0.25 * z_quality
+    df["f_growth"]  = 0.15 * z_growth
+    df["f_safety"]  = 0.10 * z_safety
+
+    return df["f_supply"] + df["f_value"] + df["f_quality"] + df["f_growth"] + df["f_safety"]
 
 
 # ==========================
@@ -703,6 +704,41 @@ def _archive_same_title_pages(title: str, headers: dict, parent_id: str):
         log(f"  기존 페이지 확인 중 오류 (무시): {e}")
 
 
+# 팩터 라벨(2글자는 뒤 2칸 패딩 → monospace 폭을 3글자 퀄리티와 맞춤), 컬럼
+_FACTOR_COLS = [("수급  ", "f_supply"), ("밸류  ", "f_value"),
+                ("퀄리티", "f_quality"), ("성장  ", "f_growth"), ("안정  ", "f_safety")]
+_FACTOR_DENOM = 0.9   # 단일 팩터 최대 기여도 (0.30 가중 × z=3) — 막대 공통 분모
+
+
+def _factor_card(rank: int, row) -> dict:
+    """종목 1개의 팩터 기여도를 monospace code 블록으로. 막대 정렬 위해 callout 대신 code."""
+    medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, f"{rank:>2}.")
+    sector = row.get("섹터")
+    sector = sector if (sector and not pd.isna(sector)) else "-"
+    jb = "  ✅정배열" if row.get("정배열") else ""
+    head = (f"{medal} {row.get('종목명', '')} ({row.get('종목코드', '')}) · {sector}\n"
+            f"   점수 {float(row.get('멀티팩터점수', 0)):.2f}  |  "
+            f"등락 {fmt_pct(row.get('당일등락(%)'))}  |  "
+            f"순위 {fmt_rank_change(row.get('순위변동'))}{jb}\n")
+    lines, contribs = [], []
+    for label, col in _FACTOR_COLS:
+        try:
+            c = float(row.get(col, 0) or 0)
+        except Exception:
+            c = 0.0
+        contribs.append((label.strip(), c))
+        n = round(min(abs(c), _FACTOR_DENOM) / _FACTOR_DENOM * 10)
+        bar = "█" * n + "░" * (10 - n)
+        lines.append(f"   {label} {bar} {c:+.2f}")
+    pos = sorted([x for x in contribs if x[1] > 0], key=lambda x: -x[1])[:2]
+    drive = "   → 주도: " + ", ".join(p[0] for p in pos) if pos else "   → 전반 약세"
+    text = head + "\n".join(lines) + "\n" + drive
+    return {"object": "block", "type": "code", "code": {
+        "rich_text": [{"type": "text", "text": {"content": text}}],
+        "language": "plain text",
+    }}
+
+
 def upload_to_notion(reco_kor: pd.DataFrame):
     """추천종목 표를 Notion 새 페이지에 업로드"""
     headers = {
@@ -762,26 +798,36 @@ def upload_to_notion(reco_kor: pd.DataFrame):
 
     date_parent_id = _get_or_create_date_page(today_str, headers, NOTION_PARENT_PAGE_ID)
 
+    children = [
+        {"object": "block", "type": "heading_3",
+         "heading_3": {"rich_text": [{"type": "text", "text": {"content": "🏆 팩터 기여도 TOP10"}}]}},
+        {"object": "block", "type": "callout",
+         "callout": {
+             "rich_text": [{"type": "text", "text": {"content":
+                 "막대 = 점수 기여도 (가중 z-score). 수급 0.20 · 밸류 0.30 · 퀄리티 0.25 · 성장 0.15 · 안정 0.10"}}],
+             "icon": {"type": "emoji", "emoji": "ℹ️"},
+             "color": "gray_background"}},
+    ]
+    for rank, (_, row) in enumerate(reco_kor.head(10).iterrows(), 1):
+        children.append(_factor_card(rank, row))
+
+    children.append({"object": "block", "type": "divider", "divider": {}})
+    children.append({"object": "block", "type": "heading_3",
+        "heading_3": {"rich_text": [{"type": "text", "text": {"content": f"📋 전체 TOP{len(reco_kor)} 상세"}}]}})
+    children.append({
+        "object": "block", "type": "table",
+        "table": {
+            "table_width": len(col_labels),
+            "has_column_header": True,
+            "has_row_header": False,
+            "children": rows,
+        },
+    })
+
     body = {
         "parent": {"page_id": date_parent_id},
         "properties": {"title": {"title": [{"text": {"content": f"🇰🇷 {today_str} KOSDAQ 추천종목"}}]}},
-        "children": [
-            {
-                "object": "block",
-                "type": "heading_2",
-                "heading_2": {"rich_text": [{"type": "text", "text": {"content": f"코스닥 멀티팩터 추천종목 TOP{len(reco_kor)} ({today_str})"}}]},
-            },
-            {
-                "object": "block",
-                "type": "table",
-                "table": {
-                    "table_width": len(col_labels),
-                    "has_column_header": True,
-                    "has_row_header": False,
-                    "children": rows,
-                },
-            },
-        ],
+        "children": children,
     }
 
     # 동일 제목 페이지 있으면 archive (중복 방지)
