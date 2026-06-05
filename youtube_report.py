@@ -657,10 +657,14 @@ def _process_channel(channel: dict, today: str, page_id: str):
     all_blocks = []
     processed_now = []
     for r in results:
+        # Gemini 분석 실패(429 등) 영상은 마킹·업로드 안 함 → 다음 run 에서 재시도.
+        # (예전엔 무조건 마킹해서 결제 소진 시간대 영상이 영구 skip 됐음)
+        if not r["analysis"]:
+            log(f"    ⏭️ Gemini 분석 실패 → 마킹 안 함, 다음 run 재시도: {r['video']['title'][:40]}")
+            continue
         all_blocks.extend(build_video_blocks(r["video"], r["analysis"], r["transcript_len"]))
         processed_now.append(r["video"]["id"])
-        if r["analysis"]:
-            _save_analysis_cache(today, channel, r["video"], r["analysis"])
+        _save_analysis_cache(today, channel, r["video"], r["analysis"])
 
     if not all_blocks:
         log("⚠️ 업로드할 내용 없음. 종료.")
