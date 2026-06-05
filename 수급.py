@@ -25,6 +25,9 @@ input_csv = os.environ.get("INPUT_CSV",
 NOTION_API_KEY        = os.environ["NOTION_API_KEY"]
 NOTION_PARENT_PAGE_ID = os.environ.get("NOTION_PARENT_PAGE_ID", "3324a00632f880fbb014d766d87a1079")
 
+# Gemini (시장 요약문 생성용 — 키 없으면 요약 생략, 표/카드는 정상)
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+
 # 코스피
 MRKT_CODE = "J"
 
@@ -699,6 +702,87 @@ def _archive_same_title_pages(title: str, headers: dict, parent_id: str):
         log(f"  기존 페이지 확인 중 오류 (무시): {e}")
 
 
+def summarize_supply(reco_kor: pd.DataFrame) -> str:
+    """상위 10종목의 섹터·수급 흐름을 Gemini 로 2~3문장 요약. 키 없으면 빈 문자열."""
+    if not GEMINI_API_KEY:
+        return ""
+    lines = []
+    for _, r in reco_kor.head(10).iterrows():
+        sector = r.get("섹터")
+        sector = sector if (sector and not pd.isna(sector)) else "-"
+        lines.append(
+            f"{int(r.get('랭킹', 0))}. {r.get('종목명', '')} [{sector}] "
+            f"점수 {float(r.get('멀티팩터점수', 0)):.2f}, 등락 {fmt_pct(r.get('당일등락(%)'))}, "
+            f"순위변동 {fmt_rank_change(r.get('순위변동'))}, "
+            f"{'정배열' if r.get('정배열') else '비정배열'}"
+        )
+    prompt = (
+        "아래는 오늘 KOSPI 수급(외국인+기관 순매수 모멘텀) 모델 상위 10종목이다. "
+        "왜 이 종목군이 상위에 올랐는지 공통 테마(섹터/수급 흐름) 중심으로 2~3문장 요약하라. "
+        "미사여구·추측 금지, 주어진 데이터만 사용. 종목 단순 나열 금지.\n\n"
+        + "\n".join(lines)
+    )
+    try:
+        from google import genai
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        resp = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+        return (resp.text or "").strip()
+    except Exception as e:
+        log(f"  Gemini 요약 실패 (무시): {e}")
+        return ""
+
+
+def _card_reason(row) -> str:
+    """카드 한줄평을 데이터에서 규칙 기반 생성 (LLM 미사용)."""
+    parts = []
+    try:
+        fore = float(row.get("외국인_순매수대금(백만원)", 0) or 0)
+        inst = float(row.get("기관_순매수대금(백만원)", 0) or 0)
+    except Exception:
+        fore = inst = 0.0
+    if fore > 0 and inst > 0:
+        parts.append("외국인·기관 동반 순매수")
+    elif fore > 0:
+        parts.append("외국인 순매수")
+    elif inst > 0:
+        parts.append("기관 순매수")
+    rc = row.get("순위변동")
+    try:
+        if rc is None or pd.isna(rc):
+            parts.append("신규 진입")
+        elif rc >= 30:
+            parts.append(f"순위 +{int(rc)} 급등")
+    except Exception:
+        pass
+    if row.get("정배열"):
+        parts.append("주가 정배열")
+    return " · ".join(parts) if parts else "수급 점수 상위"
+
+
+def _stock_card(rank: int, row) -> dict:
+    """상위 종목 1개를 Notion callout 카드 블록으로."""
+    icon = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, "📈")
+    sector = row.get("섹터")
+    sector = sector if (sector and not pd.isna(sector)) else "-"
+    arr = "  ✅정배열" if row.get("정배열") else ""
+    rich = [
+        {"type": "text", "text": {"content": f"{row.get('종목명', '')} "},
+         "annotations": {"bold": True}},
+        {"type": "text", "text": {"content": f"({row.get('종목코드', '')}) · {sector}\n"}},
+        {"type": "text", "text": {"content":
+            f"수급점수 {float(row.get('멀티팩터점수', 0)):.2f}  |  "
+            f"등락 {fmt_pct(row.get('당일등락(%)'))}  |  "
+            f"순위 {fmt_rank_change(row.get('순위변동'))}{arr}\n"}},
+        {"type": "text", "text": {"content": _card_reason(row)},
+         "annotations": {"italic": True, "color": "gray"}},
+    ]
+    return {"object": "block", "type": "callout", "callout": {
+        "rich_text": rich,
+        "icon": {"type": "emoji", "emoji": icon},
+        "color": "blue_background" if rank <= 3 else "gray_background",
+    }}
+
+
 def upload_to_notion(reco_kor: pd.DataFrame):
     """추천종목 표를 Notion 새 페이지에 업로드"""
     headers = {
@@ -759,26 +843,48 @@ def upload_to_notion(reco_kor: pd.DataFrame):
     # 날짜별 부모 페이지 (없으면 자동 생성)
     date_parent_id = _get_or_create_date_page(today_str, headers, NOTION_PARENT_PAGE_ID)
 
+    # 시장 요약문 (Gemini, 키 없으면 생략)
+    summary = summarize_supply(reco_kor)
+
+    children = []
+    if summary:
+        children.append({
+            "object": "block", "type": "callout",
+            "callout": {
+                "rich_text": [{"type": "text", "text": {"content": summary}}],
+                "icon": {"type": "emoji", "emoji": "📝"},
+                "color": "yellow_background",
+            },
+        })
+
+    # TOP10 카드
+    children.append({
+        "object": "block", "type": "heading_3",
+        "heading_3": {"rich_text": [{"type": "text", "text": {"content": "🏆 상위 10종목"}}]},
+    })
+    for rank, (_, row) in enumerate(reco_kor.head(10).iterrows(), 1):
+        children.append(_stock_card(rank, row))
+
+    # 구분선 + 전체 표 (상세)
+    children.append({"object": "block", "type": "divider", "divider": {}})
+    children.append({
+        "object": "block", "type": "heading_3",
+        "heading_3": {"rich_text": [{"type": "text", "text": {"content": f"📋 전체 TOP{len(reco_kor)} 상세"}}]},
+    })
+    children.append({
+        "object": "block", "type": "table",
+        "table": {
+            "table_width": len(col_labels),
+            "has_column_header": True,
+            "has_row_header": False,
+            "children": rows,
+        },
+    })
+
     body = {
         "parent": {"page_id": date_parent_id},
         "properties": {"title": {"title": [{"text": {"content": f"📊 {today_str} KOSPI 수급 추천종목"}}]}},
-        "children": [
-            {
-                "object": "block",
-                "type": "heading_2",
-                "heading_2": {"rich_text": [{"type": "text", "text": {"content": f"코스피 수급 추천종목 TOP{len(reco_kor)} ({today_str})"}}]},
-            },
-            {
-                "object": "block",
-                "type": "table",
-                "table": {
-                    "table_width": len(col_labels),
-                    "has_column_header": True,
-                    "has_row_header": False,
-                    "children": rows,
-                },
-            },
-        ],
+        "children": children,
     }
 
     # 동일 제목 페이지 있으면 archive (중복 방지)
