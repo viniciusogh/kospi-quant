@@ -18,6 +18,9 @@ _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 NOTION_API_KEY        = os.environ["NOTION_API_KEY"]
 NOTION_PARENT_PAGE_ID = os.environ.get("NOTION_PARENT_PAGE_ID", "3324a00632f880fbb014d766d87a1079")
+GEMINI_API_KEY        = os.environ.get("GEMINI_API_KEY", "")  # 없으면 요약 단락 생략 (graceful)
+
+TOP_NOTION_N      = 5     # 노션에 카드로 노출할 추천 수 (raw 테이블 대신 결론만)
 
 TOP_MCAP_N        = 300   # 시총 상위 N개에서 필터
 TOP_RECO_N        = 20    # 최종 추천 종목 수
@@ -215,13 +218,19 @@ def compute_us_multifactor(df: pd.DataFrame) -> pd.Series:
     debt_filled = df["debt_equity"].fillna(df["debt_equity"].median()).fillna(100)
     z_safety = _cz_by_sector(-debt_filled, sec).fillna(0)
 
-    return (
+    raw = (
         0.20 * z_mom
         + 0.25 * z_val
         + 0.25 * z_quality
         + 0.15 * z_growth
         + 0.15 * z_safety
     )
+    # 추천 이유 설명용으로 팩터별 z-score 도 함께 반환 (점수와 100% 일치하는 근거)
+    return pd.DataFrame({
+        "raw_score": raw,
+        "f_mom": z_mom, "f_val": z_val, "f_quality": z_quality,
+        "f_growth": z_growth, "f_safety": z_safety,
+    })
 
 # ==========================
 # 점수 EMA 평탄화 + 순위 변동
@@ -292,6 +301,48 @@ def fmt_pct(v) -> str:
         return "-"
     sign = "+" if v > 0 else ""
     return f"{sign}{float(v):.2f}%"
+
+# ==========================
+# 추천 이유 (팩터 기반, 결정론)
+# ==========================
+_FACTOR_LABELS = {"f_mom": "모멘텀", "f_val": "밸류", "f_quality": "퀄리티",
+                  "f_growth": "성장", "f_safety": "안정성"}
+
+def build_reason(row) -> str:
+    """랭킹을 만든 팩터 중 강한 1~2개로 한 줄 이유 생성. 점수와 100% 일치."""
+    fs = [(lbl, row.get(k)) for k, lbl in _FACTOR_LABELS.items()]
+    fs = [(lbl, v) for lbl, v in fs if v is not None and not pd.isna(v) and v > 0]
+    fs.sort(key=lambda x: x[1], reverse=True)
+    parts = []
+    if fs:
+        parts.append("·".join(lbl for lbl, _ in fs[:2]) + " 우위")
+    if row.get("ma_aligned"):
+        parts.append("정배열")
+    return ", ".join(parts) if parts else "종합 점수 상위"
+
+def summarize_us(reco_df: pd.DataFrame) -> str:
+    """상위 5종목의 팩터·섹터를 Gemini 로 2~3문장 요약. 키 없으면 빈 문자열."""
+    if not GEMINI_API_KEY:
+        return ""
+    lines = []
+    for rank, (_, r) in enumerate(reco_df.head(TOP_NOTION_N).iterrows(), 1):
+        lines.append(f"{rank}. {r['ticker']} {r.get('name','')} "
+                     f"[{r.get('sector','')}] 점수 {float(r['multi_score']):.3f}, "
+                     f"강한팩터 {build_reason(r)}, 등락 {fmt_pct(r.get('prdy_ctrt'))}")
+    prompt = (
+        "아래는 오늘 S&P500 멀티팩터 모델 상위 종목이다. "
+        "왜 이 종목군이 상위에 올랐는지 공통 테마(섹터/팩터) 중심으로 2~3문장 요약하라. "
+        "미사여구·추측 금지, 주어진 데이터만 사용. 종목 나열 반복 금지.\n\n"
+        + "\n".join(lines)
+    )
+    try:
+        from google import genai
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        resp = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+        return (resp.text or "").strip()
+    except Exception as e:
+        log(f"  Gemini 요약 실패 (무시): {e}")
+        return ""
 
 # ==========================
 # Notion 업로드
@@ -374,68 +425,63 @@ def upload_us_to_notion(reco_df: pd.DataFrame):
     }
     today_str = datetime.now(KST).strftime("%Y-%m-%d")
 
-    col_labels = ["랭킹", "순위변동", "당일등락(%)", "티커", "종목명", "섹터", "정배열", "멀티팩터점수",
-                  "3M수익률(%)", "시가총액(B$)", "PER", "PBR",
-                  "ROE(%)", "부채비율(%)"]
+    def _rt(content, bold=False):
+        rt = {"type": "text", "text": {"content": str(content)}}
+        if bold:
+            rt["annotations"] = {"bold": True}
+        return rt
 
-    def cell(text):
-        return [{"type": "text", "text": {"content": str(text)}}]
+    def _dot(pct):
+        if pct is None or pd.isna(pct):
+            return "🟡"
+        return "🟢" if pct > 0 else ("🔴" if pct < 0 else "🟡")
 
-    def _v(val):
-        try:
-            return None if (val is None or pd.isna(val)) else val
-        except Exception:
-            return None
+    top = reco_df.head(TOP_NOTION_N)
 
-    rows = [{"type": "table_row", "table_row": {"cells": [cell(c) for c in col_labels]}}]
+    children = [{
+        "object": "block", "type": "heading_2",
+        "heading_2": {"rich_text": [_rt(f"S&P 500 멀티팩터 추천 TOP{len(top)} ({today_str})")]},
+    }]
 
-    for rank, (_, row) in enumerate(reco_df.iterrows(), 1):
-        pe_val   = _v(row.get("pe"))
-        pb_val   = _v(row.get("pb"))
-        roe_val  = _v(row.get("roe"))
-        debt_val = _v(row.get("debt_equity"))
-        mom_val  = _v(row.get("momentum"))
-        mcap_val = _v(row.get("market_cap"))
+    # Gemini 한 단락 요약 (있을 때만)
+    summary = summarize_us(reco_df)
+    if summary:
+        children.append({
+            "object": "block", "type": "paragraph",
+            "paragraph": {"rich_text": [_rt(summary)]},
+        })
+    children.append({"object": "block", "type": "divider", "divider": {}})
 
-        rows.append({"type": "table_row", "table_row": {"cells": [
-            cell(rank),
-            cell(fmt_rank_change(row.get("rank_change"))),
-            cell(fmt_pct(row.get("prdy_ctrt"))),
-            cell(row.get("ticker", "")),
-            cell(row.get("name", "")[:30]),
-            cell(row.get("sector", "")[:20]),
-            cell("✅" if row.get("ma_aligned") else "-"),
-            cell(f"{float(row.get('multi_score', 0)):.3f}"),
-            cell(f"{float(mom_val)*100:.1f}" if mom_val is not None else "-"),
-            cell(f"{float(mcap_val)/1e9:.1f}" if mcap_val else "-"),
-            cell(f"{float(pe_val):.1f}"   if pe_val   is not None else "-"),
-            cell(f"{float(pb_val):.2f}"   if pb_val   is not None else "-"),
-            cell(f"{float(roe_val)*100:.1f}" if roe_val is not None else "-"),
-            cell(f"{float(debt_val):.1f}" if debt_val is not None else "-"),
-        ]}})
+    # 종목별 카드: heading_3 (종목·등락) + paragraph (점수·이유)
+    for rank, (_, row) in enumerate(top.iterrows(), 1):
+        pct = row.get("prdy_ctrt")
+        head = (f"{rank}. {row.get('ticker','')} — {row.get('name','')[:30]} "
+                f"{_dot(pct)} {fmt_pct(pct)}")
+        detail = f"점수 {float(row.get('multi_score', 0)):.3f} ({rank}위) · {build_reason(row)}"
+        children.append({
+            "object": "block", "type": "heading_3",
+            "heading_3": {"rich_text": [_rt(head)]},
+        })
+        children.append({
+            "object": "block", "type": "paragraph",
+            "paragraph": {"rich_text": [_rt(detail)]},
+        })
+
+    children.append({
+        "object": "block", "type": "callout",
+        "callout": {
+            "icon": {"emoji": "📂"},
+            "rich_text": [_rt("전체 순위·팩터·재무 raw 데이터는 repo CSV(us_score_history.csv)에 누적됨. "
+                              "노션엔 결론만 표시.")],
+        },
+    })
 
     date_parent_id = _get_or_create_date_page(today_str, headers, NOTION_PARENT_PAGE_ID)
 
     body = {
         "parent":     {"page_id": date_parent_id},
         "properties": {"title": {"title": [{"text": {"content": f"🇺🇸 {today_str} US 추천종목"}}]}},
-        "children": [
-            {
-                "object": "block", "type": "heading_2",
-                "heading_2": {"rich_text": [{"type": "text", "text": {
-                    "content": f"S&P 500 멀티팩터 추천종목 TOP{len(reco_df)} ({today_str})"
-                }}]},
-            },
-            {
-                "object": "block", "type": "table",
-                "table": {
-                    "table_width": len(col_labels),
-                    "has_column_header": True,
-                    "has_row_header": False,
-                    "children": rows,
-                },
-            },
-        ],
+        "children": children,
     }
 
     # 동일 제목 페이지 있으면 archive (중복 방지)
@@ -485,8 +531,11 @@ def main():
     universe = df.dropna(subset=["market_cap"]).nlargest(TOP_MCAP_N, "market_cap").copy()
     log(f"✅ 시총 상위 {TOP_MCAP_N}개 유니버스 확정")
 
-    # 멀티팩터 raw 점수 계산
-    universe["raw_score"] = compute_us_multifactor(universe)
+    # 멀티팩터 raw 점수 + 팩터별 z-score 계산
+    factors = compute_us_multifactor(universe)
+    universe["raw_score"] = factors["raw_score"]
+    for _c in ("f_mom", "f_val", "f_quality", "f_growth", "f_safety"):
+        universe[_c] = factors[_c]
     log("✅ 멀티팩터 raw 점수 계산 완료")
 
     # 5일 EMA 평탄화 (이력 누적, 단일 시점 노이즈 완화)
