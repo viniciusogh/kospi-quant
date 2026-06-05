@@ -195,6 +195,14 @@ def compute_strength_score(code: str, name: str, df_nf: pd.DataFrame):
 
     df["nf_pos_ratio_10"] = (df["netflow_pbmn"] > 0).astype(int).rolling(10).mean()
 
+    # 투자자별 다일 집계 (카드 한줄평 추세 설명용)
+    df["frgn_sum_3"] = df["frgn_ntby_tr_pbmn"].rolling(3).sum()
+    df["orgn_sum_3"] = df["orgn_ntby_tr_pbmn"].rolling(3).sum()
+    df["frgn_sum_5"] = df["frgn_ntby_tr_pbmn"].rolling(5).sum()
+    df["orgn_sum_5"] = df["orgn_ntby_tr_pbmn"].rolling(5).sum()
+    df["frgn_pos_5"] = (df["frgn_ntby_tr_pbmn"] > 0).astype(int).rolling(5).sum()
+    df["orgn_pos_5"] = (df["orgn_ntby_tr_pbmn"] > 0).astype(int).rolling(5).sum()
+
     # TS z
     df["nf_sum_5_internal_z"] = rolling_zscore(df["nf_sum_5"], window=15, min_periods=8)
     df["nf_surge_3_10_internal_z"] = rolling_zscore(df["nf_surge_3_10"], window=15, min_periods=8)
@@ -227,6 +235,13 @@ def compute_strength_score(code: str, name: str, df_nf: pd.DataFrame):
         "nf_sum_5": float(last.get("nf_sum_5", np.nan)),
         "nf_surge_3_10": float(last.get("nf_surge_3_10", np.nan)),
         "nf_pos_ratio_10": float(last.get("nf_pos_ratio_10", np.nan)),
+
+        "frgn_sum_3": float(last.get("frgn_sum_3", np.nan)),
+        "orgn_sum_3": float(last.get("orgn_sum_3", np.nan)),
+        "frgn_sum_5": float(last.get("frgn_sum_5", np.nan)),
+        "orgn_sum_5": float(last.get("orgn_sum_5", np.nan)),
+        "frgn_pos_5": float(last.get("frgn_pos_5", np.nan)),
+        "orgn_pos_5": float(last.get("orgn_pos_5", np.nan)),
 
         "nf_sum_5_internal_z": float(last.get("nf_sum_5_internal_z", np.nan)),
         "nf_surge_3_10_internal_z": float(last.get("nf_surge_3_10_internal_z", np.nan)),
@@ -555,20 +570,25 @@ def smooth_with_ema(universe: pd.DataFrame, today: datetime) -> tuple[pd.Series,
                       .set_index("code")["smoothed"])
     return smoothed_today, history
 
-def compute_rank_change(history: pd.DataFrame) -> dict:
-    """종목코드별 (어제 순위 - 오늘 순위). + = 상승, None = 신규."""
-    if history["date"].nunique() < 2:
-        return {}
-
+def _rank_maps(history: pd.DataFrame):
+    """전체 유니버스 기준 (오늘 순위 dict, 어제 순위 dict). smoothed 점수 내림차순, 1위=최고."""
     dates_sorted = sorted(history["date"].unique())
-    today_d, prev_d = dates_sorted[-1], dates_sorted[-2]
+    if not dates_sorted:
+        return {}, {}
 
     def rank_map(d):
         rows = history[history["date"] == d].sort_values("smoothed", ascending=False)
         return {c: i + 1 for i, c in enumerate(rows["code"].tolist())}
 
-    today_r = rank_map(today_d)
-    prev_r  = rank_map(prev_d)
+    today_r = rank_map(dates_sorted[-1])
+    prev_r  = rank_map(dates_sorted[-2]) if len(dates_sorted) >= 2 else {}
+    return today_r, prev_r
+
+def compute_rank_change(history: pd.DataFrame) -> dict:
+    """종목코드별 (어제 순위 - 오늘 순위). + = 상승, None = 신규."""
+    today_r, prev_r = _rank_maps(history)
+    if not prev_r:
+        return {}
     return {c: (prev_r.get(c) - r if c in prev_r else None)
             for c, r in today_r.items()}
 
@@ -732,31 +752,86 @@ def summarize_supply(reco_kor: pd.DataFrame) -> str:
         return ""
 
 
+def _num(row, key):
+    """row 값을 float 으로, None/NaN 은 None."""
+    try:
+        v = row.get(key)
+        return float(v) if (v is not None and not pd.isna(v)) else None
+    except Exception:
+        return None
+
+
 def _card_reason(row) -> str:
-    """카드 한줄평을 데이터에서 규칙 기반 생성 (LLM 미사용)."""
+    """카드 한줄평 — 투자자별 다일 수급 추세 기반 (규칙, LLM 미사용). 금액 억 단위."""
+    def eok(v):  # 백만원 → 억
+        return v / 100.0
+
     parts = []
-    try:
-        fore = float(row.get("외국인_순매수대금(백만원)", 0) or 0)
-        inst = float(row.get("기관_순매수대금(백만원)", 0) or 0)
-    except Exception:
-        fore = inst = 0.0
-    if fore > 0 and inst > 0:
-        parts.append("외국인·기관 동반 순매수")
-    elif fore > 0:
-        parts.append("외국인 순매수")
-    elif inst > 0:
-        parts.append("기관 순매수")
-    rc = row.get("순위변동")
-    try:
-        if rc is None or pd.isna(rc):
-            parts.append("신규 진입")
-        elif rc >= 30:
-            parts.append(f"순위 +{int(rc)} 급등")
-    except Exception:
-        pass
-    if row.get("정배열"):
-        parts.append("주가 정배열")
-    return " · ".join(parts) if parts else "수급 점수 상위"
+    f5, o5 = _num(row, "frgn_sum_5"), _num(row, "orgn_sum_5")
+    f3, o3 = _num(row, "frgn_sum_3"), _num(row, "orgn_sum_3")
+    fp, op = _num(row, "frgn_pos_5"), _num(row, "orgn_pos_5")
+
+    # 1) 5일 누적 주체·방향
+    if f5 is not None and o5 is not None:
+        if f5 > 0 and o5 > 0:
+            parts.append(f"외국인·기관 5일 동반 순매수 (+{eok(f5 + o5):,.0f}억)")
+        elif o5 > 0 and o5 >= abs(f5):
+            parts.append(f"기관 5일 순매수 주도 (+{eok(o5):,.0f}억)")
+        elif f5 > 0 and f5 >= abs(o5):
+            parts.append(f"외국인 5일 순매수 주도 (+{eok(f5):,.0f}억)")
+        elif o5 > 0:
+            parts.append(f"기관 5일 순매수 (+{eok(o5):,.0f}억)")
+        elif f5 > 0:
+            parts.append(f"외국인 5일 순매수 (+{eok(f5):,.0f}억)")
+
+    # 2) 최근 3일 급증 (직전 10일 대비) + 주도 주체
+    surge = _num(row, "nf_surge_3_10")
+    if surge is not None and surge >= 0.5:
+        drv = ""
+        if o3 is not None and f3 is not None:
+            if o3 > 0 and o3 >= abs(f3):
+                drv = " · 기관 주도"
+            elif f3 > 0 and f3 >= abs(o3):
+                drv = " · 외국인 주도"
+        parts.append(f"최근 3일 수급 급증 (직전 10일比 +{surge * 100:,.0f}%){drv}")
+
+    # 3) 순매수 빈도 (강한 주체 기준)
+    cands = [x for x in (fp, op) if x is not None]
+    if cands:
+        best = max(cands)
+        if best >= 4:
+            who = "기관" if (op is not None and op >= (fp or 0)) else "외국인"
+            parts.append(f"{who} 5일 중 {int(best)}일 순매수")
+
+    # fallback: 다일 데이터 없으면 당일 기준
+    if not parts:
+        fore = _num(row, "외국인_순매수대금(백만원)") or 0
+        inst = _num(row, "기관_순매수대금(백만원)") or 0
+        if fore > 0 and inst > 0:
+            parts.append("외국인·기관 당일 순매수")
+        elif fore > 0:
+            parts.append("외국인 당일 순매수")
+        elif inst > 0:
+            parts.append("기관 당일 순매수")
+        else:
+            parts.append("수급 점수 상위")
+
+    return " · ".join(parts[:3])
+
+
+def _rank_line(row) -> str:
+    """전체 유니버스 기준 어제→오늘 절대순위 전환 문구."""
+    t = _num(row, "수급순위_오늘")
+    p = _num(row, "수급순위_어제")
+    if t is None:
+        return ""
+    t = int(t)
+    if p is None:
+        return f"전체 수급순위 {t}위 · 신규 진입"
+    p = int(p)
+    d = p - t
+    mark = f"▲{d}" if d > 0 else (f"▼{abs(d)}" if d < 0 else "변동 없음")
+    return f"전체 수급순위 어제 {p}위 → 오늘 {t}위 ({mark})"
 
 
 def _stock_card(rank: int, row) -> dict:
@@ -771,11 +846,14 @@ def _stock_card(rank: int, row) -> dict:
         {"type": "text", "text": {"content": f"({row.get('종목코드', '')}) · {sector}\n"}},
         {"type": "text", "text": {"content":
             f"수급점수 {float(row.get('멀티팩터점수', 0)):.2f}  |  "
-            f"등락 {fmt_pct(row.get('당일등락(%)'))}  |  "
-            f"순위 {fmt_rank_change(row.get('순위변동'))}{arr}\n"}},
-        {"type": "text", "text": {"content": _card_reason(row)},
-         "annotations": {"italic": True, "color": "gray"}},
+            f"등락 {fmt_pct(row.get('당일등락(%)'))}{arr}\n"}},
     ]
+    rline = _rank_line(row)
+    if rline:
+        rich.append({"type": "text", "text": {"content": rline + "\n"},
+                     "annotations": {"color": "blue"}})
+    rich.append({"type": "text", "text": {"content": _card_reason(row)},
+                 "annotations": {"italic": True, "color": "gray"}})
     return {"object": "block", "type": "callout", "callout": {
         "rich_text": rich,
         "icon": {"type": "emoji", "emoji": icon},
@@ -1055,8 +1133,9 @@ def main():
     n_days = history_updated["date"].nunique()
     log(f"✅ EMA 평탄화 (span={EMA_SPAN}일, 누적 이력 {n_days}일치)")
 
-    # 어제 대비 순위 변동
+    # 어제 대비 순위 변동 + 전체 유니버스 절대순위(오늘/어제)
     rank_changes = compute_rank_change(history_updated)
+    rank_today, rank_prev = _rank_maps(history_updated)
 
     # 추천: 시총 상위 200 유니버스에 포함되는 종목 중 점수 상위 TOP_RECO_N
     uni_df = all_df.merge(top200[["code"]], on="code", how="inner").copy()
@@ -1065,6 +1144,8 @@ def main():
     uni_df["rank"] = np.arange(1, len(uni_df) + 1)
     reco_df = uni_df.head(TOP_RECO_N).copy()
     reco_df["rank_change"] = reco_df["code"].map(rank_changes)
+    reco_df["수급순위_오늘"] = reco_df["code"].map(rank_today)
+    reco_df["수급순위_어제"] = reco_df["code"].map(rank_prev)
 
     log(f"✅ 추천 유니버스(시총상위200) 내 유효 종목: {len(uni_df)}개")
     log(f"✅ 추천 종목(상위 {TOP_RECO_N}) 생성 완료")
