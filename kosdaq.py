@@ -25,6 +25,9 @@ input_csv = os.environ.get("INPUT_CSV",
 NOTION_API_KEY        = os.environ["NOTION_API_KEY"]
 NOTION_PARENT_PAGE_ID = os.environ.get("NOTION_PARENT_PAGE_ID", "3324a00632f880fbb014d766d87a1079")
 
+# Gemini (종목 설명 생성용 — 키 없으면 설명 생략, 카드/표는 정상)
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+
 # KRX (코스닥 포함, KIS API 시장코드 J 가 코스피·코스닥 모두 커버)
 MRKT_CODE = "J"
 
@@ -710,14 +713,54 @@ _FACTOR_COLS = [("수급  ", "f_supply"), ("밸류  ", "f_value"),
 _FACTOR_DENOM = 0.9   # 단일 팩터 최대 기여도 (0.30 가중 × z=3) — 막대 공통 분모
 
 
-def _factor_card(rank: int, row) -> dict:
+def describe_stocks(reco_kor: pd.DataFrame) -> dict:
+    """상위 10종목 한 줄 사업 설명 (Gemini 1콜). 키 없으면 {}. 반환 {종목코드: 설명}.
+    환각 억제: 모르는 회사는 '설명 없음' 으로 출력하게 지시."""
+    if not GEMINI_API_KEY:
+        return {}
+    items = []
+    for _, r in reco_kor.head(10).iterrows():
+        sector = r.get("섹터")
+        sector = sector if (sector and not pd.isna(sector)) else "-"
+        items.append(f"{r.get('종목코드', '')}|{r.get('종목명', '')}|{sector}")
+    prompt = (
+        "다음은 한국 KOSDAQ 상장사 목록이다 (종목코드|종목명|섹터). "
+        "각 회사가 무엇을 하는 회사인지 한 줄(공백 포함 30자 이내)로 설명하라. "
+        "확실히 아는 회사만 설명하고, 모르거나 불확실하면 추측하지 말고 '설명 없음' 이라고 써라. "
+        "출력은 각 줄 '종목코드|설명' 형식만, 다른 텍스트·머리말 금지.\n\n"
+        + "\n".join(items)
+    )
+    try:
+        from google import genai
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        resp = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+        out = {}
+        for line in (resp.text or "").splitlines():
+            line = line.strip().strip("`").strip()
+            if "|" not in line:
+                continue
+            code, desc = line.split("|", 1)
+            code, desc = code.strip(), desc.strip()
+            if code.isdigit():
+                code = code.zfill(6)
+            if desc and "설명 없음" not in desc:
+                out[code] = desc
+        return out
+    except Exception as e:
+        log(f"  Gemini 종목설명 실패 (무시): {e}")
+        return {}
+
+
+def _factor_card(rank: int, row, desc: str = "") -> dict:
     """종목 1개의 팩터 기여도를 monospace code 블록으로. 막대 정렬 위해 callout 대신 code."""
     medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, f"{rank:>2}.")
     sector = row.get("섹터")
     sector = sector if (sector and not pd.isna(sector)) else "-"
     jb = "  ✅정배열" if row.get("정배열") else ""
+    desc_line = f"   💬 {desc} (AI 추정)\n" if desc else ""
     head = (f"{medal} {row.get('종목명', '')} ({row.get('종목코드', '')}) · {sector}\n"
-            f"   점수 {float(row.get('멀티팩터점수', 0)):.2f}  |  "
+            + desc_line
+            + f"   점수 {float(row.get('멀티팩터점수', 0)):.2f}  |  "
             f"등락 {fmt_pct(row.get('당일등락(%)'))}  |  "
             f"순위 {fmt_rank_change(row.get('순위변동'))}{jb}\n")
     lines, contribs = [], []
@@ -809,12 +852,14 @@ def upload_to_notion(reco_kor: pd.DataFrame):
                  "· 밸류 (0.30): 저평가 — PER·PBR 낮을수록↑ (1/PER + 1/PBR)\n"
                  "· 수익성 (0.25): ROE 높을수록↑\n"
                  "· 성장 (0.15): 매출·영업이익 증가율\n"
-                 "· 안정 (0.10): 재무 안정성 — 부채비율 낮을수록↑"}}],
+                 "· 안정 (0.10): 재무 안정성 — 부채비율 낮을수록↑\n"
+                 "💬 종목 설명은 AI 추정 — 부정확할 수 있으니 참고용"}}],
              "icon": {"type": "emoji", "emoji": "ℹ️"},
              "color": "gray_background"}},
     ]
+    desc_map = describe_stocks(reco_kor)
     for rank, (_, row) in enumerate(reco_kor.head(10).iterrows(), 1):
-        children.append(_factor_card(rank, row))
+        children.append(_factor_card(rank, row, desc_map.get(row.get("종목코드", ""), "")))
 
     children.append({"object": "block", "type": "divider", "divider": {}})
     children.append({"object": "block", "type": "heading_3",
