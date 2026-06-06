@@ -117,20 +117,39 @@ def main():
         log("NOTION_API_KEY 없음 → Notion 업로드 생략 (로컬). Actions 에선 업로드됨")
 
 
+def _trim_phrase(t):
+    """완결된 짧은 구로. 군더더기 서두/따옴표 제거 + 길면 구분자에서 절단."""
+    t = t.strip().replace("\n", " ")
+    # "…이슈는 '", "…요인은 '", "…배경: " 같은 서두 제거
+    m = re.search(r"(이슈는|요인은|배경은|원인은|이유는)\s*['\"]?", t)
+    if m:
+        t = t[m.end():]
+    t = t.strip().strip("'\".:· ")
+    if len(t) <= 48:
+        return t
+    cut = t[:48]
+    for sep in ["·", ",", " "]:
+        if sep in cut:
+            return cut[:cut.rfind(sep)].strip(" ,·")
+    return cut.strip()
+
+
 def gemini_reasons(top10):
-    """상위10 급등 추정촉매 1문장 (Gemini + 검색 그라운딩). 근거없으면 '미확인'."""
+    """상위10 급등 배경 키워드구 (Gemini + 검색 그라운딩). 근거없으면 빈값."""
     from google import genai
     c = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     out = {}
     for _, r in top10.iterrows():
-        prompt = (f"{r['종목명']}({r['code']}) 주가가 최근 약 한 달간 {r['ret20']*100:.0f}% 급등. "
-                  "추정 촉매(최근 공시·뉴스·실적·테마)를 한국어 한 문장 50자 내로. "
-                  "확실한 공개 근거 없으면 '공개 촉매 미확인' 만 출력.")
+        prompt = (f"{r['종목명']}({r['code']}) 주가가 최근 한 달 {r['ret20']*100:.0f}% 급등. "
+                  "급등 핵심 이슈를 40자 이내 명사구로, 쉼표나 ·로 키워드 2~3개만. "
+                  "문장(서술어) 쓰지 말 것. 예: '엔비디아 협력 기대·북미 수주 확대'. "
+                  "확실한 공개 근거 없으면 '특이 이슈 없음' 만 출력.")
         try:
             resp = c.models.generate_content(model="gemini-2.5-flash", contents=prompt,
                 config={"tools": [{"google_search": {}}], "thinking_config": {"thinking_budget": 0},
-                        "max_output_tokens": 3000})
-            out[r["code"]] = resp.text.strip().replace("\n", " ")[:120]
+                        "max_output_tokens": 2000})
+            txt = _trim_phrase(resp.text)
+            out[r["code"]] = "" if "특이 이슈 없음" in txt else txt
         except Exception as e:
             log(f"  Gemini {r['code']} 실패: {str(e)[:80]}")
             out[r["code"]] = ""
@@ -139,7 +158,7 @@ def gemini_reasons(top10):
 
 DISCLAIMER = ("30일 가격모멘텀(hi60 고점근접 + disp20 이격 + ret5 단기) 상위. "
               "검증: walk-forward IR~0.15·승률~51%, 추세장 강·반전장 약. "
-              "수급·재무는 검증상 개선 없어 미반영. 💡추정촉매=검색기반 추정(확정 아님). 투자판단 보조용.")
+              "수급·재무는 검증상 개선 없어 미반영. 종목 '이슈'는 검색기반 추정(확정 아님). 투자판단 보조용.")
 
 
 def upload_notion(top, reasons=None):
@@ -176,12 +195,12 @@ def upload_notion(top, reasons=None):
             {"type": "text", "text": {"content": f"{r['종목명']} "}, "annotations": {"bold": True}},
             {"type": "text", "text": {"content": f"({r['code']}) · {sec}\n"}},
             {"type": "text", "text": {"content":
-                f"모멘텀점수 {r['score']:.2f}  |  20일 {r['ret20']*100:+.1f}%  |  주가 {int(r['price']):,}"},
+                f"모멘텀 {r['score']:.1f}   ·   20일 {r['ret20']*100:+.1f}%   ·   {int(r['price']):,}원"},
              "annotations": {"color": "gray"}}]
         why = reasons.get(r["code"])
         if why:
-            rich.append({"type": "text", "text": {"content": f"\n💡 추정촉매: {why}"},
-                         "annotations": {"italic": True, "color": "brown"}})
+            rich.append({"type": "text", "text": {"content": f"\n이슈  {why}"},
+                         "annotations": {"color": "gray"}})
         children.append({"object": "block", "type": "callout", "callout": {
             "rich_text": rich, "icon": {"type": "emoji", "emoji": icon},
             "color": "blue_background" if rank <= 3 else "gray_background"}})
