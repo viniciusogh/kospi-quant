@@ -243,6 +243,10 @@ def compute_strength_score(code: str, name: str, df_nf: pd.DataFrame):
         "frgn_pos_5": float(last.get("frgn_pos_5", np.nan)),
         "orgn_pos_5": float(last.get("orgn_pos_5", np.nan)),
 
+        # 최근 10일 일별 순매수 (스파크라인 그래프용, 백만원). 엑셀 안전 위해 콤마 문자열.
+        "frgn_series": ",".join(str(int(round(x))) for x in df["frgn_ntby_tr_pbmn"].fillna(0).tail(10)),
+        "orgn_series": ",".join(str(int(round(x))) for x in df["orgn_ntby_tr_pbmn"].fillna(0).tail(10)),
+
         "nf_sum_5_internal_z": float(last.get("nf_sum_5_internal_z", np.nan)),
         "nf_surge_3_10_internal_z": float(last.get("nf_surge_3_10_internal_z", np.nan)),
         "nf_pos_ratio_10_internal_z": float(last.get("nf_pos_ratio_10_internal_z", np.nan)),
@@ -834,6 +838,29 @@ def _rank_line(row) -> str:
     return f"전체 수급순위 어제 {p}위 → 오늘 {t}위 ({mark})"
 
 
+_SPARK = "▁▂▃▄▅▆▇█"
+
+
+def _spark_segments(series_str):
+    """콤마 문자열(일별 순매수) → Notion rich_text 막대 세그먼트. 매수=초록, 매도=빨강, 높이=상대크기."""
+    if not series_str or not isinstance(series_str, str):
+        return None
+    try:
+        vals = [float(x) for x in series_str.split(",") if x != ""]
+    except Exception:
+        return None
+    if not vals:
+        return None
+    m = max((abs(v) for v in vals), default=0) or 1.0
+    segs = []
+    for v in vals:
+        lvl = int(round(abs(v) / m * (len(_SPARK) - 1)))
+        color = "green" if v > 0 else ("red" if v < 0 else "gray")
+        segs.append({"type": "text", "text": {"content": _SPARK[lvl]},
+                     "annotations": {"color": color}})
+    return segs
+
+
 def _stock_card(rank: int, row) -> dict:
     """상위 종목 1개를 Notion callout 카드 블록으로."""
     icon = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, "📈")
@@ -854,6 +881,18 @@ def _stock_card(rank: int, row) -> dict:
                      "annotations": {"color": "blue"}})
     rich.append({"type": "text", "text": {"content": _card_reason(row)},
                  "annotations": {"italic": True, "color": "gray"}})
+
+    # 외국인/기관 최근 10일 순매수 스파크라인
+    fs = _spark_segments(row.get("frgn_series"))
+    os_ = _spark_segments(row.get("orgn_series"))
+    if fs or os_:
+        rich.append({"type": "text", "text": {"content": "\n외국인 "},
+                     "annotations": {"color": "gray"}})
+        rich.extend(fs or [{"type": "text", "text": {"content": "-"}}])
+        rich.append({"type": "text", "text": {"content": "\n기관   "},
+                     "annotations": {"color": "gray"}})
+        rich.extend(os_ or [{"type": "text", "text": {"content": "-"}}])
+
     return {"object": "block", "type": "callout", "callout": {
         "rich_text": rich,
         "icon": {"type": "emoji", "emoji": icon},
@@ -939,6 +978,12 @@ def upload_to_notion(reco_kor: pd.DataFrame):
     children.append({
         "object": "block", "type": "heading_3",
         "heading_3": {"rich_text": [{"type": "text", "text": {"content": "🏆 상위 10종목"}}]},
+    })
+    children.append({
+        "object": "block", "type": "paragraph",
+        "paragraph": {"rich_text": [{"type": "text",
+            "text": {"content": "막대그래프 = 최근 10일 일별 순매수 (왼→오 시간순, 초록 매수·빨강 매도, 높이=상대 규모)"},
+            "annotations": {"italic": True, "color": "gray"}}]},
     })
     for rank, (_, row) in enumerate(reco_kor.head(10).iterrows(), 1):
         children.append(_stock_card(rank, row))
