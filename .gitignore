@@ -41,3 +41,7 @@ KOSDAQ_재무데이터_*.xlsx
 국내주식 *.xlsx
 해외주식 *.xlsx
 youtube_daily_report/reports/
+.kis_token.json
+price_cache/
+supply_cache/
+fin_hist_cache/

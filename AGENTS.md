@@ -12,6 +12,8 @@
 - `us_quant.py` : S&P 500 멀티팩터 퀀트 분석 (yfinance)
 - `youtube_report.py` : 다채널 영상 자막 수집 → Gemini 분석 → Notion 업로드 (채널별 일일 페이지). 채널 목록은 파일 상단 `CHANNELS` 리스트 참조. 분석본은 `latest_youtube_analysis.json` 에도 누적 저장 (3일 보존)
 - `daily_recommend.py` : 일일 종합 종목 추천 — 정량 데이터 + 유튜브 화자 의견 (`latest_youtube_analysis.json`) 의 교집합을 Gemini 분석. 노션 페이지 `💎 {date} 종합 추천` push
+- `momentum_daily.py` : **30일 모멘텀 추천** (검증된 고정 로직 hi60+disp20+ret5 z합). 전 종목 최근 100일 1콜 → 유동성컷 → ETF/ETN/우선주 제외 → TOP30. `latest_momentum_reco.csv` 저장 + Notion `🚀 {date} KOSPI 30일 모멘텀 추천` push. Notion 업로드는 수급.py 의 날짜페이지 헬퍼 재활용 (`NOTION_API_KEY` 없으면 로컬은 생략)
+- `momentum_backtest.py` / `supply_increment.py` / `value_increment.py` / `walkforward.py` : **연구용 1회성 스크립트** (factor 검증). 운영 아님. 토큰 디스크캐시(`.kis_token.json`)·가격캐시(`price_cache/`) 정의. 결론은 아래 "모멘텀 연구" 참조
 - `KOSPI재무데이터한투.csv` / `KOSDAQ재무데이터한투.csv` : 시장별 종목 마스터 (한투 .mst 에서 파싱)
 - `latest_kospi_supply.csv` : 가장 최근 코스피 전 종목 수급/재무 raw (2400+ 종목)
 - `latest_kospi_quality.csv` : 가장 최근 KOSPI Quality 전 종목 점수
@@ -28,7 +30,16 @@
 - US 퀀트 : 매일 07:00 KST (`Daily US Quant Analysis`)
 - YouTube 분석 : 매 1-2시간 (`Daily YouTube Analysis`). 클라우드에서 자막 fetch 정상 작동 확인 (2026-05-24)
 - 종합 추천 : `Daily Recommendation` workflow
+- 모멘텀 레포트 : 평일 17:35 KST (`Daily Momentum Report`, 수급 직후)
 - **로컬 cron/launchd 없음** (2026-05-24 폐기). 노트북은 데이터 받기만 — `investment-chatbot/etl/run_daily.sh` 의 git pull 이 갱신 담당
+
+## 모멘텀 연구 결론 (2026-06-06) — momentum_daily.py 근거
+30일 forward-return 예측 신호 검증 (KOSPI 2023~2026, 전종목, point-in-time 거래대금컷, 레짐별 IC + 분위 스프레드):
+- **가격 모멘텀(hi60 60일고점근접 + disp20 MA20이격 + ret5)만 채택.** 7레짐 IC 양수, walk-forward IR~0.15·승률~51%. 추세장 강·반전장(2024H2) 약.
+- **수급 미반영** : 가격과 중복 (직교IC≈0, 결합시 −0.32%p 악화).
+- **가치/퀄리티 미반영** : 직교IC +0.06 있으나 실전 분위엔 안 잡힘, 가중스윕서 평균·IR 다 깎임 (폭락보험만).
+- **적응형(매일 로직 자동갱신) 3회 기각** : 6피처·9피처(수급포함)·signed/clip·3/6mo 전부 사전등록 검증서 고정 모멘텀에 패배. 트레일링IC가 mean-revert에 whipsaw + 30일 라벨지연 + 레짐 6개로 학습 불가. 추가 세팅탐색 금지(과적합).
+- ⚠️ 한계 : 생존편향(오늘 상장종목만), 소형주 거래비용 미반영, 단일 강세장 편중 표본.
 
 ## API & 서비스
 - KIS API : 한국투자증권 (코스피 수급·시세·재무)
