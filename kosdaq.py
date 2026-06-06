@@ -706,7 +706,7 @@ def _archive_same_title_pages(title: str, headers: dict, parent_id: str):
 
 # 팩터 라벨(2글자는 뒤 2칸 패딩 → monospace 폭을 3글자 퀄리티와 맞춤), 컬럼
 _FACTOR_COLS = [("수급  ", "f_supply"), ("밸류  ", "f_value"),
-                ("퀄리티", "f_quality"), ("성장  ", "f_growth"), ("안정  ", "f_safety")]
+                ("수익성", "f_quality"), ("성장  ", "f_growth"), ("안정  ", "f_safety")]
 _FACTOR_DENOM = 0.9   # 단일 팩터 최대 기여도 (0.30 가중 × z=3) — 막대 공통 분모
 
 
@@ -804,7 +804,12 @@ def upload_to_notion(reco_kor: pd.DataFrame):
         {"object": "block", "type": "callout",
          "callout": {
              "rich_text": [{"type": "text", "text": {"content":
-                 "막대 = 점수 기여도 (가중 z-score). 수급 0.20 · 밸류 0.30 · 퀄리티 0.25 · 성장 0.15 · 안정 0.10"}}],
+                 "막대 = 점수 기여도 (가중 z-score, 길수록 그 팩터가 점수를 끌어올림).\n"
+                 "· 수급 (0.20): 외국인·기관 순매수 모멘텀\n"
+                 "· 밸류 (0.30): 저평가 — PER·PBR 낮을수록↑ (1/PER + 1/PBR)\n"
+                 "· 수익성 (0.25): ROE 높을수록↑\n"
+                 "· 성장 (0.15): 매출·영업이익 증가율\n"
+                 "· 안정 (0.10): 재무 안정성 — 부채비율 낮을수록↑"}}],
              "icon": {"type": "emoji", "emoji": "ℹ️"},
              "color": "gray_background"}},
     ]
