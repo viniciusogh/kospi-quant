@@ -47,3 +47,4 @@ supply_cache/
 fin_hist_cache/
 .claude/
 ohlc_cache/
+kospi_index.pkl

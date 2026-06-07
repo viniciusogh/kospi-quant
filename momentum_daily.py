@@ -50,6 +50,36 @@ def fetch_recent(code, tok):
     return c, v
 
 
+def kospi_trend(tok):
+    """KOSPI 지수 현재 추세 (200/120일선 대비). 레포트 정보용 — 매매 게이트 아님."""
+    url = f"{BASE}/uapi/domestic-stock/v1/quotations/inquire-daily-indexchartprice"
+    hdr = {"authorization": f"Bearer {tok}", "appkey": APP_KEY, "appsecret": APP_SECRET,
+           "tr_id": "FHKUP03500100", "custtype": "P"}
+    today = datetime.now(KST); rows = []; d2 = today
+    for _ in range(7):                       # 콜당 ~50행 → 60일 윈도로 ~250거래일 확보
+        d1 = d2 - timedelta(days=60)
+        j = _get(url, hdr, {"FID_COND_MRKT_DIV_CODE": "U", "FID_INPUT_ISCD": "0001",
+                            "FID_INPUT_DATE_1": d1.strftime("%Y%m%d"),
+                            "FID_INPUT_DATE_2": d2.strftime("%Y%m%d"), "FID_PERIOD_DIV_CODE": "D"})
+        time.sleep(random.uniform(0.2, 0.3))
+        if j and j.get("rt_cd") == "0":
+            for r in j.get("output2", []) or []:
+                if r.get("bstp_nmix_prpr"):
+                    rows.append((r["stck_bsop_date"], float(r["bstp_nmix_prpr"])))
+        d2 = d1 - timedelta(days=1)
+    if len(rows) < 200:
+        return None
+    s = pd.Series(dict(rows)).sort_index()   # 날짜 오름차순
+    c = s.iloc[-1]; ma200 = s.tail(200).mean(); ma120 = s.tail(120).mean()
+    if c >= ma200 and c >= ma120:
+        txt, emo, color = "상승추세 (200·120일선 위) — 진입 우호", "📈", "green_background"
+    elif c >= ma200:
+        txt, emo, color = "상승추세 (200일선 위·단기 조정) — 보통", "📊", "yellow_background"
+    else:
+        txt, emo, color = "하락추세 (200일선 아래) — 진입 주의", "📉", "orange_background"
+    return {"text": f"{txt}  ·  지수 {c:,.0f} / 200일선 {ma200:,.0f}", "emoji": emo, "color": color}
+
+
 def score_today(code, tok):
     r = fetch_recent(code, tok)
     if r is None:
@@ -115,9 +145,12 @@ def main():
     show["ret20%"] = (show["ret20"] * 100).round(1)
     print(show[["rank", "code", "종목명", "섹터", "price", "score", "ret20%"]].to_string(index=False))
 
+    trend = kospi_trend(tok)
+    if trend:
+        log(f"KOSPI 추세: {trend['emoji']} {trend['text']}")
     reasons = gemini_reasons(out.head(10)) if os.environ.get("GEMINI_API_KEY") else {}
     if os.environ.get("NOTION_API_KEY"):
-        upload_notion(out.head(TOP_N), reasons)
+        upload_notion(out.head(TOP_N), reasons, trend)
     else:
         log("NOTION_API_KEY 없음 → Notion 업로드 생략 (로컬). Actions 에선 업로드됨")
 
@@ -173,7 +206,7 @@ DISCLAIMER = ("📊 선정: 거래대금 100억↑  →  모멘텀 상위 10%  �
               "ℹ️ 수급·재무 미반영 · 종목 '이슈'는 AI 검색 추정(확정 아님) · 투자판단 보조용")
 
 
-def upload_notion(top, reasons=None):
+def upload_notion(top, reasons=None, trend=None):
     """Notion 업로드. 수급.py 의 날짜페이지/중복정리 헬퍼 재활용."""
     reasons = reasons or {}
     import 수급 as sg
@@ -193,7 +226,13 @@ def upload_notion(top, reasons=None):
             cell(f"{r['score']:.2f}"), cell(f"{r['ret20']*100:.1f}"), cell(f"{r['ret5']*100:.1f}"),
         ]}})
 
-    children = [
+    children = []
+    if trend:
+        children.append({"object": "block", "type": "callout", "callout": {
+            "rich_text": [{"type": "text", "text": {"content": f"KOSPI 추세: {trend['text']}"},
+                           "annotations": {"bold": True}}],
+            "icon": {"type": "emoji", "emoji": trend["emoji"]}, "color": trend["color"]}})
+    children += [
         {"object": "block", "type": "callout", "callout": {
             "rich_text": [{"type": "text", "text": {"content": DISCLAIMER}}],
             "icon": {"type": "emoji", "emoji": "📐"}, "color": "yellow_background"}},
