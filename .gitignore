@@ -45,3 +45,4 @@ youtube_daily_report/reports/
 price_cache/
 supply_cache/
 fin_hist_cache/
+.claude/
