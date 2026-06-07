@@ -47,7 +47,9 @@ def fetch_recent(code, tok):
         return None
     rows.sort()                      # 날짜 오름차순
     c = np.array([x[1] for x in rows]); v = np.array([x[2] for x in rows])
-    return c, v
+    o1 = j.get("output1", {}) or {}  # PER/PBR (정보용, 선정엔 미사용)
+    per = float(o1.get("per") or 0); pbr = float(o1.get("pbr") or 0)
+    return c, v, per, pbr
 
 
 def kospi_trend(tok):
@@ -84,7 +86,7 @@ def score_today(code, tok):
     r = fetch_recent(code, tok)
     if r is None:
         return None
-    c, v = r
+    c, v, per, pbr = r
     px = c[-1]
     dr = np.diff(c[-21:]) / c[-21:-1]
     return {"code": code, "price": px,
@@ -93,6 +95,7 @@ def score_today(code, tok):
             "ret5": px / c[-6] - 1,
             "ret20": px / c[-21] - 1,
             "vol20": dr.std(),
+            "per": per, "pbr": pbr,         # 정보용 퀄리티 지표
             "liq5": v[-5:].mean()}      # 1단계 필터용 5일 평균 거래대금
 
 
@@ -135,7 +138,7 @@ def main():
 
     final["종목명"] = final["code"].map(lambda c: meta.get(c, {}).get("종목명", ""))
     final["섹터"]  = final["code"].map(lambda c: meta.get(c, {}).get("섹터", ""))
-    out = final[["rank", "code", "종목명", "섹터", "price", "score", "ret20", "ret5", "vol20", "hi60", "liq5"]]
+    out = final[["rank", "code", "종목명", "섹터", "price", "score", "ret20", "ret5", "vol20", "per", "pbr", "hi60", "liq5"]]
     out.to_csv(OUT_CSV, index=False, encoding="utf-8-sig")
     log(f"저장 {OUT_CSV} (최종 {len(out)}종목)")
 
@@ -156,21 +159,24 @@ def main():
 
 
 def _trim_phrase(t):
-    """키워드구만 남김. 따옴표·서두·서술꼬리 제거, 쉼표→·, 길면 절단."""
+    """키워드구만 남김. 군더더기·따옴표·서술꼬리 제거, 쉼표→·, 정크 버림."""
     t = t.strip().replace("\n", " ").replace("'", "").replace('"', "").replace("`", "")
-    # 서두 군더더기 제거
-    t = re.sub(r"^.*?(이슈는|요인은|배경은|원인은|이유는|다음과\s*같습니다\.?|요약하면|핵심은)\s*", "", t)
-    # 서술 꼬리(문장) 잘라내기 — 첫 서술어/요약 표현 앞까지만
-    m = re.search(r"(요약|습니다|입니다|된다|했다|이다|있다|봅니다|됐다|때문)", t)
+    # 알려진 군더더기 표현 제거 (위치 무관)
+    t = re.sub(r"(다음과\s*같습니다|다음과\s*같은|로\s*요약할\s*수\s*있습니다|로\s*요약됩니다|"
+               r"급등\s*(이유|요인|배경)는?|핵심\s*이슈는?)", "", t)
+    # 서두 라벨 제거
+    t = re.sub(r"^.*?(이슈는|요인은|배경은|원인은|이유는|요약하면|핵심은)\s*[:：]?\s*", "", t)
+    # 서술 꼬리(문장) 잘라내기
+    m = re.search(r"(요약|습니다|입니다|된다|했다|봅니다|됐다|때문|기인)", t)
     if m:
         t = t[:m.start()]
     t = t.replace(", ", "·").replace(",", "·")
-    t = re.sub(r"\s*(으로|등으로|등)\s*$", "", t.strip())   # 끝의 '으로/등' 꼬리
-    t = t.strip(" ·.")
-    if len(t) <= 46:
-        return t
-    cut = t[:46]
-    return cut[:cut.rfind("·")].strip(" ·") if "·" in cut else cut.strip()
+    t = re.sub(r"\s*(으로|등으로|등)\s*$", "", t.strip())
+    t = t.strip(" ·.:：")
+    if len(t) > 46:
+        cut = t[:46]
+        t = cut[:cut.rfind("·")].strip(" ·") if "·" in cut else cut.strip()
+    return "" if len(t) < 6 else t          # 정크(너무 짧음) 버림
 
 
 def _is_clean(t):
@@ -216,14 +222,16 @@ def upload_notion(top, reasons=None, trend=None):
     parent = os.environ.get("NOTION_PARENT_PAGE_ID", "3324a00632f880fbb014d766d87a1079")
     title = f"🚀 {today} KOSPI 30일 모멘텀 추천"
 
-    cols = ["랭킹", "종목코드", "종목명", "섹터", "주가", "모멘텀점수", "20일등락%", "5일등락%"]
+    cols = ["랭킹", "종목코드", "종목명", "섹터", "주가", "모멘텀점수", "20일등락%", "PER", "PBR"]
     cell = lambda t: [{"type": "text", "text": {"content": str(t)}}]
     rows = [{"type": "table_row", "table_row": {"cells": [cell(c) for c in cols]}}]
     for _, r in top.iterrows():
+        per_s = f"{r['per']:.0f}" if r.get('per', 0) and r['per'] > 0 else "—"
+        pbr_s = f"{r['pbr']:.1f}" if r.get('pbr', 0) and r['pbr'] > 0 else "—"
         rows.append({"type": "table_row", "table_row": {"cells": [
             cell(int(r["rank"])), cell(r["code"]), cell(r["종목명"]),
             cell(r["섹터"] if pd.notna(r["섹터"]) else "-"), cell(f"{int(r['price']):,}"),
-            cell(f"{r['score']:.2f}"), cell(f"{r['ret20']*100:.1f}"), cell(f"{r['ret5']*100:.1f}"),
+            cell(f"{r['score']:.2f}"), cell(f"{r['ret20']*100:.1f}"), cell(per_s), cell(pbr_s),
         ]}})
 
     children = []
@@ -242,11 +250,15 @@ def upload_notion(top, reasons=None, trend=None):
     for rank, (_, r) in enumerate(top.head(10).iterrows(), 1):
         icon = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, "📈")
         sec = r["섹터"] if pd.notna(r["섹터"]) else "-"
+        per_s = f"{r['per']:.0f}" if r.get('per', 0) and r['per'] > 0 else "—"
+        pbr_s = f"{r['pbr']:.1f}" if r.get('pbr', 0) and r['pbr'] > 0 else "—"
         rich = [
             {"type": "text", "text": {"content": f"{r['종목명']} "}, "annotations": {"bold": True}},
             {"type": "text", "text": {"content": f"({r['code']}) · {sec}\n"}},
             {"type": "text", "text": {"content":
-                f"모멘텀 {r['score']:.1f}   ·   20일 {r['ret20']*100:+.1f}%   ·   {int(r['price']):,}원"},
+                f"모멘텀 {r['score']:.1f}   ·   20일 {r['ret20']*100:+.1f}%   ·   {int(r['price']):,}원\n"},
+             "annotations": {"color": "gray"}},
+            {"type": "text", "text": {"content": f"PER {per_s}  ·  PBR {pbr_s}"},
              "annotations": {"color": "gray"}}]
         why = reasons.get(r["code"])
         if why:
