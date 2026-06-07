@@ -123,20 +123,25 @@ def main():
 
 
 def _trim_phrase(t):
-    """완결된 짧은 구로. 군더더기 서두/따옴표 제거 + 길면 구분자에서 절단."""
-    t = t.strip().replace("\n", " ")
-    # "…이슈는 '", "…요인은 '", "…배경: " 같은 서두 제거
-    m = re.search(r"(이슈는|요인은|배경은|원인은|이유는)\s*['\"]?", t)
+    """키워드구만 남김. 따옴표·서두·서술꼬리 제거, 쉼표→·, 길면 절단."""
+    t = t.strip().replace("\n", " ").replace("'", "").replace('"', "").replace("`", "")
+    # 서두 군더더기 제거
+    t = re.sub(r"^.*?(이슈는|요인은|배경은|원인은|이유는|다음과\s*같습니다\.?|요약하면|핵심은)\s*", "", t)
+    # 서술 꼬리(문장) 잘라내기 — 첫 서술어/요약 표현 앞까지만
+    m = re.search(r"(요약|습니다|입니다|된다|했다|이다|있다|봅니다|됐다|때문)", t)
     if m:
-        t = t[m.end():]
-    t = t.strip().strip("'\".:· ")
-    if len(t) <= 48:
+        t = t[:m.start()]
+    t = t.replace(", ", "·").replace(",", "·")
+    t = re.sub(r"\s*(으로|등으로|등)\s*$", "", t.strip())   # 끝의 '으로/등' 꼬리
+    t = t.strip(" ·.")
+    if len(t) <= 46:
         return t
-    cut = t[:48]
-    for sep in ["·", ",", " "]:
-        if sep in cut:
-            return cut[:cut.rfind(sep)].strip(" ,·")
-    return cut.strip()
+    cut = t[:46]
+    return cut[:cut.rfind("·")].strip(" ·") if "·" in cut else cut.strip()
+
+
+def _is_clean(t):
+    return bool(t) and "촉매 미확인" not in t and "특이" not in t
 
 
 def gemini_reasons(top10):
@@ -146,24 +151,26 @@ def gemini_reasons(top10):
     out = {}
     for _, r in top10.iterrows():
         prompt = (f"{r['종목명']}({r['code']}) 주가가 최근 한 달 {r['ret20']*100:.0f}% 급등. "
-                  "급등 핵심 이슈를 40자 이내 명사구로, 쉼표나 ·로 키워드 2~3개만. "
-                  "문장(서술어) 쓰지 말 것. 예: '엔비디아 협력 기대·북미 수주 확대'. "
-                  "확실한 공개 근거 없으면 '특이 이슈 없음' 만 출력.")
+                  "급등 핵심 이슈를 키워드 명사구 2~3개로만, ·(가운뎃점)으로 연결. "
+                  "반드시 지킬 것: 따옴표 금지, 서술문 금지, '다음과 같습니다'·'요약'·'때문' 등 군더더기 금지, 35자 이내. "
+                  "예시 형식: 엔비디아 협력 기대·북미 수주 확대·실적 개선. "
+                  "확실한 공개 근거 없으면 '미확인'만 출력.")
         try:
             resp = c.models.generate_content(model="gemini-2.5-flash", contents=prompt,
                 config={"tools": [{"google_search": {}}], "thinking_config": {"thinking_budget": 0},
                         "max_output_tokens": 2000})
             txt = _trim_phrase(resp.text)
-            out[r["code"]] = "" if "특이 이슈 없음" in txt else txt
+            out[r["code"]] = txt if _is_clean(txt) else ""
         except Exception as e:
             log(f"  Gemini {r['code']} 실패: {str(e)[:80]}")
             out[r["code"]] = ""
     return out
 
 
-DISCLAIMER = ("3단계 거름망: 거래대금 100억↑ → 모멘텀 상위10% → 저변동성 10개(과열 꼭지 제거). "
-              "백테스트(2023~26) 건당 +1.3%/30일·승률 42%·7레짐중 5개 양수. 추세장 강·하락장 약(롱온리). "
-              "제안 청산: +20% 익절 / -10% 손절. 수급·재무 미반영. 종목 '이슈'는 검색 추정. 투자판단 보조용.")
+DISCLAIMER = ("📊 선정: 거래대금 100억↑  →  모멘텀 상위 10%  →  저변동성 10개 (과열 꼭지 제거)\n"
+              "📈 백테스트(2023~26): 건당 +1.3% / 30일 · 승률 42% · 7개 반기 중 5개 +  (하락장 약·롱온리)\n"
+              "🎯 제안 청산: +20% 익절 / −10% 손절\n"
+              "ℹ️ 수급·재무 미반영 · 종목 '이슈'는 AI 검색 추정(확정 아님) · 투자판단 보조용")
 
 
 def upload_notion(top, reasons=None):
