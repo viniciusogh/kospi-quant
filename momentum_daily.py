@@ -124,6 +124,14 @@ def main():
     df = pd.DataFrame(rows)
     log(f"가격 확보 {len(df)}")
 
+    # 섹터 내 PER/PBR 상대위치 (전체 종목 기준, 저평가/평균/고평가 라벨용)
+    df["섹터"] = df["code"].map(lambda c: meta.get(c, {}).get("섹터", ""))
+    df["_per"] = df["per"].where(df["per"] > 0)
+    df["_pbr"] = df["pbr"].where(df["pbr"] > 0)
+    df["per_pct"] = df.groupby("섹터")["_per"].rank(pct=True)      # 0=섹터내 최저PER(쌈)
+    df["pbr_pct"] = df.groupby("섹터")["_pbr"].rank(pct=True)
+    df["sec_n"] = df.groupby("섹터")["_per"].transform("count")
+
     # 3단계 거름망 (healthy10): 거래대금 100억↑ → 모멘텀 top10% → 저변동성 10
     df = df[df["liq5"] >= LIQ_FLOOR].copy()                       # 1단계
     log(f"거래대금 {LIQ_FLOOR/1e8:.0f}억↑ 통과 {len(df)}")
@@ -138,7 +146,8 @@ def main():
 
     final["종목명"] = final["code"].map(lambda c: meta.get(c, {}).get("종목명", ""))
     final["섹터"]  = final["code"].map(lambda c: meta.get(c, {}).get("섹터", ""))
-    out = final[["rank", "code", "종목명", "섹터", "price", "score", "ret20", "ret5", "vol20", "per", "pbr", "hi60", "liq5"]]
+    out = final[["rank", "code", "종목명", "섹터", "price", "score", "ret20", "ret5", "vol20",
+                 "per", "pbr", "per_pct", "pbr_pct", "sec_n", "hi60", "liq5"]]
     out.to_csv(OUT_CSV, index=False, encoding="utf-8-sig")
     log(f"저장 {OUT_CSV} (최종 {len(out)}종목)")
 
@@ -212,6 +221,13 @@ DISCLAIMER = ("📊 선정: 거래대금 100억↑  →  모멘텀 상위 10%  �
               "ℹ️ 수급·재무 미반영 · 종목 '이슈'는 AI 검색 추정(확정 아님) · 투자판단 보조용")
 
 
+def _rel(pct, n):
+    """섹터 내 백분위 → 라벨. pct 낮음=쌈. 표본<4면 빈값."""
+    if pd.isna(pct) or n < 4:
+        return ""
+    return "저평가" if pct <= 0.33 else ("고평가" if pct >= 0.67 else "평균")
+
+
 def upload_notion(top, reasons=None, trend=None):
     """Notion 업로드. 수급.py 의 날짜페이지/중복정리 헬퍼 재활용."""
     reasons = reasons or {}
@@ -222,16 +238,21 @@ def upload_notion(top, reasons=None, trend=None):
     parent = os.environ.get("NOTION_PARENT_PAGE_ID", "3324a00632f880fbb014d766d87a1079")
     title = f"🚀 {today} KOSPI 30일 모멘텀 추천"
 
-    cols = ["랭킹", "종목코드", "종목명", "섹터", "주가", "모멘텀점수", "20일등락%", "PER", "PBR"]
+    cols = ["랭킹", "종목코드", "종목명", "섹터", "주가", "모멘텀점수", "20일등락%", "PER(섹터)", "PBR(섹터)"]
     cell = lambda t: [{"type": "text", "text": {"content": str(t)}}]
     rows = [{"type": "table_row", "table_row": {"cells": [cell(c) for c in cols]}}]
+    short = {"저평가": "저", "고평가": "고", "평균": "평", "": ""}
     for _, r in top.iterrows():
         per_s = f"{r['per']:.0f}" if r.get('per', 0) and r['per'] > 0 else "—"
         pbr_s = f"{r['pbr']:.1f}" if r.get('pbr', 0) and r['pbr'] > 0 else "—"
+        pl = short[_rel(r.get("per_pct"), r.get("sec_n", 0))]
+        bl = short[_rel(r.get("pbr_pct"), r.get("sec_n", 0))]
         rows.append({"type": "table_row", "table_row": {"cells": [
             cell(int(r["rank"])), cell(r["code"]), cell(r["종목명"]),
             cell(r["섹터"] if pd.notna(r["섹터"]) else "-"), cell(f"{int(r['price']):,}"),
-            cell(f"{r['score']:.2f}"), cell(f"{r['ret20']*100:.1f}"), cell(per_s), cell(pbr_s),
+            cell(f"{r['score']:.2f}"), cell(f"{r['ret20']*100:.1f}"),
+            cell(f"{per_s} {f'({pl})' if pl else ''}".strip()),
+            cell(f"{pbr_s} {f'({bl})' if bl else ''}".strip()),
         ]}})
 
     children = []
@@ -252,13 +273,16 @@ def upload_notion(top, reasons=None, trend=None):
         sec = r["섹터"] if pd.notna(r["섹터"]) else "-"
         per_s = f"{r['per']:.0f}" if r.get('per', 0) and r['per'] > 0 else "—"
         pbr_s = f"{r['pbr']:.1f}" if r.get('pbr', 0) and r['pbr'] > 0 else "—"
+        secname = sec if sec != "-" else "업종"
+        pl = _rel(r.get("per_pct"), r.get("sec_n", 0)); bl = _rel(r.get("pbr_pct"), r.get("sec_n", 0))
+        rel = f"   ({secname}내 PER {pl or '—'}·PBR {bl or '—'})" if (pl or bl) else ""
         rich = [
             {"type": "text", "text": {"content": f"{r['종목명']} "}, "annotations": {"bold": True}},
             {"type": "text", "text": {"content": f"({r['code']}) · {sec}\n"}},
             {"type": "text", "text": {"content":
                 f"모멘텀 {r['score']:.1f}   ·   20일 {r['ret20']*100:+.1f}%   ·   {int(r['price']):,}원\n"},
              "annotations": {"color": "gray"}},
-            {"type": "text", "text": {"content": f"PER {per_s}  ·  PBR {pbr_s}"},
+            {"type": "text", "text": {"content": f"PER {per_s}  ·  PBR {pbr_s}{rel}"},
              "annotations": {"color": "gray"}}]
         why = reasons.get(r["code"])
         if why:
