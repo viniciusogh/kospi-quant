@@ -12,8 +12,8 @@
 - `us_quant.py` : S&P 500 멀티팩터 퀀트 분석 (yfinance)
 - `youtube_report.py` : 다채널 영상 자막 수집 → Gemini 분석 → Notion 업로드 (채널별 일일 페이지). 채널 목록은 파일 상단 `CHANNELS` 리스트 참조. 분석본은 `latest_youtube_analysis.json` 에도 누적 저장 (3일 보존)
 - `daily_recommend.py` : 일일 종합 종목 추천 — 정량 데이터 + 유튜브 화자 의견 (`latest_youtube_analysis.json`) 의 교집합을 Gemini 분석. 노션 페이지 `💎 {date} 종합 추천` push
-- `momentum_daily.py` : **30일 모멘텀 추천** (검증된 고정 로직 hi60+disp20+ret5 z합). 전 종목 최근 100일 1콜 → 유동성컷 → ETF/ETN/우선주 제외 → TOP30. `latest_momentum_reco.csv` 저장 + Notion `🚀 {date} KOSPI 30일 모멘텀 추천` push. Notion 업로드는 수급.py 의 날짜페이지 헬퍼 재활용 (`NOTION_API_KEY` 없으면 로컬은 생략)
-- `momentum_backtest.py` / `supply_increment.py` / `value_increment.py` / `walkforward.py` : **연구용 1회성 스크립트** (factor 검증). 운영 아님. 토큰 디스크캐시(`.kis_token.json`)·가격캐시(`price_cache/`) 정의. 결론은 아래 "모멘텀 연구" 참조
+- `momentum_daily.py` : **30일 모멘텀 추천 (healthy10 진입)**. 3단계 거름망: ①ETF/ETN/우선주 제외 + 5일평균 거래대금 100억↑ ②모멘텀(hi60+disp20+ret5 z합) 상위10% ③저변동성(vol20) 10개 압축. 전 종목 최근 100일 1콜. `latest_momentum_reco.csv` 저장 + Notion `🚀 {date} KOSPI 30일 모멘텀 추천` push (상위 카드에 Gemini 검색그라운딩 '이슈'). 제안 청산 = +20% 익절/-10% 손절. Notion 헬퍼는 수급.py 재활용 (`NOTION_API_KEY` 없으면 로컬 생략)
+- `momentum_backtest.py` / `supply_increment.py` / `value_increment.py` / `walkforward.py` / `trade_sim*.py` : **연구용 1회성 스크립트** (factor·진입·청산 검증). 운영 아님. 토큰캐시(`.kis_token.json`)·가격캐시(`price_cache/`)·OHLC캐시(`ohlc_cache/`) 정의. 결론은 아래 "모멘텀 연구" 참조
 - `KOSPI재무데이터한투.csv` / `KOSDAQ재무데이터한투.csv` : 시장별 종목 마스터 (한투 .mst 에서 파싱)
 - `latest_kospi_supply.csv` : 가장 최근 코스피 전 종목 수급/재무 raw (2400+ 종목)
 - `latest_kospi_quality.csv` : 가장 최근 KOSPI Quality 전 종목 점수
@@ -39,7 +39,8 @@
 - **수급 미반영** : 가격과 중복 (직교IC≈0, 결합시 −0.32%p 악화).
 - **가치/퀄리티 미반영** : 직교IC +0.06 있으나 실전 분위엔 안 잡힘, 가중스윕서 평균·IR 다 깎임 (폭락보험만).
 - **적응형(매일 로직 자동갱신) 3회 기각** : 6피처·9피처(수급포함)·signed/clip·3/6mo 전부 사전등록 검증서 고정 모멘텀에 패배. 트레일링IC가 mean-revert에 whipsaw + 30일 라벨지연 + 레짐 6개로 학습 불가. 추가 세팅탐색 금지(과적합).
-- ⚠️ 한계 : 생존편향(오늘 상장종목만), 소형주 거래비용 미반영, 단일 강세장 편중 표본.
+- **진입·청산 연구 (trade_sim*.py, OHLC 백테스트)**: 손절-10%/익절+20% 룰을 OHLC 정밀 시뮬. 핵심 발견 = **진입이 청산보다 중요.** 기존 "최고급등 top10" 진입은 소진된 꼭지라 ~본전. **3단계 healthy10**(거래대금100억↑→모멘텀top10%→저변동성10) 진입으로 바꾸니 건당 +1.3%/30일·승률42%·7레짐중 5개 양수 (단일레짐 착시 아님). 청산은 +20/-10(하락장 방어, 부드러움) vs 30일보유(평균 약간↑, 드로다운↑) 취향 — healthy10이면 둘 다 양수. → momentum_daily.py 가 healthy10 채택.
+- ⚠️ 한계 : 생존편향(오늘 상장종목만), 거래비용 미반영(세후 연~10-13% 추정), 단일 강세장 편중 표본, 롱온리라 하락장 약.
 
 ## API & 서비스
 - KIS API : 한국투자증권 (코스피 수급·시세·재무)

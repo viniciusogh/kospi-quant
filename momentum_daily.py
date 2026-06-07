@@ -19,10 +19,10 @@ def _excluded(name, sector):
 _DIR = os.path.dirname(os.path.abspath(__file__))
 UNIVERSE_CSV = os.path.join(_DIR, "latest_kospi_supply.csv")
 OUT_CSV  = os.path.join(_DIR, "latest_momentum_reco.csv")
-UNIV_TOP = int(os.environ.get("UNIV_TOP", "0"))   # 0=전종목, n=시총상위 n (테스트용)
-TOP_N    = 30
-LIQ_PCT  = 0.30
-WORKERS  = 4
+UNIV_TOP  = int(os.environ.get("UNIV_TOP", "0"))   # 0=전종목, n=시총상위 n (테스트용)
+TOP_N     = 10                    # 최종 추천 종목 수
+LIQ_FLOOR = 1e10                  # 1단계: 5일평균 거래대금 100억원 하한
+WORKERS   = 4
 
 
 def log(m): print(f"[{datetime.now(KST):%H:%M:%S}] {m}")
@@ -56,12 +56,14 @@ def score_today(code, tok):
         return None
     c, v = r
     px = c[-1]
+    dr = np.diff(c[-21:]) / c[-21:-1]
     return {"code": code, "price": px,
             "hi60": px / c[-61:].max(),
             "disp20": px / c[-20:].mean() - 1,
             "ret5": px / c[-6] - 1,
             "ret20": px / c[-21] - 1,
-            "liq": v[-20:].mean()}
+            "vol20": dr.std(),
+            "liq5": v[-5:].mean()}      # 1단계 필터용 5일 평균 거래대금
 
 
 def main():
@@ -89,22 +91,25 @@ def main():
     df = pd.DataFrame(rows)
     log(f"가격 확보 {len(df)}")
 
-    # 유동성컷 → 횡단 z합 점수
-    df = df[df["liq"] >= df["liq"].quantile(LIQ_PCT)].copy()
+    # 3단계 거름망 (healthy10): 거래대금 100억↑ → 모멘텀 top10% → 저변동성 10
+    df = df[df["liq5"] >= LIQ_FLOOR].copy()                       # 1단계
+    log(f"거래대금 {LIQ_FLOOR/1e8:.0f}억↑ 통과 {len(df)}")
     for fcol in ["hi60", "disp20", "ret5"]:
         df[fcol + "_z"] = (df[fcol] - df[fcol].mean()) / (df[fcol].std() + 1e-9)
     df["score"] = df[["hi60_z", "disp20_z", "ret5_z"]].sum(axis=1)
-    df.sort_values("score", ascending=False, inplace=True)
-    df.reset_index(drop=True, inplace=True)
-    df["rank"] = np.arange(1, len(df) + 1)
+    decile = df.nlargest(max(10, int(len(df) * 0.10)), "score")  # 2단계: 모멘텀 top10%
+    final = decile.nsmallest(TOP_N, "vol20").copy()              # 3단계: 저변동성 10
+    final.sort_values("score", ascending=False, inplace=True)
+    final.reset_index(drop=True, inplace=True)
+    final["rank"] = np.arange(1, len(final) + 1)
 
-    df["종목명"] = df["code"].map(lambda c: meta.get(c, {}).get("종목명", ""))
-    df["섹터"]  = df["code"].map(lambda c: meta.get(c, {}).get("섹터", ""))
-    out = df[["rank", "code", "종목명", "섹터", "price", "score", "ret20", "ret5", "disp20", "hi60", "liq"]]
+    final["종목명"] = final["code"].map(lambda c: meta.get(c, {}).get("종목명", ""))
+    final["섹터"]  = final["code"].map(lambda c: meta.get(c, {}).get("섹터", ""))
+    out = final[["rank", "code", "종목명", "섹터", "price", "score", "ret20", "ret5", "vol20", "hi60", "liq5"]]
     out.to_csv(OUT_CSV, index=False, encoding="utf-8-sig")
-    log(f"저장 {OUT_CSV} (유효 {len(df)})")
+    log(f"저장 {OUT_CSV} (최종 {len(out)}종목)")
 
-    print(f"\n===== 오늘 30일-모멘텀 TOP {TOP_N} =====")
+    print(f"\n===== 오늘 건강 모멘텀 (저변동성 압축) TOP {TOP_N} =====")
     show = out.head(TOP_N).copy()
     show["price"] = show["price"].map(lambda x: f"{int(x):,}")
     show["ret20%"] = (show["ret20"] * 100).round(1)
@@ -156,9 +161,9 @@ def gemini_reasons(top10):
     return out
 
 
-DISCLAIMER = ("30일 가격모멘텀(hi60 고점근접 + disp20 이격 + ret5 단기) 상위. "
-              "검증: walk-forward IR~0.15·승률~51%, 추세장 강·반전장 약. "
-              "수급·재무는 검증상 개선 없어 미반영. 종목 '이슈'는 검색기반 추정(확정 아님). 투자판단 보조용.")
+DISCLAIMER = ("3단계 거름망: 거래대금 100억↑ → 모멘텀 상위10% → 저변동성 10개(과열 꼭지 제거). "
+              "백테스트(2023~26) 건당 +1.3%/30일·승률 42%·7레짐중 5개 양수. 추세장 강·하락장 약(롱온리). "
+              "제안 청산: +20% 익절 / -10% 손절. 수급·재무 미반영. 종목 '이슈'는 검색 추정. 투자판단 보조용.")
 
 
 def upload_notion(top, reasons=None):
