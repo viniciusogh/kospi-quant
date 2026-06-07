@@ -42,9 +42,10 @@ def fetch_fin(code, tok):
     if not o:
         pd.to_pickle(None, _ensure(cache)); return None
     df = pd.DataFrame(o)
-    keep = {"stac_yymm": "stac_yymm", "roe_val": "roe", "lblt_rate": "lblt", "bps": "bps", "grs": "grs"}
+    keep = {"stac_yymm": "stac_yymm", "roe_val": "roe", "lblt_rate": "lblt", "bps": "bps",
+            "grs": "grs", "eps": "eps"}
     df = df[[c for c in keep if c in df.columns]].rename(columns=keep)
-    for c in ["roe", "lblt", "bps", "grs"]:
+    for c in ["roe", "lblt", "bps", "grs", "eps"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna(subset=["stac_yymm"]).drop_duplicates("stac_yymm").sort_values("stac_yymm")
