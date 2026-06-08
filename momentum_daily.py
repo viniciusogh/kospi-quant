@@ -255,7 +255,8 @@ def gemini_analyze(top10, flows, roes):
         prompt = (f"국내주식 데이터: {stat}\n"
                   "아래 두 줄을 정확히 이 형식으로만 출력(다른 말 금지):\n"
                   "이슈: <급등 핵심 이슈 키워드 2~3개, ·로 연결, 35자내, 따옴표·서술문 금지>\n"
-                  "종합: <위 데이터 종합 한줄평 45자내, 강점과 위험을 균형있게. 예: 기관 주도 밸류업 급등이나 신고가 과열·실적 약>")
+                  "종합: <한 문장으로 완결, 마침표로 끝맺음, 50자 이내(절대 안 넘김). 강점과 위험 함께. "
+                  "예: 기관 주도 밸류업 급등이나 신고가·고PER 부담.>")
         try:
             resp = c.models.generate_content(model="gemini-2.5-flash", contents=prompt,
                 config={"tools": [{"google_search": {}}], "thinking_config": {"thinking_budget": 0},
@@ -267,9 +268,9 @@ def gemini_analyze(top10, flows, roes):
                     issue = _trim_phrase(line.split(":", 1)[-1] if ":" in line else line)
                 elif line.startswith("종합"):
                     v = (line.split(":", 1)[-1] if ":" in line else line).strip().strip("'\"")
-                    if len(v) > 58:                       # 단어 경계서 절단 (중간 잘림 방지)
-                        cut = v[:58]; b = max(cut.rfind(" "), cut.rfind("·"), cut.rfind(","))
-                        v = (cut[:b] if b > 30 else cut).rstrip(" ,·") + "…"
+                    if len(v) > 90:                       # 완결문장 우선: 마지막 마침표서 절단
+                        cut = v[:90]; i = cut.rfind(".")
+                        v = cut[:i+1] if i > 45 else (cut[:cut.rfind(" ")].rstrip(" ,·") + "…")
                     verdict = v
             out[code] = {"issue": issue if _is_clean(issue) else "", "verdict": verdict}
         except Exception as e:
