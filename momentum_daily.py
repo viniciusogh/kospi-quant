@@ -243,7 +243,7 @@ def gemini_analyze(top10, flows, roes):
     out = {}
     for _, r in top10.iterrows():
         code = r["code"]; fl = flows.get(code) or {}; roe = roes.get(code)
-        hi = "신고가" if r.get("hi60", 0) >= 0.999 else f"고점대비 {(r['hi60']-1)*100:.0f}%"
+        hi = "60일 신고가" if r.get("hi60", 0) >= 0.999 else f"60일 고점대비 {(r['hi60']-1)*100:.0f}%"
         sup = (f"최근5일 수급 외인 {fl.get('frgn5',0):+.0f}억·기관 {fl.get('orgn5',0):+.0f}억·"
                f"개인 {fl.get('prsn5',0):+.0f}억" if fl else "수급 데이터 없음")
         n = r.get("sec_n", 0)
@@ -345,7 +345,7 @@ def upload_notion(top, analysis=None, trend=None, flows=None, roes=None):
         per_rk = f" ({secname} {int(r['per_rank'])}/{n}위·{pl})" if (pl and not pd.isna(r.get('per_rank'))) else ""
         pbr_rk = f" ({int(r['pbr_rank'])}/{n}위·{bl})" if (bl and not pd.isna(r.get('pbr_rank'))) else ""
         roe_s = f"  ·  ROE {roe:.1f}%" if roe is not None else ""
-        hi = "신고가" if r.get("hi60", 0) >= 0.999 else f"고점대비 {(r['hi60']-1)*100:.0f}%"
+        hi = "60일 신고가" if r.get("hi60", 0) >= 0.999 else f"60일 고점대비 {(r['hi60']-1)*100:.0f}%"
         # 줄1: 이름  줄2: 모멘텀  줄3: 수급  줄4: 퀄리티  줄5: 이슈  줄6: 종합
         rich = [
             {"type": "text", "text": {"content": f"{r['종목명']} "}, "annotations": {"bold": True}},
