@@ -52,6 +52,38 @@ def fetch_recent(code, tok):
     return c, v, per, pbr
 
 
+def investor_flows(code, tok):
+    """FHKST01010900: 최근 일별 외인/기관/개인 순매수대금(백만원). 5일 합 + 방향 라벨."""
+    j = _get(f"{BASE}/uapi/domestic-stock/v1/quotations/inquire-investor",
+             {"authorization": f"Bearer {tok}", "appkey": APP_KEY, "appsecret": APP_SECRET,
+              "tr_id": "FHKST01010900", "custtype": "P"},
+             {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code})
+    time.sleep(random.uniform(0.15, 0.3))
+    o = (j or {}).get("output", []) or []
+    if not o:
+        return None
+    def g(r, k):
+        try: return float(r.get(k) or 0)
+        except: return 0
+    f5 = sum(g(r, "frgn_ntby_tr_pbmn") for r in o[:5])
+    o5 = sum(g(r, "orgn_ntby_tr_pbmn") for r in o[:5])
+    p5 = sum(g(r, "prsn_ntby_tr_pbmn") for r in o[:5])
+    return {"frgn5": f5 / 100, "orgn5": o5 / 100, "prsn5": p5 / 100,  # 백만→억
+            "frgn1": g(o[0], "frgn_ntby_tr_pbmn") / 100, "orgn1": g(o[0], "orgn_ntby_tr_pbmn") / 100}
+
+
+def roe_latest(code, tok):
+    """최근 분기 ROE (FHKST66430300 캐시 재활용)."""
+    try:
+        from value_increment import fetch_fin
+        fd = fetch_fin(code, tok)
+        if fd is not None and len(fd):
+            return float(fd.iloc[-1].get("roe"))
+    except Exception:
+        pass
+    return None
+
+
 def kospi_trend(tok):
     """KOSPI 지수 현재 추세 (200/120일선 대비). 레포트 정보용 — 매매 게이트 아님."""
     url = f"{BASE}/uapi/domestic-stock/v1/quotations/inquire-daily-indexchartprice"
@@ -130,6 +162,8 @@ def main():
     df["_pbr"] = df["pbr"].where(df["pbr"] > 0)
     df["per_pct"] = df.groupby("섹터")["_per"].rank(pct=True)      # 0=섹터내 최저PER(쌈)
     df["pbr_pct"] = df.groupby("섹터")["_pbr"].rank(pct=True)
+    df["per_rank"] = df.groupby("섹터")["_per"].rank()             # 1=섹터내 최저PER
+    df["pbr_rank"] = df.groupby("섹터")["_pbr"].rank()
     df["sec_n"] = df.groupby("섹터")["_per"].transform("count")
 
     # 3단계 거름망 (healthy10): 거래대금 100억↑ → 모멘텀 top10% → 저변동성 10
@@ -147,7 +181,7 @@ def main():
     final["종목명"] = final["code"].map(lambda c: meta.get(c, {}).get("종목명", ""))
     final["섹터"]  = final["code"].map(lambda c: meta.get(c, {}).get("섹터", ""))
     out = final[["rank", "code", "종목명", "섹터", "price", "score", "ret20", "ret5", "vol20",
-                 "per", "pbr", "per_pct", "pbr_pct", "sec_n", "hi60", "liq5"]]
+                 "per", "pbr", "per_pct", "pbr_pct", "per_rank", "pbr_rank", "sec_n", "hi60", "liq5"]]
     out.to_csv(OUT_CSV, index=False, encoding="utf-8-sig")
     log(f"저장 {OUT_CSV} (최종 {len(out)}종목)")
 
@@ -157,14 +191,24 @@ def main():
     show["ret20%"] = (show["ret20"] * 100).round(1)
     print(show[["rank", "code", "종목명", "섹터", "price", "score", "ret20%"]].to_string(index=False))
 
+    top10 = out.head(TOP_N).copy()
+    # 상위10 enrichment: 일별 수급 + ROE (라이브)
+    log("상위10 수급·ROE 수집")
+    flows, roes = {}, {}
+    for code in top10["code"]:
+        flows[code] = investor_flows(code, tok)
+        roes[code] = roe_latest(code, tok)
     trend = kospi_trend(tok)
     if trend:
         log(f"KOSPI 추세: {trend['emoji']} {trend['text']}")
-    reasons = gemini_reasons(out.head(10)) if os.environ.get("GEMINI_API_KEY") else {}
+    analysis = gemini_analyze(top10, flows, roes) if os.environ.get("GEMINI_API_KEY") else {}
     if os.environ.get("NOTION_API_KEY"):
-        upload_notion(out.head(TOP_N), reasons, trend)
+        upload_notion(top10, analysis, trend, flows, roes)
     else:
         log("NOTION_API_KEY 없음 → Notion 업로드 생략 (로컬). Actions 에선 업로드됨")
+        for _, r in top10.iterrows():
+            a = analysis.get(r["code"], {})
+            log(f"  {r['종목명']}: 이슈={a.get('issue','')} | 종합={a.get('verdict','')}")
 
 
 def _trim_phrase(t):
@@ -192,26 +236,45 @@ def _is_clean(t):
     return bool(t) and "촉매 미확인" not in t and "특이" not in t
 
 
-def gemini_reasons(top10):
-    """상위10 급등 배경 키워드구 (Gemini + 검색 그라운딩). 근거없으면 빈값."""
+def gemini_analyze(top10, flows, roes):
+    """상위10: (1)급등 이슈 키워드 + (2)모멘텀·수급·퀄리티 종합한 한줄 코멘트. Gemini+검색."""
     from google import genai
     c = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     out = {}
     for _, r in top10.iterrows():
-        prompt = (f"{r['종목명']}({r['code']}) 주가가 최근 한 달 {r['ret20']*100:.0f}% 급등. "
-                  "급등 핵심 이슈를 키워드 명사구 2~3개로만, ·(가운뎃점)으로 연결. "
-                  "반드시 지킬 것: 따옴표 금지, 서술문 금지, '다음과 같습니다'·'요약'·'때문' 등 군더더기 금지, 35자 이내. "
-                  "예시 형식: 엔비디아 협력 기대·북미 수주 확대·실적 개선. "
-                  "확실한 공개 근거 없으면 '미확인'만 출력.")
+        code = r["code"]; fl = flows.get(code) or {}; roe = roes.get(code)
+        hi = "신고가" if r.get("hi60", 0) >= 0.999 else f"고점대비 {(r['hi60']-1)*100:.0f}%"
+        sup = (f"최근5일 수급 외인 {fl.get('frgn5',0):+.0f}억·기관 {fl.get('orgn5',0):+.0f}억·"
+               f"개인 {fl.get('prsn5',0):+.0f}억" if fl else "수급 데이터 없음")
+        n = r.get("sec_n", 0)
+        per_str = (f"PER {r['per']:.0f}(섹터 {int(r['per_rank'])}/{int(n)}위)"
+                   if (r.get('per', 0) > 0 and not pd.isna(r.get('per_rank')) and n) else "PER 적자/-")
+        roe_str = f"·ROE {roe:.1f}%" if roe is not None else ""
+        stat = (f"{r['종목명']}({code}, {r['섹터']}): 20일 {r['ret20']*100:+.0f}%·{hi}, "
+                f"{per_str}·PBR {r['pbr']:.1f}{roe_str}, {sup}.")
+        prompt = (f"국내주식 데이터: {stat}\n"
+                  "아래 두 줄을 정확히 이 형식으로만 출력(다른 말 금지):\n"
+                  "이슈: <급등 핵심 이슈 키워드 2~3개, ·로 연결, 35자내, 따옴표·서술문 금지>\n"
+                  "종합: <위 데이터 종합 한줄평 45자내, 강점과 위험을 균형있게. 예: 기관 주도 밸류업 급등이나 신고가 과열·실적 약>")
         try:
             resp = c.models.generate_content(model="gemini-2.5-flash", contents=prompt,
                 config={"tools": [{"google_search": {}}], "thinking_config": {"thinking_budget": 0},
-                        "max_output_tokens": 2000})
-            txt = _trim_phrase(resp.text)
-            out[r["code"]] = txt if _is_clean(txt) else ""
+                        "max_output_tokens": 2500})
+            issue, verdict = "", ""
+            for line in resp.text.splitlines():
+                line = line.strip()
+                if line.startswith("이슈"):
+                    issue = _trim_phrase(line.split(":", 1)[-1] if ":" in line else line)
+                elif line.startswith("종합"):
+                    v = (line.split(":", 1)[-1] if ":" in line else line).strip().strip("'\"")
+                    if len(v) > 58:                       # 단어 경계서 절단 (중간 잘림 방지)
+                        cut = v[:58]; b = max(cut.rfind(" "), cut.rfind("·"), cut.rfind(","))
+                        v = (cut[:b] if b > 30 else cut).rstrip(" ,·") + "…"
+                    verdict = v
+            out[code] = {"issue": issue if _is_clean(issue) else "", "verdict": verdict}
         except Exception as e:
-            log(f"  Gemini {r['code']} 실패: {str(e)[:80]}")
-            out[r["code"]] = ""
+            log(f"  Gemini {code} 실패: {str(e)[:80]}")
+            out[code] = {"issue": "", "verdict": ""}
     return out
 
 
@@ -228,9 +291,9 @@ def _rel(pct, n):
     return "저평가" if pct <= 0.33 else ("고평가" if pct >= 0.67 else "평균")
 
 
-def upload_notion(top, reasons=None, trend=None):
+def upload_notion(top, analysis=None, trend=None, flows=None, roes=None):
     """Notion 업로드. 수급.py 의 날짜페이지/중복정리 헬퍼 재활용."""
-    reasons = reasons or {}
+    analysis = analysis or {}; flows = flows or {}; roes = roes or {}
     import 수급 as sg
     headers = {"Authorization": f"Bearer {os.environ['NOTION_API_KEY']}",
                "Content-Type": "application/json", "Notion-Version": "2022-06-28"}
@@ -268,26 +331,33 @@ def upload_notion(top, reasons=None, trend=None):
         {"object": "block", "type": "heading_3",
          "heading_3": {"rich_text": [{"type": "text", "text": {"content": "🏆 상위 10"}}]}},
     ]
+    def gray(t): return {"type": "text", "text": {"content": t}, "annotations": {"color": "gray"}}
     for rank, (_, r) in enumerate(top.head(10).iterrows(), 1):
         icon = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, "📈")
         sec = r["섹터"] if pd.notna(r["섹터"]) else "-"
+        secname = sec if sec != "-" else "업종"
+        code = r["code"]; fl = flows.get(code) or {}; roe = roes.get(code); a = analysis.get(code, {})
+        n = int(r.get("sec_n", 0))
         per_s = f"{r['per']:.0f}" if r.get('per', 0) and r['per'] > 0 else "—"
         pbr_s = f"{r['pbr']:.1f}" if r.get('pbr', 0) and r['pbr'] > 0 else "—"
-        secname = sec if sec != "-" else "업종"
-        pl = _rel(r.get("per_pct"), r.get("sec_n", 0)); bl = _rel(r.get("pbr_pct"), r.get("sec_n", 0))
-        rel = f"   ({secname}내 PER {pl or '—'}·PBR {bl or '—'})" if (pl or bl) else ""
+        pl = _rel(r.get("per_pct"), n); bl = _rel(r.get("pbr_pct"), n)
+        per_rk = f" ({secname} {int(r['per_rank'])}/{n}위·{pl})" if (pl and not pd.isna(r.get('per_rank'))) else ""
+        pbr_rk = f" ({int(r['pbr_rank'])}/{n}위·{bl})" if (bl and not pd.isna(r.get('pbr_rank'))) else ""
+        roe_s = f"  ·  ROE {roe:.1f}%" if roe is not None else ""
+        hi = "신고가" if r.get("hi60", 0) >= 0.999 else f"고점대비 {(r['hi60']-1)*100:.0f}%"
+        # 줄1: 이름  줄2: 모멘텀  줄3: 수급  줄4: 퀄리티  줄5: 이슈  줄6: 종합
         rich = [
             {"type": "text", "text": {"content": f"{r['종목명']} "}, "annotations": {"bold": True}},
-            {"type": "text", "text": {"content": f"({r['code']}) · {sec}\n"}},
-            {"type": "text", "text": {"content":
-                f"모멘텀 {r['score']:.1f}   ·   20일 {r['ret20']*100:+.1f}%   ·   {int(r['price']):,}원\n"},
-             "annotations": {"color": "gray"}},
-            {"type": "text", "text": {"content": f"PER {per_s}  ·  PBR {pbr_s}{rel}"},
-             "annotations": {"color": "gray"}}]
-        why = reasons.get(r["code"])
-        if why:
-            rich.append({"type": "text", "text": {"content": f"\n이슈  {why}"},
-                         "annotations": {"color": "gray"}})
+            {"type": "text", "text": {"content": f"({code}) · {sec}\n"}},
+            gray(f"📈 모멘텀 {r['score']:.1f} · 20일 {r['ret20']*100:+.1f}% · {hi} · {int(r['price']):,}원\n")]
+        if fl:
+            rich.append(gray(f"💰 수급5일: 외인 {fl['frgn5']:+.0f}억 · 기관 {fl['orgn5']:+.0f}억 · 개인 {fl['prsn5']:+.0f}억\n"))
+        rich.append(gray(f"🏢 PER {per_s}{per_rk} · PBR {pbr_s}{pbr_rk}{roe_s}"))
+        if a.get("issue"):
+            rich.append(gray(f"\n📰 이슈: {a['issue']}"))
+        if a.get("verdict"):
+            rich.append({"type": "text", "text": {"content": f"\n🔎 종합: {a['verdict']}"},
+                         "annotations": {"color": "default"}})
         children.append({"object": "block", "type": "callout", "callout": {
             "rich_text": rich, "icon": {"type": "emoji", "emoji": icon},
             "color": "blue_background" if rank <= 3 else "gray_background"}})
