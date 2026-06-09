@@ -208,7 +208,10 @@ def main():
         log("NOTION_API_KEY 없음 → Notion 업로드 생략 (로컬). Actions 에선 업로드됨")
         for _, r in top10.iterrows():
             a = analysis.get(r["code"], {})
-            log(f"  {r['종목명']}: 이슈={a.get('issue','')} | 종합={a.get('verdict','')}")
+            print(f"\n{'='*70}\n▶▶ {r['종목명']} ({r['code']}) | 이슈: {a.get('issue','')}")
+            for k in ["요약", "사업실적", "촉매", "수급분석", "밸류", "강세론", "리스크", "관전"]:
+                if a.get(k):
+                    print(f"\n【{k}】 {a[k]}")
 
 
 def _trim_phrase(t):
@@ -250,32 +253,59 @@ def gemini_analyze(top10, flows, roes):
         per_str = (f"PER {r['per']:.0f}(섹터 {int(r['per_rank'])}/{int(n)}위)"
                    if (r.get('per', 0) > 0 and not pd.isna(r.get('per_rank')) and n) else "PER 적자/-")
         roe_str = f"·ROE {roe:.1f}%" if roe is not None else ""
+        # 분기 실적 추이 (fin 캐시)
+        qtrend = ""
+        try:
+            from value_increment import fetch_fin
+            fd = fetch_fin(code, None)
+            if fd is not None and len(fd):
+                qs = fd.tail(4)
+                qtrend = "분기추이(ROE%/EPS/매출증가%): " + " · ".join(
+                    f"{x['stac_yymm']} ROE{x['roe']:.1f}/EPS{x['eps']:.0f}/매출{x['grs']:.0f}%" for _, x in qs.iterrows())
+        except Exception:
+            pass
         stat = (f"{r['종목명']}({code}, {r['섹터']}): 20일 {r['ret20']*100:+.0f}%·{hi}, "
-                f"{per_str}·PBR {r['pbr']:.1f}{roe_str}, {sup}.")
-        prompt = (f"국내주식 데이터: {stat}\n"
-                  "아래 두 줄을 정확히 이 형식으로만 출력(다른 말 금지):\n"
-                  "이슈: <급등 핵심 이슈 키워드 2~3개, ·로 연결, 35자내, 따옴표·서술문 금지>\n"
-                  "종합: <한 문장으로 완결, 마침표로 끝맺음, 50자 이내(절대 안 넘김). 강점과 위험 함께. "
-                  "예: 기관 주도 밸류업 급등이나 신고가·고PER 부담.>")
+                f"{per_str}·PBR {r['pbr']:.1f}{roe_str}, {sup}. {qtrend}")
+        prompt = (
+            "너는 한국 주식 애널리스트다. 최근 뉴스·공시·실적을 광범위하게 검색해 아래 종목의 '심층 분석 리포트'를 작성하라.\n"
+            f"데이터: {stat}\n\n"
+            "규칙:\n"
+            "- 밸류에이션 수치는 위 제공된 PER/PBR/ROE/섹터순위만 사용(웹의 다른 PER 절대 인용 금지). 제공 데이터가 0/없으면 '밸류 데이터 미제공'이라 쓰고 추정 금지.\n"
+            "- 문체: 개조식·전보문·과도한 약어나 가운뎃점(·) 나열 금지. 애널리스트 리포트처럼 자연스럽게 풀어 쓴 완결된 문장으로 작성하라.\n"
+            "- 분량: 각 섹션을 5~8문장으로 충분히 상세하고 깊게. 실제 수치·날짜·공시명·증권사 리포트·뉴스 사실로 풍부하게 채워라. 단, 동어반복·미사여구·뻔한 말로 길이만 늘리지 말 것.\n"
+            "- 모르면 지어내지 말고 '확인 안 됨'이라고 쓸 것.\n"
+            "아래 라벨 형식으로만 한국어 출력(각 라벨 1개씩, 내용은 풀어쓴 문장으로):\n"
+            "이슈: <촉매 키워드 3개 ·로 연결, 40자내>\n"
+            "요약: <핵심 투자포인트 thesis 2~3문장>\n"
+            "사업실적: <사업 개요 + 최근 분기 매출·영업익·순익 추이를 구체적 숫자로 3~5문장>\n"
+            "촉매: <주가를 끌어올린 요인 — 수급 주체별 금액·테마·정책·공시를 시간순으로 4~6문장>\n"
+            "수급분석: <외인/기관/개인 5일 흐름 해석, 누가 주도하고 누가 이탈하는지, 그 의미 2~4문장>\n"
+            "밸류: <제공된 섹터 PER/PBR 순위·ROE 해석, 과거/피어 대비, 적정성 3~4문장>\n"
+            "강세론: <상승 지속 시나리오와 근거 3~4문장>\n"
+            "리스크: <구체적 하방 리스크와 영향, 약세 시나리오 3~5문장>\n"
+            "관전: <향후 트리거·실적발표일·정책·지표 등 체크포인트 3~5문장>")
         try:
             resp = c.models.generate_content(model="gemini-2.5-flash", contents=prompt,
                 config={"tools": [{"google_search": {}}], "thinking_config": {"thinking_budget": 0},
-                        "max_output_tokens": 2500})
-            issue, verdict = "", ""
+                        "max_output_tokens": 14000})
+            keys = ["issue", "요약", "사업실적", "촉매", "수급분석", "밸류", "강세론", "리스크", "관전"]
+            d = {k: "" for k in keys}
+            cur = None
             for line in resp.text.splitlines():
-                line = line.strip()
-                if line.startswith("이슈"):
-                    issue = _trim_phrase(line.split(":", 1)[-1] if ":" in line else line)
-                elif line.startswith("종합"):
-                    v = (line.split(":", 1)[-1] if ":" in line else line).strip().strip("'\"")
-                    if len(v) > 90:                       # 완결문장 우선: 마지막 마침표서 절단
-                        cut = v[:90]; i = cut.rfind(".")
-                        v = cut[:i+1] if i > 45 else (cut[:cut.rfind(" ")].rstrip(" ,·") + "…")
-                    verdict = v
-            out[code] = {"issue": issue if _is_clean(issue) else "", "verdict": verdict}
+                s = line.strip()
+                m = re.match(r"^\**\s*(이슈|요약|사업실적|촉매|수급분석|밸류|강세론|리스크|관전)\s*[:：]\s*(.*)", s)
+                if m:
+                    cur = "issue" if m.group(1) == "이슈" else m.group(1)
+                    d[cur] = m.group(2).strip()
+                elif cur and s:
+                    d[cur] += " " + s
+            d["issue"] = _trim_phrase(d["issue"]) if _is_clean(_trim_phrase(d["issue"])) else ""
+            for k in keys[1:]:
+                d[k] = d[k].strip().strip("'\"")    # cap 제거 — 상세 허용
+            out[code] = d
         except Exception as e:
             log(f"  Gemini {code} 실패: {str(e)[:80]}")
-            out[code] = {"issue": "", "verdict": ""}
+            out[code] = {k: "" for k in ["issue", "요약", "사업실적", "촉매", "수급분석", "밸류", "강세론", "리스크", "관전"]}
     return out
 
 
@@ -283,6 +313,11 @@ DISCLAIMER = ("📊 선정: 거래대금 100억↑  →  모멘텀 상위 10%  �
               "📈 백테스트(2023~26): 건당 +1.3% / 30일 · 승률 42% · 7개 반기 중 5개 +  (하락장 약·롱온리)\n"
               "🎯 제안 청산: +20% 익절 / −10% 손절\n"
               "ℹ️ 수급·재무 미반영 · 종목 '이슈'는 AI 검색 추정(확정 아님) · 투자판단 보조용")
+
+METHOD = ("📐 모멘텀 점수 산출식 (높을수록 강한 상승추세)\n"
+          "  = ① 60일 고점 근접도  +  ② 20일 이동평균 이격도(현재가가 MA20보다 얼마나 위)  +  ③ 5일 수익률\n"
+          "  → 세 지표를 전 종목 대비 표준화(Z-score)해 합산. 20일 단순수익률이 아니라 '추세의 강도·지속성' 측정.\n"
+          "🔁 종목이 며칠간 비슷한 이유: 모멘텀은 지속성이 있어 주도주가 유지됨(정상). 가격·점수·순위는 매일 갱신.")
 
 
 def _rel(pct, n):
@@ -292,8 +327,58 @@ def _rel(pct, n):
     return "저평가" if pct <= 0.33 else ("고평가" if pct >= 0.67 else "평균")
 
 
+SECTIONS = [("💡 요약", "요약"), ("📊 사업·실적", "사업실적"), ("⚡ 상승 촉매", "촉매"),
+            ("🔁 수급 분석", "수급분석"), ("💵 밸류에이션", "밸류"), ("📈 강세론", "강세론"),
+            ("⚠️ 리스크", "리스크"), ("👀 관전 포인트", "관전")]
+
+
+def _para(rich):
+    return {"object": "block", "type": "paragraph", "paragraph": {"rich_text": rich}}
+
+
+def _stock_toggle(rank, r, a, fl, roe):
+    """종목 1개 = 접이식 토글. 제목줄=요약지표, 펼치면 8개 섹션 문단."""
+    icon = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, "📈")
+    sec = r["섹터"] if pd.notna(r["섹터"]) else "-"
+    secname = sec if sec != "-" else "업종"
+    n = int(r.get("sec_n", 0))
+    per_s = f"{r['per']:.0f}" if r.get('per', 0) and r['per'] > 0 else "—"
+    pbr_s = f"{r['pbr']:.1f}" if r.get('pbr', 0) and r['pbr'] > 0 else "—"
+    pl = _rel(r.get("per_pct"), n); bl = _rel(r.get("pbr_pct"), n)
+    per_rk = f" ({secname} {int(r['per_rank'])}/{n}위·{pl})" if (pl and not pd.isna(r.get('per_rank'))) else ""
+    pbr_rk = f" ({int(r['pbr_rank'])}/{n}위·{bl})" if (bl and not pd.isna(r.get('pbr_rank'))) else ""
+    roe_s = f" · ROE {roe:.1f}%" if roe is not None else ""
+    hi = "60일 신고가" if r.get("hi60", 0) >= 0.999 else f"60일 고점대비 {(r['hi60']-1)*100:.0f}%"
+
+    def gray(t): return {"type": "text", "text": {"content": t}, "annotations": {"color": "gray"}}
+    title_rich = [
+        {"type": "text", "text": {"content": f"{icon} {rank}. {r['종목명']} "}, "annotations": {"bold": True}},
+        gray(f"({r['code']}) · {sec}   |   모멘텀 {r['score']:.1f} · 20일 {r['ret20']*100:+.1f}% · {hi} · {int(r['price']):,}원")]
+
+    kids = []
+    # 데이터 요약 줄 (수급 + 밸류 + 이슈)
+    dline = ""
+    if fl:
+        dline += f"💰 수급 5일 — 외국인 {fl['frgn5']:+.0f}억 · 기관 {fl['orgn5']:+.0f}억 · 개인 {fl['prsn5']:+.0f}억\n"
+    dline += f"🏢 PER {per_s}{per_rk} · PBR {pbr_s}{pbr_rk}{roe_s}"
+    if a.get("issue"):
+        dline += f"\n📰 이슈 — {a['issue']}"
+    kids.append(_para([gray(dline)]))
+    # 8개 섹션
+    for label, key in SECTIONS:
+        v = (a.get(key) or "").strip()
+        if v:
+            kids.append(_para([
+                {"type": "text", "text": {"content": f"{label}\n"}, "annotations": {"bold": True}},
+                {"type": "text", "text": {"content": v[:1900]}}]))
+    return {"object": "block", "type": "toggle", "toggle": {
+        "rich_text": title_rich,
+        "color": "blue_background" if rank <= 3 else "default",
+        "children": kids}}
+
+
 def upload_notion(top, analysis=None, trend=None, flows=None, roes=None):
-    """Notion 업로드. 수급.py 의 날짜페이지/중복정리 헬퍼 재활용."""
+    """Notion 업로드: 헤더 생성 → 종목별 토글 append → 요약표 append."""
     analysis = analysis or {}; flows = flows or {}; roes = roes or {}
     import 수급 as sg
     headers = {"Authorization": f"Bearer {os.environ['NOTION_API_KEY']}",
@@ -302,84 +387,48 @@ def upload_notion(top, analysis=None, trend=None, flows=None, roes=None):
     parent = os.environ.get("NOTION_PARENT_PAGE_ID", "3324a00632f880fbb014d766d87a1079")
     title = f"🚀 {today} KOSPI 30일 모멘텀 추천"
 
-    cols = ["랭킹", "종목코드", "종목명", "섹터", "주가", "모멘텀점수", "20일등락%", "PER(섹터)", "PBR(섹터)"]
-    cell = lambda t: [{"type": "text", "text": {"content": str(t)}}]
-    rows = [{"type": "table_row", "table_row": {"cells": [cell(c) for c in cols]}}]
-    short = {"저평가": "저", "고평가": "고", "평균": "평", "": ""}
-    for _, r in top.iterrows():
-        per_s = f"{r['per']:.0f}" if r.get('per', 0) and r['per'] > 0 else "—"
-        pbr_s = f"{r['pbr']:.1f}" if r.get('pbr', 0) and r['pbr'] > 0 else "—"
-        pl = short[_rel(r.get("per_pct"), r.get("sec_n", 0))]
-        bl = short[_rel(r.get("pbr_pct"), r.get("sec_n", 0))]
-        rows.append({"type": "table_row", "table_row": {"cells": [
-            cell(int(r["rank"])), cell(r["code"]), cell(r["종목명"]),
-            cell(r["섹터"] if pd.notna(r["섹터"]) else "-"), cell(f"{int(r['price']):,}"),
-            cell(f"{r['score']:.2f}"), cell(f"{r['ret20']*100:.1f}"),
-            cell(f"{per_s} {f'({pl})' if pl else ''}".strip()),
-            cell(f"{pbr_s} {f'({bl})' if bl else ''}".strip()),
-        ]}})
-
-    children = []
+    header = []
     if trend:
-        children.append({"object": "block", "type": "callout", "callout": {
+        header.append({"object": "block", "type": "callout", "callout": {
             "rich_text": [{"type": "text", "text": {"content": f"KOSPI 추세: {trend['text']}"},
                            "annotations": {"bold": True}}],
             "icon": {"type": "emoji", "emoji": trend["emoji"]}, "color": trend["color"]}})
-    children += [
+    header += [
         {"object": "block", "type": "callout", "callout": {
             "rich_text": [{"type": "text", "text": {"content": DISCLAIMER}}],
             "icon": {"type": "emoji", "emoji": "📐"}, "color": "yellow_background"}},
+        {"object": "block", "type": "callout", "callout": {
+            "rich_text": [{"type": "text", "text": {"content": METHOD}, "annotations": {"color": "gray"}}],
+            "icon": {"type": "emoji", "emoji": "🧮"}, "color": "gray_background"}},
         {"object": "block", "type": "heading_3",
-         "heading_3": {"rich_text": [{"type": "text", "text": {"content": "🏆 상위 10"}}]}},
-    ]
-    def gray(t): return {"type": "text", "text": {"content": t}, "annotations": {"color": "gray"}}
-    for rank, (_, r) in enumerate(top.head(10).iterrows(), 1):
-        icon = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, "📈")
-        sec = r["섹터"] if pd.notna(r["섹터"]) else "-"
-        secname = sec if sec != "-" else "업종"
-        code = r["code"]; fl = flows.get(code) or {}; roe = roes.get(code); a = analysis.get(code, {})
-        n = int(r.get("sec_n", 0))
-        per_s = f"{r['per']:.0f}" if r.get('per', 0) and r['per'] > 0 else "—"
-        pbr_s = f"{r['pbr']:.1f}" if r.get('pbr', 0) and r['pbr'] > 0 else "—"
-        pl = _rel(r.get("per_pct"), n); bl = _rel(r.get("pbr_pct"), n)
-        per_rk = f" ({secname} {int(r['per_rank'])}/{n}위·{pl})" if (pl and not pd.isna(r.get('per_rank'))) else ""
-        pbr_rk = f" ({int(r['pbr_rank'])}/{n}위·{bl})" if (bl and not pd.isna(r.get('pbr_rank'))) else ""
-        roe_s = f"  ·  ROE {roe:.1f}%" if roe is not None else ""
-        hi = "60일 신고가" if r.get("hi60", 0) >= 0.999 else f"60일 고점대비 {(r['hi60']-1)*100:.0f}%"
-        # 줄1: 이름  줄2: 모멘텀  줄3: 수급  줄4: 퀄리티  줄5: 이슈  줄6: 종합
-        rich = [
-            {"type": "text", "text": {"content": f"{r['종목명']} "}, "annotations": {"bold": True}},
-            {"type": "text", "text": {"content": f"({code}) · {sec}\n"}},
-            gray(f"📈 모멘텀 {r['score']:.1f} · 20일 {r['ret20']*100:+.1f}% · {hi} · {int(r['price']):,}원\n")]
-        if fl:
-            rich.append(gray(f"💰 수급5일: 외인 {fl['frgn5']:+.0f}억 · 기관 {fl['orgn5']:+.0f}억 · 개인 {fl['prsn5']:+.0f}억\n"))
-        rich.append(gray(f"🏢 PER {per_s}{per_rk} · PBR {pbr_s}{pbr_rk}{roe_s}"))
-        if a.get("issue"):
-            rich.append(gray(f"\n📰 이슈: {a['issue']}"))
-        if a.get("verdict"):
-            rich.append({"type": "text", "text": {"content": f"\n🔎 종합: {a['verdict']}"},
-                         "annotations": {"color": "default"}})
-        children.append({"object": "block", "type": "callout", "callout": {
-            "rich_text": rich, "icon": {"type": "emoji", "emoji": icon},
-            "color": "blue_background" if rank <= 3 else "gray_background"}})
-    children += [
-        {"object": "block", "type": "divider", "divider": {}},
-        {"object": "block", "type": "heading_3",
-         "heading_3": {"rich_text": [{"type": "text", "text": {"content": f"📋 전체 TOP{len(top)}"}}]}},
-        {"object": "block", "type": "table", "table": {
-            "table_width": len(cols), "has_column_header": True, "has_row_header": False, "children": rows}},
+         "heading_3": {"rich_text": [{"type": "text", "text": {"content": "🏆 상위 10 — 종목을 펼치면 상세 분석"}}]}},
     ]
 
     date_parent = sg._get_or_create_date_page(today, headers, parent)
     sg._archive_same_title_pages(title, headers, date_parent)
-    body = {"parent": {"page_id": date_parent},
-            "properties": {"title": {"title": [{"text": {"content": title}}]}},
-            "children": children}
-    r = requests.post("https://api.notion.com/v1/pages", headers=headers, json=body, timeout=15)
-    if r.status_code == 200:
-        log(f"✅ Notion 업로드 완료: {r.json().get('url', '')}")
-    else:
-        log(f"❌ Notion 업로드 실패 {r.status_code}: {r.text[:200]}")
+    r = requests.post("https://api.notion.com/v1/pages", headers=headers, timeout=20,
+                      json={"parent": {"page_id": date_parent},
+                            "properties": {"title": {"title": [{"text": {"content": title}}]}},
+                            "children": header})
+    if r.status_code != 200:
+        log(f"❌ Notion 페이지 생성 실패 {r.status_code}: {r.text[:200]}"); return
+    page_id = r.json()["id"]
+    page_url = r.json().get("url", "")
+
+    def append(blocks):
+        rr = requests.patch(f"https://api.notion.com/v1/blocks/{page_id}/children",
+                            headers=headers, json={"children": blocks}, timeout=20)
+        if rr.status_code != 200:
+            log(f"  ⚠️ append 실패 {rr.status_code}: {rr.text[:150]}")
+        time.sleep(0.35)
+
+    # 종목별 토글 (2개씩 묶어 append — 중첩 children 많아 분할)
+    toggles = [_stock_toggle(rank, r, analysis.get(r["code"], {}), flows.get(r["code"]) or {}, roes.get(r["code"]))
+               for rank, (_, r) in enumerate(top.head(10).iterrows(), 1)]
+    for i in range(0, len(toggles), 2):
+        append(toggles[i:i+2])
+
+    log(f"✅ Notion 업로드 완료: {page_url}")
 
 
 if __name__ == "__main__":
