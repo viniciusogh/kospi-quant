@@ -182,6 +182,26 @@ def main():
     final["섹터"]  = final["code"].map(lambda c: meta.get(c, {}).get("섹터", ""))
     out = final[["rank", "code", "종목명", "섹터", "price", "score", "ret20", "ret5", "vol20",
                  "per", "pbr", "per_pct", "pbr_pct", "per_rank", "pbr_rank", "sec_n", "hi60", "liq5"]]
+
+    # 전일 대비 변화: 덮어쓰기 전 어제 CSV 읽어 비교
+    deltas, prev_names = {}, {}
+    if os.path.exists(OUT_CSV):
+        try:
+            pv = pd.read_csv(OUT_CSV)
+            pv["code"] = pv["code"].astype(str).str.zfill(6)
+            prev_names = dict(zip(pv["code"], pv["종목명"]))
+            pmap = pv.set_index("code")[["rank", "price", "score"]].to_dict("index")
+            for _, r in out.iterrows():
+                p = pmap.get(r["code"])
+                deltas[r["code"]] = ({"rank_prev": int(p["rank"]),
+                                      "price_chg": (r["price"]/p["price"]-1) if p["price"] else None,
+                                      "score_prev": p["score"]} if p else {"new": True})
+        except Exception as e:
+            log(f"  전일비교 스킵: {str(e)[:60]}")
+    today_codes = set(out["code"])
+    newly = [r["종목명"] for _, r in out.iterrows() if deltas.get(r["code"], {}).get("new")]
+    dropped = [prev_names[c] for c in prev_names if c not in today_codes]
+
     out.to_csv(OUT_CSV, index=False, encoding="utf-8-sig")
     log(f"저장 {OUT_CSV} (최종 {len(out)}종목)")
 
@@ -203,7 +223,7 @@ def main():
         log(f"KOSPI 추세: {trend['emoji']} {trend['text']}")
     analysis = gemini_analyze(top10, flows, roes) if os.environ.get("GEMINI_API_KEY") else {}
     if os.environ.get("NOTION_API_KEY"):
-        upload_notion(top10, analysis, trend, flows, roes)
+        upload_notion(top10, analysis, trend, flows, roes, deltas, newly, dropped)
     else:
         log("NOTION_API_KEY 없음 → Notion 업로드 생략 (로컬). Actions 에선 업로드됨")
         for _, r in top10.iterrows():
@@ -314,10 +334,20 @@ DISCLAIMER = ("📊 선정: 거래대금 100억↑  →  모멘텀 상위 10%  �
               "🎯 제안 청산: +20% 익절 / −10% 손절\n"
               "ℹ️ 수급·재무 미반영 · 종목 '이슈'는 AI 검색 추정(확정 아님) · 투자판단 보조용")
 
-METHOD = ("📐 모멘텀 점수 산출식 (높을수록 강한 상승추세)\n"
-          "  = ① 60일 고점 근접도  +  ② 20일 이동평균 이격도(현재가가 MA20보다 얼마나 위)  +  ③ 5일 수익률\n"
-          "  → 세 지표를 전 종목 대비 표준화(Z-score)해 합산. 20일 단순수익률이 아니라 '추세의 강도·지속성' 측정.\n"
-          "🔁 종목이 며칠간 비슷한 이유: 모멘텀은 지속성이 있어 주도주가 유지됨(정상). 가격·점수·순위는 매일 갱신.")
+METHOD = (
+    "🧮 이 리포트는 어떻게 만들어지나 — 3단계 선정 + 모멘텀 점수\n\n"
+    "[1단계] 거래대금 필터\n"
+    "최근 5거래일 평균 거래대금이 100억원 미만인 종목은 제외합니다. 거래가 적어 소수 세력에 휘둘리거나 사고팔기 어려운 잡주를 1차로 걸러내는 관문입니다.\n\n"
+    "[2단계] 모멘텀 점수 상위 10%\n"
+    "1단계를 통과한 종목을 아래 '모멘텀 점수'로 줄세워 상위 10%(주도주군)만 남깁니다.\n"
+    "　모멘텀 점수 = ① 60일 고점 근접도 + ② 20일 이동평균 이격도 + ③ 5일 수익률\n"
+    "　· ① 현재가가 최근 60일 최고가에 얼마나 가까운가 (1.0이면 60일 신고가)\n"
+    "　· ② 현재가가 20일 이동평균선보다 얼마나 위에 있는가\n"
+    "　· ③ 최근 5거래일 상승률\n"
+    "　세 지표를 그날 전 종목과 비교해 표준화(Z-score)한 뒤 합산합니다. 단순 20일 수익률이 아니라 '추세의 강도와 지속성'을 측정합니다.\n\n"
+    "[3단계] 저변동성 10개 압축\n"
+    "2단계 주도주군 중에서 '20일 변동성(일간 수익률의 표준편차 = 매일 얼마나 출렁이는지)'이 낮은 순으로 10개만 추립니다. 변동성이 낮다는 것은 급등락 없이 꾸준히·완만하게 오른 종목이라는 뜻입니다. 같은 강세라도 급등락이 심한 과열 종목은 반전(폭락) 위험이 크기 때문에, 덜 흔들리며 추세를 유지한 '건강한 주도주'를 고르는 단계입니다. (백테스트상 가장 뜨겁게 급등한 종목을 사는 것보다 이 방식이 더 좋았습니다.)\n\n"
+    "🔁 종목이 며칠간 비슷한 이유: 모멘텀은 지속성이 있어 한 번 주도주가 되면 며칠씩 유지되는 게 정상입니다. 가격·점수·순위·수급은 매일 새로 갱신되며, 종목별 '전일 대비 변화'를 함께 표기합니다.")
 
 
 def _rel(pct, n):
@@ -336,7 +366,23 @@ def _para(rich):
     return {"object": "block", "type": "paragraph", "paragraph": {"rich_text": rich}}
 
 
-def _stock_toggle(rank, r, a, fl, roe):
+def _delta_line(dl):
+    """전일 대비 변화 한 줄."""
+    if not dl:
+        return ""
+    if dl.get("new"):
+        return "📌 전일대비: 신규 진입 (어제 10위권 밖)"
+    parts = []
+    rp = dl.get("rank_prev")
+    parts.append(f"순위 {rp}위 유지" if rp == dl.get("_rank") else f"어제 {rp}위")
+    if dl.get("price_chg") is not None:
+        parts.append(f"주가 {dl['price_chg']*100:+.1f}%")
+    if dl.get("score_prev") is not None and dl.get("_score") is not None:
+        parts.append(f"점수 {dl['score_prev']:.1f}→{dl['_score']:.1f}")
+    return "📌 전일대비: " + " · ".join(parts)
+
+
+def _stock_toggle(rank, r, a, fl, roe, dl=None):
     """종목 1개 = 접이식 토글. 제목줄=요약지표, 펼치면 8개 섹션 문단."""
     icon = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, "📈")
     sec = r["섹터"] if pd.notna(r["섹터"]) else "-"
@@ -356,6 +402,13 @@ def _stock_toggle(rank, r, a, fl, roe):
         gray(f"({r['code']}) · {sec}   |   모멘텀 {r['score']:.1f} · 20일 {r['ret20']*100:+.1f}% · {hi} · {int(r['price']):,}원")]
 
     kids = []
+    # 전일 대비 변화 (별도 강조 줄)
+    if dl:
+        dl = {**dl, "_rank": rank, "_score": r["score"]}
+        dtxt = _delta_line(dl)
+        if dtxt:
+            kids.append(_para([{"type": "text", "text": {"content": dtxt},
+                                "annotations": {"bold": True, "color": "blue"}}]))
     # 데이터 요약 줄 (수급 + 밸류 + 이슈)
     dline = ""
     if fl:
@@ -377,9 +430,9 @@ def _stock_toggle(rank, r, a, fl, roe):
         "children": kids}}
 
 
-def upload_notion(top, analysis=None, trend=None, flows=None, roes=None):
-    """Notion 업로드: 헤더 생성 → 종목별 토글 append → 요약표 append."""
-    analysis = analysis or {}; flows = flows or {}; roes = roes or {}
+def upload_notion(top, analysis=None, trend=None, flows=None, roes=None, deltas=None, newly=None, dropped=None):
+    """Notion 업로드: 헤더 생성 → 종목별 토글 append."""
+    analysis = analysis or {}; flows = flows or {}; roes = roes or {}; deltas = deltas or {}
     import 수급 as sg
     headers = {"Authorization": f"Bearer {os.environ['NOTION_API_KEY']}",
                "Content-Type": "application/json", "Notion-Version": "2022-06-28"}
@@ -400,9 +453,18 @@ def upload_notion(top, analysis=None, trend=None, flows=None, roes=None):
         {"object": "block", "type": "callout", "callout": {
             "rich_text": [{"type": "text", "text": {"content": METHOD}, "annotations": {"color": "gray"}}],
             "icon": {"type": "emoji", "emoji": "🧮"}, "color": "gray_background"}},
-        {"object": "block", "type": "heading_3",
-         "heading_3": {"rich_text": [{"type": "text", "text": {"content": "🏆 상위 10 — 종목을 펼치면 상세 분석"}}]}},
     ]
+    if newly or dropped:
+        chg = []
+        if newly:
+            chg.append(f"🆕 신규 진입: {', '.join(newly)}")
+        if dropped:
+            chg.append(f"📉 이탈: {', '.join(dropped)}")
+        header.append({"object": "block", "type": "callout", "callout": {
+            "rich_text": [{"type": "text", "text": {"content": "어제 대비  " + "   ·   ".join(chg)}}],
+            "icon": {"type": "emoji", "emoji": "📌"}, "color": "blue_background"}})
+    header.append({"object": "block", "type": "heading_3",
+                   "heading_3": {"rich_text": [{"type": "text", "text": {"content": "🏆 상위 10 — 종목을 펼치면 상세 분석"}}]}})
 
     date_parent = sg._get_or_create_date_page(today, headers, parent)
     sg._archive_same_title_pages(title, headers, date_parent)
@@ -423,7 +485,8 @@ def upload_notion(top, analysis=None, trend=None, flows=None, roes=None):
         time.sleep(0.35)
 
     # 종목별 토글 (2개씩 묶어 append — 중첩 children 많아 분할)
-    toggles = [_stock_toggle(rank, r, analysis.get(r["code"], {}), flows.get(r["code"]) or {}, roes.get(r["code"]))
+    toggles = [_stock_toggle(rank, r, analysis.get(r["code"], {}), flows.get(r["code"]) or {},
+                             roes.get(r["code"]), deltas.get(r["code"]))
                for rank, (_, r) in enumerate(top.head(10).iterrows(), 1)]
     for i in range(0, len(toggles), 2):
         append(toggles[i:i+2])
