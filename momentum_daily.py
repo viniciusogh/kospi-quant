@@ -19,6 +19,8 @@ def _excluded(name, sector):
 _DIR = os.path.dirname(os.path.abspath(__file__))
 UNIVERSE_CSV = os.path.join(_DIR, "latest_kospi_supply.csv")
 OUT_CSV  = os.path.join(_DIR, "latest_momentum_reco.csv")
+HIST_CSV = os.path.join(_DIR, "momentum_history.csv")   # 날짜별 누적 (전일대비용)
+CACHE_JSON = os.path.join(_DIR, "momentum_analysis.json")  # 종목별 분석 캐시 (토큰 절약)
 UNIV_TOP  = int(os.environ.get("UNIV_TOP", "0"))   # 0=전종목, n=시총상위 n (테스트용)
 TOP_N     = 10                    # 최종 추천 종목 수
 LIQ_FLOOR = 1e10                  # 1단계: 5일평균 거래대금 100억원 하한
@@ -183,12 +185,15 @@ def main():
     out = final[["rank", "code", "종목명", "섹터", "price", "score", "ret20", "ret5", "vol20",
                  "per", "pbr", "per_pct", "pbr_pct", "per_rank", "pbr_rank", "sec_n", "hi60", "liq5"]]
 
-    # 전일 대비 변화: 덮어쓰기 전 어제 CSV 읽어 비교
+    # 전일 대비: 히스토리(날짜별 누적)에서 '직전 다른 날' 기록과 비교 → 같은날 재실행에도 안 깨짐
+    today_str = datetime.now(KST).strftime("%Y-%m-%d")
     deltas, prev_names = {}, {}
-    if os.path.exists(OUT_CSV):
-        try:
-            pv = pd.read_csv(OUT_CSV)
-            pv["code"] = pv["code"].astype(str).str.zfill(6)
+    hist = pd.read_csv(HIST_CSV, dtype={"code": str}) if os.path.exists(HIST_CSV) else pd.DataFrame()
+    if len(hist):
+        hist["code"] = hist["code"].str.zfill(6)
+        prev_dates = sorted(d for d in hist["date"].unique() if d < today_str)
+        if prev_dates:
+            pv = hist[hist["date"] == prev_dates[-1]]
             prev_names = dict(zip(pv["code"], pv["종목명"]))
             pmap = pv.set_index("code")[["rank", "price", "score"]].to_dict("index")
             for _, r in out.iterrows():
@@ -196,13 +201,15 @@ def main():
                 deltas[r["code"]] = ({"rank_prev": int(p["rank"]),
                                       "price_chg": (r["price"]/p["price"]-1) if p["price"] else None,
                                       "score_prev": p["score"]} if p else {"new": True})
-        except Exception as e:
-            log(f"  전일비교 스킵: {str(e)[:60]}")
     today_codes = set(out["code"])
     newly = [r["종목명"] for _, r in out.iterrows() if deltas.get(r["code"], {}).get("new")]
     dropped = [prev_names[c] for c in prev_names if c not in today_codes]
 
     out.to_csv(OUT_CSV, index=False, encoding="utf-8-sig")
+    # 히스토리에 오늘 기록 추가 (오늘 날짜 기존 행은 교체)
+    snap = out[["code", "종목명", "rank", "price", "score"]].copy(); snap.insert(0, "date", today_str)
+    hist = pd.concat([hist[hist["date"] != today_str] if len(hist) else hist, snap], ignore_index=True)
+    hist.to_csv(HIST_CSV, index=False, encoding="utf-8-sig")
     log(f"저장 {OUT_CSV} (최종 {len(out)}종목)")
 
     print(f"\n===== 오늘 건강 모멘텀 (저변동성 압축) TOP {TOP_N} =====")
@@ -221,7 +228,16 @@ def main():
     trend = kospi_trend(tok)
     if trend:
         log(f"KOSPI 추세: {trend['emoji']} {trend['text']}")
-    analysis = gemini_analyze(top10, flows, roes) if os.environ.get("GEMINI_API_KEY") else {}
+    import json
+    cache = {}
+    if os.path.exists(CACHE_JSON):
+        try:
+            cache = json.load(open(CACHE_JSON, encoding="utf-8"))
+        except Exception:
+            cache = {}
+    analysis = gemini_analyze(top10, flows, roes, cache) if os.environ.get("GEMINI_API_KEY") else {}
+    if analysis:                                  # 캐시 저장 (등장한 종목만 유지 + 오래된건 정리)
+        json.dump({k: v for k, v in cache.items()}, open(CACHE_JSON, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
     if os.environ.get("NOTION_API_KEY"):
         upload_notion(top10, analysis, trend, flows, roes, deltas, newly, dropped)
     else:
@@ -229,6 +245,8 @@ def main():
         for _, r in top10.iterrows():
             a = analysis.get(r["code"], {})
             print(f"\n{'='*70}\n▶▶ {r['종목명']} ({r['code']}) | 이슈: {a.get('issue','')}")
+            if a.get("업데이트"):
+                print(f"\n🆕 오늘 업데이트: {a['업데이트']}")
             for k in ["요약", "사업실적", "촉매", "수급분석", "밸류", "강세론", "리스크", "관전"]:
                 if a.get(k):
                     print(f"\n【{k}】 {a[k]}")
@@ -259,73 +277,105 @@ def _is_clean(t):
     return bool(t) and "촉매 미확인" not in t and "특이" not in t
 
 
-def gemini_analyze(top10, flows, roes):
-    """상위10: (1)급등 이슈 키워드 + (2)모멘텀·수급·퀄리티 종합한 한줄 코멘트. Gemini+검색."""
+SEC_KEYS = ["issue", "요약", "사업실적", "촉매", "수급분석", "밸류", "강세론", "리스크", "관전"]
+
+
+def _gemini_full(c, r, fl, roe):
+    """종목 전체 심층 분석 (8섹션). 분기 숫자는 표로 별도 제공 → prose엔 나열 금지."""
+    code = r["code"]
+    hi = "60일 신고가" if r.get("hi60", 0) >= 0.999 else f"60일 고점대비 {(r['hi60']-1)*100:.0f}%"
+    sup = (f"최근5일 수급 외인 {fl.get('frgn5',0):+.0f}억·기관 {fl.get('orgn5',0):+.0f}억·개인 {fl.get('prsn5',0):+.0f}억"
+           if fl else "수급 데이터 없음")
+    n = r.get("sec_n", 0)
+    per_str = (f"PER {r['per']:.0f}(섹터 {int(r['per_rank'])}/{int(n)}위)"
+               if (r.get('per', 0) > 0 and not pd.isna(r.get('per_rank')) and n) else "PER 적자/-")
+    roe_str = f"·ROE {roe:.1f}%" if roe is not None else ""
+    qtrend = ""
+    try:
+        from value_increment import fetch_fin
+        fd = fetch_fin(code, None)
+        if fd is not None and len(fd):
+            qtrend = "참고 분기추이: " + " · ".join(
+                f"{x['stac_yymm']} ROE{x['roe']:.1f}/EPS{x['eps']:.0f}/매출{x['grs']:.0f}%" for _, x in fd.tail(4).iterrows())
+    except Exception:
+        pass
+    stat = (f"{r['종목명']}({code}, {r['섹터']}): 20일 {r['ret20']*100:+.0f}%·{hi}, "
+            f"{per_str}·PBR {r['pbr']:.1f}{roe_str}, {sup}. {qtrend}")
+    prompt = (
+        "너는 한국 주식 애널리스트다. 최근 뉴스·공시·실적을 광범위하게 검색해 아래 종목의 '심층 분석 리포트'를 작성하라.\n"
+        f"데이터: {stat}\n\n"
+        "규칙:\n"
+        "- 밸류에이션 수치는 위 제공된 PER/PBR/ROE/섹터순위만 사용(웹의 다른 PER 절대 인용 금지). 0/없으면 '밸류 데이터 미제공'.\n"
+        "- 문체: 자연스럽게 풀어 쓴 완결 문장. 개조식·전보문·가운뎃점 나열 금지.\n"
+        "- ⚠️ 분기별 ROE/EPS/매출 수치와 수급 금액(억)은 리포트에 표·막대로 따로 보여주므로 prose에 숫자를 나열하지 말 것. 그 수치들의 '의미·방향·해석'만 서술하라.\n"
+        "- 각 섹션 4~7문장, 실제 사실·뉴스·공시·증권사 리포트 근거로. 모르면 '확인 안 됨'.\n"
+        "아래 라벨 형식으로만 출력:\n"
+        "이슈: <촉매 키워드 3개 ·로 연결, 40자내>\n"
+        "요약: <핵심 투자포인트 thesis 2~3문장>\n"
+        "사업실적: <사업 개요 + 최근 실적의 의미·방향 해석(숫자 나열 금지) 4~6문장>\n"
+        "촉매: <주가를 끌어올린 요인 — 테마·정책·공시·뉴스를 시간순으로 4~6문장>\n"
+        "수급분석: <외인/기관/개인 흐름의 해석(금액 나열 말고 누가 주도/이탈하며 의미가 뭔지) 2~4문장>\n"
+        "밸류: <제공된 섹터 PER/PBR 순위·ROE 해석, 피어 대비 적정성 3~4문장>\n"
+        "강세론: <상승 지속 시나리오와 근거 3~4문장>\n"
+        "리스크: <구체적 하방 리스크와 영향 3~5문장>\n"
+        "관전: <향후 트리거·실적발표일·정책·지표 체크포인트 3~5문장>")
+    resp = c.models.generate_content(model="gemini-2.5-flash", contents=prompt,
+        config={"tools": [{"google_search": {}}], "thinking_config": {"thinking_budget": 0}, "max_output_tokens": 14000})
+    d = {k: "" for k in SEC_KEYS}; cur = None
+    for line in resp.text.splitlines():
+        s = line.strip()
+        m = re.match(r"^\**\s*(이슈|요약|사업실적|촉매|수급분석|밸류|강세론|리스크|관전)\s*[:：]\s*(.*)", s)
+        if m:
+            cur = "issue" if m.group(1) == "이슈" else m.group(1); d[cur] = m.group(2).strip()
+        elif cur and s:
+            d[cur] += " " + s
+    d["issue"] = _trim_phrase(d["issue"]) if _is_clean(_trim_phrase(d["issue"])) else ""
+    for k in SEC_KEYS[1:]:
+        d[k] = d[k].strip().strip("'\"")
+    return d
+
+
+def _gemini_update(c, name, code, prev_summary):
+    """재등장 종목: 어제 분석은 두고 '오늘 새 뉴스'만 가볍게 (토큰 절약)."""
+    prompt = (f"한국 주식 '{name}({code})'의 어제 분석 요약: {prev_summary}\n"
+              "오늘 새로 나온 뉴스·공시·증권사 리포트만 검색해서, 어제와 겹치지 않는 '새로운 변화'만 1~2문장으로 써라. "
+              "'오늘 ~와 관련하여 새롭게 확인된 변화는 다음과 같다' 같은 서두 없이 새 사실을 바로 서술. 구체적 수치·기관명 포함. "
+              "새로운 게 없으면 정확히 '오늘 특이 변화 없음'이라고만 출력.")
+    try:
+        resp = c.models.generate_content(model="gemini-2.5-flash", contents=prompt,
+            config={"tools": [{"google_search": {}}], "thinking_config": {"thinking_budget": 0}, "max_output_tokens": 2000})
+        return resp.text.strip().strip("'\"")[:400]
+    except Exception:
+        return ""
+
+
+def gemini_analyze(top10, flows, roes, cache):
+    """캐시 인식: 재등장(7일내) 종목은 어제 8섹션 재사용 + 오늘 업데이트만 호출. 신규/묵은건 전체분석."""
     from google import genai
     c = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    out = {}
+    today = datetime.now(KST); out = {}
     for _, r in top10.iterrows():
         code = r["code"]; fl = flows.get(code) or {}; roe = roes.get(code)
-        hi = "60일 신고가" if r.get("hi60", 0) >= 0.999 else f"60일 고점대비 {(r['hi60']-1)*100:.0f}%"
-        sup = (f"최근5일 수급 외인 {fl.get('frgn5',0):+.0f}억·기관 {fl.get('orgn5',0):+.0f}억·"
-               f"개인 {fl.get('prsn5',0):+.0f}억" if fl else "수급 데이터 없음")
-        n = r.get("sec_n", 0)
-        per_str = (f"PER {r['per']:.0f}(섹터 {int(r['per_rank'])}/{int(n)}위)"
-                   if (r.get('per', 0) > 0 and not pd.isna(r.get('per_rank')) and n) else "PER 적자/-")
-        roe_str = f"·ROE {roe:.1f}%" if roe is not None else ""
-        # 분기 실적 추이 (fin 캐시)
-        qtrend = ""
+        cached = cache.get(code)
+        fresh = False
+        if cached and cached.get("date"):
+            try:
+                fresh = (today - datetime.strptime(cached["date"], "%Y-%m-%d").replace(tzinfo=KST)).days <= 7
+            except Exception:
+                fresh = False
         try:
-            from value_increment import fetch_fin
-            fd = fetch_fin(code, None)
-            if fd is not None and len(fd):
-                qs = fd.tail(4)
-                qtrend = "분기추이(ROE%/EPS/매출증가%): " + " · ".join(
-                    f"{x['stac_yymm']} ROE{x['roe']:.1f}/EPS{x['eps']:.0f}/매출{x['grs']:.0f}%" for _, x in qs.iterrows())
-        except Exception:
-            pass
-        stat = (f"{r['종목명']}({code}, {r['섹터']}): 20일 {r['ret20']*100:+.0f}%·{hi}, "
-                f"{per_str}·PBR {r['pbr']:.1f}{roe_str}, {sup}. {qtrend}")
-        prompt = (
-            "너는 한국 주식 애널리스트다. 최근 뉴스·공시·실적을 광범위하게 검색해 아래 종목의 '심층 분석 리포트'를 작성하라.\n"
-            f"데이터: {stat}\n\n"
-            "규칙:\n"
-            "- 밸류에이션 수치는 위 제공된 PER/PBR/ROE/섹터순위만 사용(웹의 다른 PER 절대 인용 금지). 제공 데이터가 0/없으면 '밸류 데이터 미제공'이라 쓰고 추정 금지.\n"
-            "- 문체: 개조식·전보문·과도한 약어나 가운뎃점(·) 나열 금지. 애널리스트 리포트처럼 자연스럽게 풀어 쓴 완결된 문장으로 작성하라.\n"
-            "- 분량: 각 섹션을 5~8문장으로 충분히 상세하고 깊게. 실제 수치·날짜·공시명·증권사 리포트·뉴스 사실로 풍부하게 채워라. 단, 동어반복·미사여구·뻔한 말로 길이만 늘리지 말 것.\n"
-            "- 모르면 지어내지 말고 '확인 안 됨'이라고 쓸 것.\n"
-            "아래 라벨 형식으로만 한국어 출력(각 라벨 1개씩, 내용은 풀어쓴 문장으로):\n"
-            "이슈: <촉매 키워드 3개 ·로 연결, 40자내>\n"
-            "요약: <핵심 투자포인트 thesis 2~3문장>\n"
-            "사업실적: <사업 개요 + 최근 분기 매출·영업익·순익 추이를 구체적 숫자로 3~5문장>\n"
-            "촉매: <주가를 끌어올린 요인 — 수급 주체별 금액·테마·정책·공시를 시간순으로 4~6문장>\n"
-            "수급분석: <외인/기관/개인 5일 흐름 해석, 누가 주도하고 누가 이탈하는지, 그 의미 2~4문장>\n"
-            "밸류: <제공된 섹터 PER/PBR 순위·ROE 해석, 과거/피어 대비, 적정성 3~4문장>\n"
-            "강세론: <상승 지속 시나리오와 근거 3~4문장>\n"
-            "리스크: <구체적 하방 리스크와 영향, 약세 시나리오 3~5문장>\n"
-            "관전: <향후 트리거·실적발표일·정책·지표 등 체크포인트 3~5문장>")
-        try:
-            resp = c.models.generate_content(model="gemini-2.5-flash", contents=prompt,
-                config={"tools": [{"google_search": {}}], "thinking_config": {"thinking_budget": 0},
-                        "max_output_tokens": 14000})
-            keys = ["issue", "요약", "사업실적", "촉매", "수급분석", "밸류", "강세론", "리스크", "관전"]
-            d = {k: "" for k in keys}
-            cur = None
-            for line in resp.text.splitlines():
-                s = line.strip()
-                m = re.match(r"^\**\s*(이슈|요약|사업실적|촉매|수급분석|밸류|강세론|리스크|관전)\s*[:：]\s*(.*)", s)
-                if m:
-                    cur = "issue" if m.group(1) == "이슈" else m.group(1)
-                    d[cur] = m.group(2).strip()
-                elif cur and s:
-                    d[cur] += " " + s
-            d["issue"] = _trim_phrase(d["issue"]) if _is_clean(_trim_phrase(d["issue"])) else ""
-            for k in keys[1:]:
-                d[k] = d[k].strip().strip("'\"")    # cap 제거 — 상세 허용
-            out[code] = d
+            if fresh:
+                a = {k: cached.get(k, "") for k in SEC_KEYS}        # 어제 8섹션 재사용
+                a["업데이트"] = _gemini_update(c, r["종목명"], code, cached.get("요약", ""))
+                log(f"  {r['종목명']}: 캐시 재사용 + 업데이트")
+            else:
+                a = _gemini_full(c, r, fl, roe); a["업데이트"] = ""
+                log(f"  {r['종목명']}: 전체 분석")
         except Exception as e:
             log(f"  Gemini {code} 실패: {str(e)[:80]}")
-            out[code] = {k: "" for k in ["issue", "요약", "사업실적", "촉매", "수급분석", "밸류", "강세론", "리스크", "관전"]}
+            a = (cached or {k: "" for k in SEC_KEYS}); a.setdefault("업데이트", "")
+        a["date"] = today.strftime("%Y-%m-%d")
+        out[code] = a; cache[code] = a
     return out
 
 
@@ -409,11 +459,17 @@ def _stock_toggle(rank, r, a, fl, roe, dl=None):
         if dtxt:
             kids.append(_para([{"type": "text", "text": {"content": dtxt},
                                 "annotations": {"bold": True, "color": "blue"}}]))
-    # 데이터 요약 줄 (수급 + 밸류 + 이슈)
-    dline = ""
-    if fl:
-        dline += f"💰 수급 5일 — 외국인 {fl['frgn5']:+.0f}억 · 기관 {fl['orgn5']:+.0f}억 · 개인 {fl['prsn5']:+.0f}억\n"
-    dline += f"🏢 PER {per_s}{per_rk} · PBR {pbr_s}{pbr_rk}{roe_s}"
+    # 오늘 업데이트 (재등장 종목)
+    if a.get("업데이트"):
+        kids.append(_para([
+            {"type": "text", "text": {"content": "🆕 오늘 업데이트  "}, "annotations": {"bold": True, "color": "green"}},
+            {"type": "text", "text": {"content": a["업데이트"]}}]))
+    # 수급 5일 막대 (시각화)
+    sb = _supply_bars(fl)
+    if sb:
+        kids.append(sb)
+    # 밸류 + 이슈
+    dline = f"🏢 PER {per_s}{per_rk} · PBR {pbr_s}{pbr_rk}{roe_s}"
     if a.get("issue"):
         dline += f"\n📰 이슈 — {a['issue']}"
     kids.append(_para([gray(dline)]))
@@ -428,6 +484,40 @@ def _stock_toggle(rank, r, a, fl, roe, dl=None):
         "rich_text": title_rich,
         "color": "blue_background" if rank <= 3 else "default",
         "children": kids}}
+
+
+def _supply_bars(fl):
+    """수급 5일 순매수 막대 (외인/기관/개인). 순매수=초록 / 순매도=빨강."""
+    if not fl:
+        return None
+    items = [("외국인", fl.get("frgn5", 0)), ("기관 ", fl.get("orgn5", 0)), ("개인 ", fl.get("prsn5", 0))]
+    mx = max((abs(v) for _, v in items), default=0) or 1
+    rich = [{"type": "text", "text": {"content": "💰 수급 5일 순매수(억)\n"}, "annotations": {"bold": True}}]
+    for name, v in items:
+        nbar = max(1, round(abs(v) / mx * 12))
+        rich.append({"type": "text", "text": {"content": f"{name}  "}, "annotations": {"color": "gray"}})
+        rich.append({"type": "text", "text": {"content": "▇" * nbar},
+                     "annotations": {"color": ("green" if v >= 0 else "red")}})
+        rich.append({"type": "text", "text": {"content": f"  {v:+,.0f}\n"}, "annotations": {"color": "gray"}})
+    return _para(rich)
+
+
+def _quarter_table(code):
+    """분기 실적 추이 표 (분기/ROE%/EPS/매출증가%). fin 캐시 없으면 None."""
+    try:
+        from value_increment import fetch_fin
+        fd = fetch_fin(code, None)
+    except Exception:
+        fd = None
+    if fd is None or not len(fd):
+        return None
+    cell = lambda t: [{"type": "text", "text": {"content": str(t)}}]
+    rows = [{"type": "table_row", "table_row": {"cells": [cell(c) for c in ["분기", "ROE%", "EPS", "매출증가%"]]}}]
+    for _, x in fd.tail(5).iterrows():
+        rows.append({"type": "table_row", "table_row": {"cells": [
+            cell(x["stac_yymm"]), cell(f"{x['roe']:.1f}"), cell(f"{x['eps']:,.0f}"), cell(f"{x['grs']:.0f}")]}})
+    return {"object": "block", "type": "table", "table": {
+        "table_width": 4, "has_column_header": True, "has_row_header": False, "children": rows}}
 
 
 def upload_notion(top, analysis=None, trend=None, flows=None, roes=None, deltas=None, newly=None, dropped=None):
@@ -450,9 +540,11 @@ def upload_notion(top, analysis=None, trend=None, flows=None, roes=None, deltas=
         {"object": "block", "type": "callout", "callout": {
             "rich_text": [{"type": "text", "text": {"content": DISCLAIMER}}],
             "icon": {"type": "emoji", "emoji": "📐"}, "color": "yellow_background"}},
-        {"object": "block", "type": "callout", "callout": {
-            "rich_text": [{"type": "text", "text": {"content": METHOD}, "annotations": {"color": "gray"}}],
-            "icon": {"type": "emoji", "emoji": "🧮"}, "color": "gray_background"}},
+        {"object": "block", "type": "toggle", "toggle": {
+            "rich_text": [{"type": "text", "text": {"content": "🧮 산출 방법 — 펼쳐 보기 (3단계 선정 + 모멘텀 점수)"},
+                           "annotations": {"bold": True, "color": "gray"}}],
+            "children": [{"object": "block", "type": "paragraph", "paragraph": {
+                "rich_text": [{"type": "text", "text": {"content": METHOD}, "annotations": {"color": "gray"}}]}}]}},
     ]
     if newly or dropped:
         chg = []
@@ -477,19 +569,27 @@ def upload_notion(top, analysis=None, trend=None, flows=None, roes=None, deltas=
     page_id = r.json()["id"]
     page_url = r.json().get("url", "")
 
-    def append(blocks):
-        rr = requests.patch(f"https://api.notion.com/v1/blocks/{page_id}/children",
+    def append(block_id, blocks):
+        rr = requests.patch(f"https://api.notion.com/v1/blocks/{block_id}/children",
                             headers=headers, json={"children": blocks}, timeout=20)
-        if rr.status_code != 200:
-            log(f"  ⚠️ append 실패 {rr.status_code}: {rr.text[:150]}")
         time.sleep(0.35)
+        if rr.status_code != 200:
+            log(f"  ⚠️ append 실패 {rr.status_code}: {rr.text[:150]}"); return None
+        return rr.json().get("results", [])
 
-    # 종목별 토글 (2개씩 묶어 append — 중첩 children 많아 분할)
-    toggles = [_stock_toggle(rank, r, analysis.get(r["code"], {}), flows.get(r["code"]) or {},
-                             roes.get(r["code"]), deltas.get(r["code"]))
-               for rank, (_, r) in enumerate(top.head(10).iterrows(), 1)]
-    for i in range(0, len(toggles), 2):
-        append(toggles[i:i+2])
+    # 종목별: 토글 append → 그 토글 안에 분기 실적 표 별도 append (중첩 한도 회피)
+    for rank, (_, r) in enumerate(top.head(10).iterrows(), 1):
+        tog = _stock_toggle(rank, r, analysis.get(r["code"], {}), flows.get(r["code"]) or {},
+                            roes.get(r["code"]), deltas.get(r["code"]))
+        res = append(page_id, [tog])
+        if not res:
+            continue
+        tid = res[0]["id"]
+        qt = _quarter_table(r["code"])
+        if qt:
+            # 분기표를 '📊 분기 실적' 제목과 함께 토글 맨 끝에 삽입
+            append(tid, [{"object": "block", "type": "paragraph", "paragraph": {
+                "rich_text": [{"type": "text", "text": {"content": "📊 분기 실적 추이"}, "annotations": {"bold": True}}]}}, qt])
 
     log(f"✅ Notion 업로드 완료: {page_url}")
 
