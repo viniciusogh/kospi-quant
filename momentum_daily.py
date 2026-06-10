@@ -74,6 +74,41 @@ def investor_flows(code, tok):
             "frgn1": g(o[0], "frgn_ntby_tr_pbmn") / 100, "orgn1": g(o[0], "orgn_ntby_tr_pbmn") / 100}
 
 
+INCOME_CACHE = os.path.join(_DIR, "fin_is_cache")
+
+
+def fetch_income(code, tok):
+    """FHKST66430200 손익계산서(분기누적) → 단일분기 [분기, 매출억, 영업익억] 최근 5개."""
+    cache = os.path.join(INCOME_CACHE, f"{code}.pkl")
+    if os.path.exists(cache):
+        return pd.read_pickle(cache)
+    j = _get(f"{BASE}/uapi/domestic-stock/v1/finance/income-statement",
+             {"authorization": f"Bearer {tok}", "appkey": APP_KEY, "appsecret": APP_SECRET,
+              "tr_id": "FHKST66430200", "custtype": "P"},
+             {"FID_DIV_CLS_CODE": "1", "fid_cond_mrkt_div_code": "J", "fid_input_iscd": code})
+    time.sleep(random.uniform(0.15, 0.3))
+    o = (j or {}).get("output", []) or []
+    res = None
+    if o:
+        df = pd.DataFrame(o)[["stac_yymm", "sale_account", "bsop_prti"]].copy()
+        for c in ["sale_account", "bsop_prti"]:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df = df.dropna().drop_duplicates("stac_yymm").sort_values("stac_yymm").reset_index(drop=True)
+        # 분기누적 → 단일분기 (같은 연도 내 직전 분기 차감, 1분기=03월은 그대로)
+        rows = []
+        for i, x in df.iterrows():
+            yy, mm = x["stac_yymm"][:4], x["stac_yymm"][4:]
+            if mm == "03" or i == 0 or df.iloc[i-1]["stac_yymm"][:4] != yy:
+                sale, op = x["sale_account"], x["bsop_prti"]
+            else:
+                sale = x["sale_account"] - df.iloc[i-1]["sale_account"]
+                op = x["bsop_prti"] - df.iloc[i-1]["bsop_prti"]
+            rows.append({"q": x["stac_yymm"], "sale": sale, "op": op})
+        res = rows[-5:]
+    os.makedirs(INCOME_CACHE, exist_ok=True); pd.to_pickle(res, cache)
+    return res
+
+
 def roe_latest(code, tok):
     """최근 분기 ROE (FHKST66430300 캐시 재활용)."""
     try:
@@ -221,10 +256,11 @@ def main():
     top10 = out.head(TOP_N).copy()
     # 상위10 enrichment: 일별 수급 + ROE (라이브)
     log("상위10 수급·ROE 수집")
-    flows, roes = {}, {}
+    flows, roes, incomes = {}, {}, {}
     for code in top10["code"]:
         flows[code] = investor_flows(code, tok)
         roes[code] = roe_latest(code, tok)
+        incomes[code] = fetch_income(code, tok)
     trend = kospi_trend(tok)
     if trend:
         log(f"KOSPI 추세: {trend['emoji']} {trend['text']}")
@@ -239,7 +275,7 @@ def main():
     if analysis:                                  # 캐시 저장 (등장한 종목만 유지 + 오래된건 정리)
         json.dump({k: v for k, v in cache.items()}, open(CACHE_JSON, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
     if os.environ.get("NOTION_API_KEY"):
-        upload_notion(top10, analysis, trend, flows, roes, deltas, newly, dropped)
+        upload_notion(top10, analysis, trend, flows, roes, deltas, newly, dropped, incomes)
     else:
         log("NOTION_API_KEY 없음 → Notion 업로드 생략 (로컬). Actions 에선 업로드됨")
         for _, r in top10.iterrows():
@@ -318,35 +354,50 @@ def _gemini_full(c, r, fl, roe):
         "밸류: <제공된 섹터 PER/PBR 순위·ROE 해석, 피어 대비 적정성 3~4문장>\n"
         "강세론: <상승 지속 시나리오와 근거 3~4문장>\n"
         "리스크: <구체적 하방 리스크와 영향 3~5문장>\n"
-        "관전: <향후 트리거·실적발표일·정책·지표 체크포인트 3~5문장>")
+        "관전: <향후 트리거·실적발표일·정책·지표 체크포인트 3~5문장>\n"
+        "추정: <다음 분기 매출·영업이익 증권사 컨센서스 방향을 ▲상향/▼하향/→유지 중 하나로 시작하고 근거 1문장. 컨센서스 못 찾으면 '컨센서스 미확인'>")
     resp = c.models.generate_content(model="gemini-2.5-flash", contents=prompt,
         config={"tools": [{"google_search": {}}], "thinking_config": {"thinking_budget": 0}, "max_output_tokens": 14000})
-    d = {k: "" for k in SEC_KEYS}; cur = None
+    d = {k: "" for k in SEC_KEYS}; d["추정"] = ""; cur = None
     for line in resp.text.splitlines():
         s = line.strip()
-        m = re.match(r"^\**\s*(이슈|요약|사업실적|촉매|수급분석|밸류|강세론|리스크|관전)\s*[:：]\s*(.*)", s)
+        m = re.match(r"^\**\s*(이슈|요약|사업실적|촉매|수급분석|밸류|강세론|리스크|관전|추정)\s*[:：]\s*(.*)", s)
         if m:
             cur = "issue" if m.group(1) == "이슈" else m.group(1); d[cur] = m.group(2).strip()
         elif cur and s:
             d[cur] += " " + s
     d["issue"] = _trim_phrase(d["issue"]) if _is_clean(_trim_phrase(d["issue"])) else ""
-    for k in SEC_KEYS[1:]:
+    for k in SEC_KEYS[1:] + ["추정"]:
         d[k] = d[k].strip().strip("'\"")
     return d
 
 
 def _gemini_update(c, name, code, prev_summary):
-    """재등장 종목: 어제 분석은 두고 '오늘 새 뉴스'만 가볍게 (토큰 절약)."""
+    """재등장 종목: 오늘 새 뉴스 + 다음분기 컨센서스만 가볍게 (토큰 절약). {업데이트, 추정} 반환."""
     prompt = (f"한국 주식 '{name}({code})'의 어제 분석 요약: {prev_summary}\n"
-              "오늘 새로 나온 뉴스·공시·증권사 리포트만 검색해서, 어제와 겹치지 않는 '새로운 변화'만 1~2문장으로 써라. "
-              "'오늘 ~와 관련하여 새롭게 확인된 변화는 다음과 같다' 같은 서두 없이 새 사실을 바로 서술. 구체적 수치·기관명 포함. "
-              "새로운 게 없으면 정확히 '오늘 특이 변화 없음'이라고만 출력.")
+              "오늘 새로 나온 뉴스·공시·증권사 리포트를 검색해서 아래 2줄만 출력:\n"
+              "업데이트: <어제와 겹치지 않는 새 변화 1~2문장. 서두 없이 사실 바로. 새 게 없으면 '오늘 특이 변화 없음'>\n"
+              "추정: <다음 분기 매출·영업이익 컨센서스 방향을 ▲상향/▼하향/→유지 중 하나로 시작하고 근거 1문장. 못 찾으면 '컨센서스 미확인'>")
     try:
         resp = c.models.generate_content(model="gemini-2.5-flash", contents=prompt,
-            config={"tools": [{"google_search": {}}], "thinking_config": {"thinking_budget": 0}, "max_output_tokens": 2000})
-        return resp.text.strip().strip("'\"")[:400]
+            config={"tools": [{"google_search": {}}], "thinking_config": {"thinking_budget": 0}, "max_output_tokens": 2500})
+        upd, est, cur = "", "", None
+        for line in resp.text.splitlines():
+            s = line.strip()
+            mm = re.match(r"^\**\s*(업데이트|추정)\s*[:：]\s*(.*)", s)
+            if mm:
+                cur = mm.group(1)
+                if cur == "업데이트":
+                    upd = mm.group(2).strip()
+                else:
+                    est = mm.group(2).strip()
+            elif cur == "업데이트" and s:
+                upd += " " + s
+            elif cur == "추정" and s:
+                est += " " + s
+        return {"업데이트": upd.strip().strip("'\"")[:400], "추정": est.strip().strip("'\"")[:200]}
     except Exception:
-        return ""
+        return {"업데이트": "", "추정": ""}
 
 
 def gemini_analyze(top10, flows, roes, cache):
@@ -366,7 +417,8 @@ def gemini_analyze(top10, flows, roes, cache):
         try:
             if fresh:
                 a = {k: cached.get(k, "") for k in SEC_KEYS}        # 어제 8섹션 재사용
-                a["업데이트"] = _gemini_update(c, r["종목명"], code, cached.get("요약", ""))
+                u = _gemini_update(c, r["종목명"], code, cached.get("요약", ""))
+                a["업데이트"], a["추정"] = u["업데이트"], u["추정"]
                 log(f"  {r['종목명']}: 캐시 재사용 + 업데이트")
             else:
                 a = _gemini_full(c, r, fl, roe); a["업데이트"] = ""
@@ -502,27 +554,23 @@ def _supply_bars(fl):
     return _para(rich)
 
 
-def _quarter_table(code):
-    """분기 실적 추이 표 (분기/ROE%/EPS/매출증가%). fin 캐시 없으면 None."""
-    try:
-        from value_increment import fetch_fin
-        fd = fetch_fin(code, None)
-    except Exception:
-        fd = None
-    if fd is None or not len(fd):
+def _quarter_table(income):
+    """분기 실적 표 (분기/매출억/영업이익억). income=단일분기 리스트. 없으면 None."""
+    if not income:
         return None
     cell = lambda t: [{"type": "text", "text": {"content": str(t)}}]
-    rows = [{"type": "table_row", "table_row": {"cells": [cell(c) for c in ["분기", "ROE%", "EPS", "매출증가%"]]}}]
-    for _, x in fd.tail(5).iterrows():
+    def q(yymm): return f"{yymm[2:4]}.{yymm[4:6]}"   # 202603 → 26.03
+    rows = [{"type": "table_row", "table_row": {"cells": [cell(c) for c in ["분기", "매출(억)", "영업이익(억)"]]}}]
+    for x in income:
         rows.append({"type": "table_row", "table_row": {"cells": [
-            cell(x["stac_yymm"]), cell(f"{x['roe']:.1f}"), cell(f"{x['eps']:,.0f}"), cell(f"{x['grs']:.0f}")]}})
+            cell(q(x["q"])), cell(f"{x['sale']:,.0f}"), cell(f"{x['op']:,.0f}")]}})
     return {"object": "block", "type": "table", "table": {
-        "table_width": 4, "has_column_header": True, "has_row_header": False, "children": rows}}
+        "table_width": 3, "has_column_header": True, "has_row_header": False, "children": rows}}
 
 
-def upload_notion(top, analysis=None, trend=None, flows=None, roes=None, deltas=None, newly=None, dropped=None):
-    """Notion 업로드: 헤더 생성 → 종목별 토글 append."""
-    analysis = analysis or {}; flows = flows or {}; roes = roes or {}; deltas = deltas or {}
+def upload_notion(top, analysis=None, trend=None, flows=None, roes=None, deltas=None, newly=None, dropped=None, incomes=None):
+    """Notion 업로드: 헤더 생성 → 종목별 토글 append → 토글 안에 분기표·추정 append."""
+    analysis = analysis or {}; flows = flows or {}; roes = roes or {}; deltas = deltas or {}; incomes = incomes or {}
     import 수급 as sg
     headers = {"Authorization": f"Bearer {os.environ['NOTION_API_KEY']}",
                "Content-Type": "application/json", "Notion-Version": "2022-06-28"}
@@ -585,11 +633,19 @@ def upload_notion(top, analysis=None, trend=None, flows=None, roes=None, deltas=
         if not res:
             continue
         tid = res[0]["id"]
-        qt = _quarter_table(r["code"])
+        a = analysis.get(r["code"], {})
+        extra = []
+        qt = _quarter_table(incomes.get(r["code"]))
         if qt:
-            # 분기표를 '📊 분기 실적' 제목과 함께 토글 맨 끝에 삽입
-            append(tid, [{"object": "block", "type": "paragraph", "paragraph": {
-                "rich_text": [{"type": "text", "text": {"content": "📊 분기 실적 추이"}, "annotations": {"bold": True}}]}}, qt])
+            extra.append({"object": "block", "type": "paragraph", "paragraph": {
+                "rich_text": [{"type": "text", "text": {"content": "📊 분기 실적 추이 (단일분기)"}, "annotations": {"bold": True}}]}})
+            extra.append(qt)
+        if a.get("추정"):
+            extra.append({"object": "block", "type": "paragraph", "paragraph": {
+                "rich_text": [{"type": "text", "text": {"content": "📈 다음 분기 컨센서스  "}, "annotations": {"bold": True}},
+                              {"type": "text", "text": {"content": a["추정"]}}]}})
+        if extra:
+            append(tid, extra)
 
     log(f"✅ Notion 업로드 완료: {page_url}")
 
