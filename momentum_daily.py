@@ -51,7 +51,7 @@ def fetch_recent(code, tok):
     c = np.array([x[1] for x in rows]); v = np.array([x[2] for x in rows])
     o1 = j.get("output1", {}) or {}  # PER/PBR (정보용, 선정엔 미사용)
     per = float(o1.get("per") or 0); pbr = float(o1.get("pbr") or 0)
-    return c, v, per, pbr
+    return c, v, per, pbr, rows[-1][0]   # 마지막 거래일 (실제 기준일)
 
 
 def investor_flows(code, tok):
@@ -155,10 +155,10 @@ def score_today(code, tok):
     r = fetch_recent(code, tok)
     if r is None:
         return None
-    c, v, per, pbr = r
+    c, v, per, pbr, asof = r
     px = c[-1]
     dr = np.diff(c[-21:]) / c[-21:-1]
-    return {"code": code, "price": px,
+    return {"code": code, "price": px, "asof": asof,
             "hi60": px / c[-61:].max(),
             "disp20": px / c[-20:].mean() - 1,
             "ret5": px / c[-6] - 1,
@@ -220,8 +220,9 @@ def main():
     out = final[["rank", "code", "종목명", "섹터", "price", "score", "ret20", "ret5", "vol20",
                  "per", "pbr", "per_pct", "pbr_pct", "per_rank", "pbr_rank", "sec_n", "hi60", "liq5"]]
 
-    # 전일 대비: 히스토리(날짜별 누적)에서 '직전 다른 날' 기록과 비교 → 같은날 재실행에도 안 깨짐
-    today_str = datetime.now(KST).strftime("%Y-%m-%d")
+    # 전일 대비: '실제 마지막 거래일(asof)' 기준. 장 전/장중 실행 시 어제 데이터를 오늘로 오기재하는 것 방지
+    asof_raw = str(df["asof"].max())                  # YYYYMMDD
+    today_str = f"{asof_raw[:4]}-{asof_raw[4:6]}-{asof_raw[6:8]}"
     deltas, prev_names = {}, {}
     hist = pd.read_csv(HIST_CSV, dtype={"code": str}) if os.path.exists(HIST_CSV) else pd.DataFrame()
     if len(hist):
@@ -275,7 +276,7 @@ def main():
     if analysis:                                  # 캐시 저장 (등장한 종목만 유지 + 오래된건 정리)
         json.dump({k: v for k, v in cache.items()}, open(CACHE_JSON, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
     if os.environ.get("NOTION_API_KEY"):
-        upload_notion(top10, analysis, trend, flows, roes, deltas, newly, dropped, incomes)
+        upload_notion(top10, analysis, trend, flows, roes, deltas, newly, dropped, incomes, today_str)
     else:
         log("NOTION_API_KEY 없음 → Notion 업로드 생략 (로컬). Actions 에선 업로드됨")
         for _, r in top10.iterrows():
@@ -568,17 +569,23 @@ def _quarter_table(income):
         "table_width": 3, "has_column_header": True, "has_row_header": False, "children": rows}}
 
 
-def upload_notion(top, analysis=None, trend=None, flows=None, roes=None, deltas=None, newly=None, dropped=None, incomes=None):
+def upload_notion(top, analysis=None, trend=None, flows=None, roes=None, deltas=None, newly=None, dropped=None, incomes=None, asof=None):
     """Notion 업로드: 헤더 생성 → 종목별 토글 append → 토글 안에 분기표·추정 append."""
     analysis = analysis or {}; flows = flows or {}; roes = roes or {}; deltas = deltas or {}; incomes = incomes or {}
     import 수급 as sg
     headers = {"Authorization": f"Bearer {os.environ['NOTION_API_KEY']}",
                "Content-Type": "application/json", "Notion-Version": "2022-06-28"}
-    today = datetime.now(KST).strftime("%Y-%m-%d")
+    cal_today = datetime.now(KST).strftime("%Y-%m-%d")
+    asof = asof or cal_today
     parent = os.environ.get("NOTION_PARENT_PAGE_ID", "3324a00632f880fbb014d766d87a1079")
-    title = f"🚀 {today} KOSPI 30일 모멘텀 추천"
+    title = f"🚀 {asof} KOSPI 30일 모멘텀 추천"
 
     header = []
+    if asof != cal_today:
+        header.append({"object": "block", "type": "callout", "callout": {
+            "rich_text": [{"type": "text", "text": {"content": f"데이터 기준일: {asof} (장 마감 전 실행 — 최신 거래일 종가 기준)"},
+                           "annotations": {"bold": True}}],
+            "icon": {"type": "emoji", "emoji": "⚠️"}, "color": "orange_background"}})
     if trend:
         header.append({"object": "block", "type": "callout", "callout": {
             "rich_text": [{"type": "text", "text": {"content": f"KOSPI 추세: {trend['text']}"},
@@ -606,7 +613,7 @@ def upload_notion(top, analysis=None, trend=None, flows=None, roes=None, deltas=
     header.append({"object": "block", "type": "heading_3",
                    "heading_3": {"rich_text": [{"type": "text", "text": {"content": "🏆 상위 10 — 종목을 펼치면 상세 분석"}}]}})
 
-    date_parent = sg._get_or_create_date_page(today, headers, parent)
+    date_parent = sg._get_or_create_date_page(asof, headers, parent)
     sg._archive_same_title_pages(title, headers, date_parent)
     r = requests.post("https://api.notion.com/v1/pages", headers=headers, timeout=20,
                       json={"parent": {"page_id": date_parent},
