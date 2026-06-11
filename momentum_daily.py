@@ -158,7 +158,8 @@ def score_today(code, tok):
     c, v, per, pbr, asof = r
     px = c[-1]
     dr = np.diff(c[-21:]) / c[-21:-1]
-    return {"code": code, "price": px, "asof": asof,
+    chg = (px / c[-2] - 1) if len(c) >= 2 and c[-2] else 0.0   # 당일등락
+    return {"code": code, "price": px, "asof": asof, "chg": chg,
             "hi60": px / c[-61:].max(),
             "disp20": px / c[-20:].mean() - 1,
             "ret5": px / c[-6] - 1,
@@ -500,9 +501,12 @@ def _stock_toggle(rank, r, a, fl, roe, dl=None):
     hi = "60일 신고가" if r.get("hi60", 0) >= 0.999 else f"60일 고점대비 {(r['hi60']-1)*100:.0f}%"
 
     def gray(t): return {"type": "text", "text": {"content": t}, "annotations": {"color": "gray"}}
+    chg = r.get("chg", 0) or 0
+    chg_color = "red" if chg > 0 else ("blue" if chg < 0 else "gray")   # 상승 빨강·하락 파랑(국내 관습)
     title_rich = [
         {"type": "text", "text": {"content": f"{icon} {rank}. {r['종목명']} "}, "annotations": {"bold": True}},
-        gray(f"({r['code']}) · {sec}   |   모멘텀 {r['score']:.1f} · 20일 {r['ret20']*100:+.1f}% · {hi} · {int(r['price']):,}원")]
+        {"type": "text", "text": {"content": f"{chg*100:+.1f}% "}, "annotations": {"bold": True, "color": chg_color}},
+        gray(f"({r['code']}) · {sec}  |  모멘텀 {r['score']:.1f} · 20일 {r['ret20']*100:+.1f}% · {hi} · {int(r['price']):,}원")]
 
     kids = []
     # 전일 대비 변화 (별도 강조 줄)
