@@ -49,3 +49,4 @@ fin_hist_cache/
 ohlc_cache/
 kospi_index.pkl
 fin_is_cache/
+kosdaq_ohlc_cache/
