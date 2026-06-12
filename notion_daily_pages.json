@@ -302,7 +302,9 @@
   "2026-06-13": {
     "page_id": "37d4a006-32f8-8169-bd75-df391f54bb1c",
     "channels": {
-      "3proTV": "37d4a006-32f8-81b1-ba59-decf66716415"
+      "3proTV": "37d4a006-32f8-81b1-ba59-decf66716415",
+      "futuresnow": "37d4a006-32f8-811b-a7cc-db1fe9f6ed1c",
+      "moneyinside": "37d4a006-32f8-817b-9edb-ea36a0e90eba"
     }
   }
 }
