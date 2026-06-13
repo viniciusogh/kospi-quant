@@ -309,6 +309,8 @@
   },
   "2026-06-14": {
     "page_id": "37e4a006-32f8-817a-9495-e6408ac4fe23",
-    "channels": {}
+    "channels": {
+      "futuresnow": "37e4a006-32f8-815b-b24b-ef70e6ba185e"
+    }
   }
 }
