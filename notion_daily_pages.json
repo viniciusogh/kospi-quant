@@ -318,6 +318,8 @@
   },
   "2026-06-15": {
     "page_id": "37f4a006-32f8-817f-ac60-edae1c9441e5",
-    "channels": {}
+    "channels": {
+      "3proTV": "37f4a006-32f8-8154-be1a-cd79b46ae7e8"
+    }
   }
 }
