@@ -476,43 +476,48 @@ def _cz_by_sector(s: pd.Series, sector: pd.Series, min_n: int = _SECTOR_MIN_N) -
 
 def compute_multifactor_score(df: pd.DataFrame) -> pd.Series:
     """
-    수급 0.20 + 밸류 0.30 + 퀄리티 0.28 + 성장 0.07 + 안정성 0.15
+    수급 0.20 + 밸류 0.30 + 퀄리티 0.25 + 성장 0.15 + 안정성 0.10
     밸류·퀄리티·안정성은 섹터 내 Z-score (섹터 중립), 수급·성장은 시장 전체 Z-score.
-    소프트틸트(2026-06-11): 코스닥 펀더멘탈 백테스트(kosdaq_fundamental_backtest.py) 반영.
-      ey(1/PER)·ROE·저부채는 30일 IC 양수·일관(대형주서도 유효), 매출/영익증가율·1/PBR은 노이즈.
-      → 밸류=1/PER만(1/PBR 제거), 성장 0.15→0.07, 안정 0.10→0.15, 퀄리티 0.25→0.28.
-      롱온리 매매엣지는 reco 유니버스(대형주)서 미검증이라 공격적 반영 대신 소프트틸트.
+    가격 부담(밸류) 가중치를 0.20→0.30 으로 상향, 수급(0.25→0.20)·안정성(0.15→0.10) 살짝 하향.
+    "이미 오른 종목" 편향 완화 — 코스피와 동일 가중치.
     데이터 없는 종목은 해당 팩터 기여도 = 0 (중립) 처리.
     """
     sec = df["industry"] if "industry" in df.columns else None
 
-    # 수급 팩터 (시장 전체 — 섹터 회전 알파 보존). 미검증이라 가중치 유지.
+    # 수급 팩터 (시장 전체 — 섹터 회전 알파 보존)
     z_supply = _cross_z(df["strength_score"].fillna(0))
 
-    # 밸류 팩터: 1/PER 만 (섹터 중립). 1/PBR은 백테스트서 IC 부호반전 노이즈라 제외.
+    # 밸류 팩터: 1/PER + 1/PBR (섹터 중립)
     def _inv_per(x):
         if pd.isna(x):   return np.nan
         elif x > 0:      return 1 / x
         else:            return -1.0
-    z_val = _cz_by_sector(df["per"].apply(_inv_per), sec).fillna(0)
+    def _inv_pbr(x):
+        if pd.isna(x):   return np.nan
+        elif x > 0:      return 1 / x
+        else:            return -1.0
+    inv_per = df["per"].apply(_inv_per)
+    inv_pbr = df["pbr"].apply(_inv_pbr)
+    z_val = (_cz_by_sector(inv_per, sec).fillna(0)
+           + _cz_by_sector(inv_pbr, sec).fillna(0)) / 2
 
-    # 퀄리티 팩터: ROE (섹터 중립). ROE 윈저±40 — z가중 모델서 자본잠식 ROE폭주 아티팩트 차단.
-    z_quality = _cz_by_sector(df["roe"].clip(-40, 40), sec).fillna(0)
+    # 퀄리티 팩터: ROE (섹터 중립)
+    z_quality = _cz_by_sector(df["roe"], sec).fillna(0)
 
-    # 성장 팩터 (시장 전체) — 백테스트서 매출·영익증가율 IC 노이즈 → 비중 축소(0.15→0.07).
+    # 성장 팩터 (시장 전체)
     z_growth = (_cross_z(df["rev_growth"]).fillna(0)
               + _cross_z(df["op_profit_growth"]).fillna(0)) / 2
 
-    # 안정성 팩터 (섹터 중립: 금융 ↔ 비금융 자본구조 차이 흡수). 저부채 IC 일관 → 0.10→0.15.
+    # 안정성 팩터 (섹터 중립: 금융 ↔ 비금융 자본구조 차이 흡수)
     debt_filled = df["debt_ratio"].fillna(df["debt_ratio"].median()).fillna(100)
     z_safety = _cz_by_sector(-debt_filled, sec).fillna(0)
 
     # 팩터별 가중 기여도 노출 (리포트 카드용 — 합 = raw_score)
     df["f_supply"]  = 0.20 * z_supply
     df["f_value"]   = 0.30 * z_val
-    df["f_quality"] = 0.28 * z_quality
-    df["f_growth"]  = 0.07 * z_growth
-    df["f_safety"]  = 0.15 * z_safety
+    df["f_quality"] = 0.25 * z_quality
+    df["f_growth"]  = 0.15 * z_growth
+    df["f_safety"]  = 0.10 * z_safety
 
     return df["f_supply"] + df["f_value"] + df["f_quality"] + df["f_growth"] + df["f_safety"]
 
