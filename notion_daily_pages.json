@@ -319,7 +319,10 @@
   "2026-06-15": {
     "page_id": "37f4a006-32f8-817f-ac60-edae1c9441e5",
     "channels": {
-      "3proTV": "37f4a006-32f8-8154-be1a-cd79b46ae7e8"
+      "3proTV": "37f4a006-32f8-8154-be1a-cd79b46ae7e8",
+      "moneyinside": "3804a006-32f8-81df-a997-f6dbcae6a4a9",
+      "moneydo": "3804a006-32f8-81d5-b3ce-cfcda4a4ef0b",
+      "chaegookjang": "3804a006-32f8-814a-a494-ed9c80261049"
     }
   }
 }
