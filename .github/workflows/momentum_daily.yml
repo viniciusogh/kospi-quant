@@ -1,8 +1,8 @@
 name: Daily Momentum Report
 
 on:
-  schedule:
-    - cron: '35 8 * * 1-5'   # 17:35 KST (UTC+9), 평일. 수급(17:30) 직후
+  # 정기 실행은 daily_quant.yml 에 통합(수급.py 직후 momentum_daily.py 실행) — 2026-06-15.
+  # 네이티브 schedule 은 누락 잦아 제거. 이 워크플로는 수동 단독 실행(백업)용으로만 유지.
   workflow_dispatch:
 
 permissions:

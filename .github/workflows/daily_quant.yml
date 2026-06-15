@@ -92,6 +92,17 @@ jobs:
         run: python intersection.py
         continue-on-error: true   # 교집합 없을 때도 워크플로 종료 안 됨
 
+      - name: Run daily momentum report (수급.py 산출 latest_kospi_supply.csv 재사용 — 통합 2026-06-15)
+        env:
+          APP_KEY: ${{ secrets.APP_KEY }}
+          APP_SECRET: ${{ secrets.APP_SECRET }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
+          NOTION_DAILY_DB_ID: ${{ secrets.NOTION_DAILY_DB_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python momentum_daily.py
+        continue-on-error: true   # 모멘텀 실패해도 나머지 커밋 진행
+
       - name: Commit latest KOSPI supply CSV
         run: |
           git config user.name "github-actions[bot]"
@@ -130,6 +141,14 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add latest_수급_reco.csv latest_quality_reco.csv 2>/dev/null || true
           git diff --staged --quiet || git commit -m "Auto-update: reco CSVs $(date +%Y-%m-%d)"
+          for i in 1 2 3; do git pull --rebase --autostash && git push && break || sleep 5; done
+
+      - name: Commit momentum reco CSV
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add latest_momentum_reco.csv momentum_history.csv momentum_analysis.json 2>/dev/null || true
+          git diff --staged --quiet || git commit -m "Auto-update: momentum reco $(date +%Y-%m-%d)"
           for i in 1 2 3; do git pull --rebase --autostash && git push && break || sleep 5; done
 
       - name: Upload Excel reports as artifact
