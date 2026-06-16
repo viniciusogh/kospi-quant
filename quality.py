@@ -73,15 +73,19 @@ def get_access_token(appkey: str, appsecret: str) -> str:
     url = "https://openapi.koreainvestment.com:9443/oauth2/tokenP"
     headers = {"Content-Type": "application/json"}
     data = {"grant_type": "client_credentials", "appkey": appkey, "appsecret": appsecret}
-    try:
-        r = requests.post(url, headers=headers, json=data, timeout=5)
-        r.raise_for_status()
-        token_data = r.json()
-        log("✅ Access Token 발급 성공")
-        return token_data["access_token"]
-    except Exception as e:
-        log(f"❌ Access Token 발급 실패: {e}")
-        return None
+    # 일시적 연결실패(ConnectTimeout) 대비 재시도+백오프 (2026-06-16: 6/16 토큰 타임아웃 전멸 대응)
+    for attempt in range(1, 5):
+        try:
+            r = requests.post(url, headers=headers, json=data, timeout=15)
+            r.raise_for_status()
+            log("✅ Access Token 발급 성공")
+            return r.json()["access_token"]
+        except Exception as e:
+            log(f"⚠️ Access Token 발급 실패 ({attempt}/4): {e}")
+            if attempt < 4:
+                time.sleep(min(5 * attempt, 20))
+    log("❌ Access Token 발급 최종 실패 (4회)")
+    return None
 
 # ==========================
 # 재시도 가능한 안전한 GET 요청

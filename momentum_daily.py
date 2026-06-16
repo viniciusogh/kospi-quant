@@ -218,7 +218,7 @@ def main():
 
     final["종목명"] = final["code"].map(lambda c: meta.get(c, {}).get("종목명", ""))
     final["섹터"]  = final["code"].map(lambda c: meta.get(c, {}).get("섹터", ""))
-    out = final[["rank", "code", "종목명", "섹터", "price", "score", "ret20", "ret5", "vol20",
+    out = final[["rank", "code", "종목명", "섹터", "price", "score", "chg", "ret20", "ret5", "vol20",
                  "per", "pbr", "per_pct", "pbr_pct", "per_rank", "pbr_rank", "sec_n", "hi60", "liq5"]]
 
     # 전일 대비: '실제 마지막 거래일(asof)' 기준. 장 전/장중 실행 시 어제 데이터를 오늘로 오기재하는 것 방지

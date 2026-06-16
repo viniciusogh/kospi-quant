@@ -37,6 +37,13 @@ def load_reco(path: str, label: str) -> pd.DataFrame:
         sys.exit(1)
     df = pd.read_csv(path, dtype={"종목코드": str})
     df["종목코드"] = df["종목코드"].str.zfill(6)
+    # 신선도 가드: CSV 기준일이 오늘이 아니면 stale → 교집합 발행 중단 (2026-06-16: 6/16 stale 발행 대응)
+    if "기준일" in df.columns and len(df):
+        csv_date = str(df["기준일"].astype(str).max())[:10]
+        today = datetime.now(KST).strftime("%Y-%m-%d")
+        if csv_date != today:
+            log(f"⚠️ {label} CSV가 오늘({today}) 아닌 {csv_date} 데이터 → 교집합 발행 중단(stale 방지)")
+            sys.exit(0)
     log(f"✅ {label} 추천종목 로드: {len(df)}개")
     return df
 
