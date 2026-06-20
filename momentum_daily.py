@@ -18,11 +18,17 @@ def _excluded(name, sector):
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
 UNIVERSE_CSV = os.path.join(_DIR, "latest_kospi_supply.csv")
-OUT_CSV  = os.path.join(_DIR, "latest_momentum_reco.csv")
-HIST_CSV = os.path.join(_DIR, "momentum_history.csv")   # 날짜별 누적 (전일대비용)
-CACHE_JSON = os.path.join(_DIR, "momentum_analysis.json")  # 종목별 분석 캐시 (토큰 절약)
 UNIV_TOP  = int(os.environ.get("UNIV_TOP", "0"))   # 0=전종목, n=시총상위 n (테스트용)
 TOP_N     = 10                    # 최종 추천 종목 수
+# 파라미터화 (2026-06 백테스트): 기본=현행 10%·게이트없음. 20%컷+게이트 리포트는 env로 별도 실행.
+MOM_CUT   = float(os.environ.get("MOM_CUT", "0.10"))   # 2단계 모멘텀 상위 컷
+MOM_GATE  = os.environ.get("MOM_GATE", "0") == "1"     # 추세이탈 게이트: 비강세(200·120일선 이탈)면 현금
+MOM_LABEL = os.environ.get("MOM_LABEL", "")            # 제목 구분자 (예: " (20%컷·추세게이트)")
+MOM_TAG   = os.environ.get("MOM_TAG", "")              # 출력파일 구분자(변형별 분리 — 기본 현행 파일명 유지)
+# 상태/출력 파일 — 변형은 별도(10% 현행과 충돌 방지). 분석캐시는 코드별이라 공유 안전.
+OUT_CSV  = os.path.join(_DIR, f"latest_momentum_reco{MOM_TAG}.csv")
+HIST_CSV = os.path.join(_DIR, f"momentum_history{MOM_TAG}.csv")   # 날짜별 누적 (전일대비용)
+CACHE_JSON = os.path.join(_DIR, "momentum_analysis.json")  # 종목별 분석 캐시 (토큰 절약, 공유)
 LIQ_FLOOR = 1e10                  # 1단계: 5일평균 거래대금 100억원 하한
 WORKERS   = 4
 
@@ -142,13 +148,15 @@ def kospi_trend(tok):
         return None
     s = pd.Series(dict(rows)).sort_index()   # 날짜 오름차순
     c = s.iloc[-1]; ma200 = s.tail(200).mean(); ma120 = s.tail(120).mean()
-    if c >= ma200 and c >= ma120:
+    uptrend = (c >= ma200 and c >= ma120)   # 백테스트 레짐게이트 정의 (강세) — 비강세면 경고
+    if uptrend:
         txt, emo, color = "상승추세 (200·120일선 위) — 진입 우호", "📈", "green_background"
     elif c >= ma200:
         txt, emo, color = "상승추세 (200일선 위·단기 조정) — 보통", "📊", "yellow_background"
     else:
         txt, emo, color = "하락추세 (200일선 아래) — 진입 주의", "📉", "orange_background"
-    return {"text": f"{txt}  ·  지수 {c:,.0f} / 200일선 {ma200:,.0f}", "emoji": emo, "color": color}
+    return {"text": f"{txt}  ·  지수 {c:,.0f} / 200일선 {ma200:,.0f}", "emoji": emo,
+            "color": color, "uptrend": uptrend}
 
 
 def score_today(code, tok):
@@ -210,7 +218,7 @@ def main():
     for fcol in ["hi60", "disp20", "ret5"]:
         df[fcol + "_z"] = (df[fcol] - df[fcol].mean()) / (df[fcol].std() + 1e-9)
     df["score"] = df[["hi60_z", "disp20_z", "ret5_z"]].sum(axis=1)
-    decile = df.nlargest(max(10, int(len(df) * 0.10)), "score")  # 2단계: 모멘텀 top10%
+    decile = df.nlargest(max(10, int(len(df) * MOM_CUT)), "score")  # 2단계: 모멘텀 상위 MOM_CUT
     final = decile.nsmallest(TOP_N, "vol20").copy()              # 3단계: 저변동성 10
     final.sort_values("score", ascending=False, inplace=True)
     final.reset_index(drop=True, inplace=True)
@@ -256,16 +264,20 @@ def main():
     print(show[["rank", "code", "종목명", "섹터", "price", "score", "ret20%"]].to_string(index=False))
 
     top10 = out.head(TOP_N).copy()
-    # 상위10 enrichment: 일별 수급 + ROE (라이브)
-    log("상위10 수급·ROE 수집")
-    flows, roes, incomes = {}, {}, {}
-    for code in top10["code"]:
-        flows[code] = investor_flows(code, tok)
-        roes[code] = roe_latest(code, tok)
-        incomes[code] = fetch_income(code, tok)
     trend = kospi_trend(tok)
     if trend:
         log(f"KOSPI 추세: {trend['emoji']} {trend['text']}")
+    # 게이트 발동: MOM_GATE 이고 비강세(추세이탈)면 현금 모드 — 추천 비우고 enrichment 생략
+    cash_mode = MOM_GATE and trend is not None and not trend.get("uptrend", True)
+    flows, roes, incomes = {}, {}, {}
+    if not cash_mode:
+        log("상위10 수급·ROE 수집")
+        for code in top10["code"]:
+            flows[code] = investor_flows(code, tok)
+            roes[code] = roe_latest(code, tok)
+            incomes[code] = fetch_income(code, tok)
+    else:
+        log("⚠️ 추세 이탈 + 게이트 ON → 현금 모드 (추천 생략)")
     import json
     cache = {}
     if os.path.exists(CACHE_JSON):
@@ -273,11 +285,11 @@ def main():
             cache = json.load(open(CACHE_JSON, encoding="utf-8"))
         except Exception:
             cache = {}
-    analysis = gemini_analyze(top10, flows, roes, cache) if os.environ.get("GEMINI_API_KEY") else {}
+    analysis = {} if cash_mode else (gemini_analyze(top10, flows, roes, cache) if os.environ.get("GEMINI_API_KEY") else {})
     if analysis:                                  # 캐시 저장 (등장한 종목만 유지 + 오래된건 정리)
         json.dump({k: v for k, v in cache.items()}, open(CACHE_JSON, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
     if os.environ.get("NOTION_API_KEY"):
-        upload_notion(top10, analysis, trend, flows, roes, deltas, newly, dropped, incomes, today_str)
+        upload_notion(top10, analysis, trend, flows, roes, deltas, newly, dropped, incomes, today_str, cash=cash_mode)
     else:
         log("NOTION_API_KEY 없음 → Notion 업로드 생략 (로컬). Actions 에선 업로드됨")
         for _, r in top10.iterrows():
@@ -433,17 +445,21 @@ def gemini_analyze(top10, flows, roes, cache):
     return out
 
 
-DISCLAIMER = ("📊 선정: 거래대금 100억↑  →  모멘텀 상위 10%  →  저변동성 10개 (과열 꼭지 제거)\n"
-              "📈 백테스트(2023~26): 건당 +1.3% / 30일 · 승률 42% · 7개 반기 중 5개 +  (하락장 약·롱온리)\n"
-              "🎯 제안 청산: +20% 익절 / −10% 손절\n"
-              "ℹ️ 수급·재무 미반영 · 종목 '이슈'는 AI 검색 추정(확정 아님) · 투자판단 보조용")
+_CUTPCT = int(round(MOM_CUT * 100))
+DISCLAIMER = (f"📊 선정: 거래대금 100억↑  →  모멘텀 상위 {_CUTPCT}%  →  저변동성 10개 (과열 꼭지 제거)\n"
+              + ("📈 백테스트(2023~26): 상승추세장 우위·비추세장 약 (롱온리·생존편향 — 절대수익 과대)\n"
+                 "🎯 제안 청산: +20% 익절 / −10% 손절 · 추세 이탈(200·120일선 아래) 시 전량 현금·신규진입 중단\n"
+                 if MOM_GATE else
+                 "📈 백테스트(2023~26): 건당 +1.3% / 30일 · 승률 42% · 7개 반기 중 5개 +  (하락장 약·롱온리)\n"
+                 "🎯 제안 청산: +20% 익절 / −10% 손절\n")
+              + "ℹ️ 수급·재무 미반영 · 종목 '이슈'는 AI 검색 추정(확정 아님) · 투자판단 보조용")
 
 METHOD = (
     "🧮 이 리포트는 어떻게 만들어지나 — 3단계 선정 + 모멘텀 점수\n\n"
     "[1단계] 거래대금 필터\n"
     "최근 5거래일 평균 거래대금이 100억원 미만인 종목은 제외합니다. 거래가 적어 소수 세력에 휘둘리거나 사고팔기 어려운 잡주를 1차로 걸러내는 관문입니다.\n\n"
-    "[2단계] 모멘텀 점수 상위 10%\n"
-    "1단계를 통과한 종목을 아래 '모멘텀 점수'로 줄세워 상위 10%(주도주군)만 남깁니다.\n"
+    f"[2단계] 모멘텀 점수 상위 {_CUTPCT}%\n"
+    f"1단계를 통과한 종목을 아래 '모멘텀 점수'로 줄세워 상위 {_CUTPCT}%(주도주군)만 남깁니다.\n"
     "　모멘텀 점수 = ① 60일 고점 근접도 + ② 20일 이동평균 이격도 + ③ 5일 수익률\n"
     "　· ① 현재가가 최근 60일 최고가에 얼마나 가까운가 (1.0이면 60일 신고가)\n"
     "　· ② 현재가가 20일 이동평균선보다 얼마나 위에 있는가\n"
@@ -573,7 +589,7 @@ def _quarter_table(income):
         "table_width": 3, "has_column_header": True, "has_row_header": False, "children": rows}}
 
 
-def upload_notion(top, analysis=None, trend=None, flows=None, roes=None, deltas=None, newly=None, dropped=None, incomes=None, asof=None):
+def upload_notion(top, analysis=None, trend=None, flows=None, roes=None, deltas=None, newly=None, dropped=None, incomes=None, asof=None, cash=False):
     """Notion 업로드: 헤더 생성 → 종목별 토글 append → 토글 안에 분기표·추정 append."""
     analysis = analysis or {}; flows = flows or {}; roes = roes or {}; deltas = deltas or {}; incomes = incomes or {}
     import 수급 as sg
@@ -582,7 +598,7 @@ def upload_notion(top, analysis=None, trend=None, flows=None, roes=None, deltas=
     cal_today = datetime.now(KST).strftime("%Y-%m-%d")
     asof = asof or cal_today
     parent = os.environ.get("NOTION_PARENT_PAGE_ID", "3324a00632f880fbb014d766d87a1079")
-    title = f"🚀 {asof} KOSPI 30일 모멘텀 추천"
+    title = f"🚀 {asof} KOSPI 30일 모멘텀 추천{MOM_LABEL}"
 
     header = []
     if asof != cal_today:
@@ -605,17 +621,26 @@ def upload_notion(top, analysis=None, trend=None, flows=None, roes=None, deltas=
             "children": [{"object": "block", "type": "paragraph", "paragraph": {
                 "rich_text": [{"type": "text", "text": {"content": METHOD}, "annotations": {"color": "gray"}}]}}]}},
     ]
-    if newly or dropped:
-        chg = []
-        if newly:
-            chg.append(f"🆕 신규 진입: {', '.join(newly)}")
-        if dropped:
-            chg.append(f"📉 이탈: {', '.join(dropped)}")
+    if cash:     # 게이트 발동: 추세 이탈 → 추천 비우고 현금 메시지
         header.append({"object": "block", "type": "callout", "callout": {
-            "rich_text": [{"type": "text", "text": {"content": "어제 대비  " + "   ·   ".join(chg)}}],
-            "icon": {"type": "emoji", "emoji": "📌"}, "color": "blue_background"}})
-    header.append({"object": "block", "type": "heading_3",
-                   "heading_3": {"rich_text": [{"type": "text", "text": {"content": "🏆 상위 10 — 종목을 펼치면 상세 분석"}}]}})
+            "rich_text": [{"type": "text", "text": {"content":
+                "🛑 추세 이탈 — 신규 진입 중단·전량 현금 권장. KOSPI 지수가 200·120일선 아래로 내려와 "
+                "비강세 구간입니다. 이 모멘텀 전략은 백테스트상 상승추세에서만 수익이 났고 비추세장에선 약했습니다. "
+                "추세가 200·120일선 위로 회복될 때까지 신규 매수를 멈추고 현금 비중을 높이세요. (오늘 추천 종목 없음)"},
+                "annotations": {"bold": True}}],
+            "icon": {"type": "emoji", "emoji": "🛑"}, "color": "red_background"}})
+    else:
+        if newly or dropped:
+            chg = []
+            if newly:
+                chg.append(f"🆕 신규 진입: {', '.join(newly)}")
+            if dropped:
+                chg.append(f"📉 이탈: {', '.join(dropped)}")
+            header.append({"object": "block", "type": "callout", "callout": {
+                "rich_text": [{"type": "text", "text": {"content": "어제 대비  " + "   ·   ".join(chg)}}],
+                "icon": {"type": "emoji", "emoji": "📌"}, "color": "blue_background"}})
+        header.append({"object": "block", "type": "heading_3",
+                       "heading_3": {"rich_text": [{"type": "text", "text": {"content": "🏆 상위 10 — 종목을 펼치면 상세 분석"}}]}})
 
     date_parent = sg._get_or_create_date_page(asof, headers, parent)
     sg._archive_same_title_pages(title, headers, date_parent)
@@ -627,6 +652,9 @@ def upload_notion(top, analysis=None, trend=None, flows=None, roes=None, deltas=
         log(f"❌ Notion 페이지 생성 실패 {r.status_code}: {r.text[:200]}"); return
     page_id = r.json()["id"]
     page_url = r.json().get("url", "")
+    if cash:     # 현금 모드: 종목 토글 없이 종료
+        log(f"✅ Notion 업로드 완료(현금/추세이탈): {page_url}")
+        return
 
     def append(block_id, blocks):
         rr = requests.patch(f"https://api.notion.com/v1/blocks/{block_id}/children",
