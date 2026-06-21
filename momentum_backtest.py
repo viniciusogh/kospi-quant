@@ -47,15 +47,22 @@ def token():
                 return c["token"]
         except Exception:
             pass
-    for attempt in range(3):
-        r = requests.post(f"{BASE}/oauth2/tokenP", json={
-            "grant_type": "client_credentials", "appkey": APP_KEY, "appsecret": APP_SECRET}, timeout=5)
-        if r.status_code == 200:
-            tok = r.json()["access_token"]
-            json.dump({"token": tok, "ts": time.time()}, open(cache, "w"))
-            return tok
-        time.sleep(61)   # 발급 제한 = 1분당 1회
-    r.raise_for_status()
+    # 연결 타임아웃(GHA↔KIS 간헐 불통)에 강건하게: 예외도 재시도+백오프, timeout 확대 (2026-06-21)
+    last = None
+    for attempt in range(4):
+        try:
+            r = requests.post(f"{BASE}/oauth2/tokenP", json={
+                "grant_type": "client_credentials", "appkey": APP_KEY, "appsecret": APP_SECRET}, timeout=15)
+            if r.status_code == 200:
+                tok = r.json()["access_token"]
+                json.dump({"token": tok, "ts": time.time()}, open(cache, "w"))
+                return tok
+            last = f"status {r.status_code}: {r.text[:120]}"
+            time.sleep(61)              # 비200 = 대개 발급제한(1분당 1회) → 1분 대기
+        except Exception as e:
+            last = repr(e)
+            time.sleep(5 * (attempt + 1))   # 연결오류 → 짧게 백오프 후 재시도
+    raise RuntimeError(f"토큰 발급 실패(4회): {last}")
 
 
 def _get(url, headers, params, retry=3):
