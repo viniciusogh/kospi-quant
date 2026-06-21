@@ -315,7 +315,8 @@ def main():
             cache = json.load(open(CACHE_JSON, encoding="utf-8"))
         except Exception:
             cache = {}
-    analysis = {} if cash_mode else (gemini_analyze(top10, flows, roes, cache, ebitdas) if os.environ.get("GEMINI_API_KEY") else {})
+    dranks = {} if cash_mode else load_debt_ranks()
+    analysis = {} if cash_mode else (gemini_analyze(top10, flows, roes, cache, ebitdas, dranks) if os.environ.get("GEMINI_API_KEY") else {})
     if analysis:                                  # 캐시 저장 (등장한 종목만 유지 + 오래된건 정리)
         json.dump({k: v for k, v in cache.items()}, open(CACHE_JSON, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
     if os.environ.get("NOTION_API_KEY"):
@@ -360,7 +361,7 @@ def _is_clean(t):
 SEC_KEYS = ["issue", "요약", "사업실적", "촉매", "수급분석", "밸류", "강세론", "리스크", "관전"]
 
 
-def _gemini_full(c, r, fl, roe, ebitda=None):
+def _gemini_full(c, r, fl, roe, ebitda=None, drank=None):
     """종목 전체 심층 분석 (8섹션). 분기 숫자는 표로 별도 제공 → prose엔 나열 금지."""
     code = r["code"]
     hi = "60일 신고가" if r.get("hi60", 0) >= 0.999 else f"60일 고점대비 {(r['hi60']-1)*100:.0f}%"
@@ -380,8 +381,14 @@ def _gemini_full(c, r, fl, roe, ebitda=None):
                 f"{x['stac_yymm']} ROE{x['roe']:.1f}/EPS{x['eps']:.0f}/매출{x['grs']:.0f}%" for _, x in fd.tail(4).iterrows())
     except Exception:
         pass
-    # 부채(부채비율) + 현금흐름(EBITDA·EV/EBITDA) — 밸류 파트 핵심 데이터
-    debt_str = f"부채비율 {lblt:.0f}%" if (lblt is not None and not pd.isna(lblt)) else "부채비율 미제공"
+    # 부채(부채비율, 동일섹터 내 순위) + 현금흐름(EBITDA·EV/EBITDA) — 밸류 파트 핵심 데이터
+    if drank:   # latest_kospi_quality.csv 기반 섹터 내 상대위치 (절대수치 판정 X)
+        debt_str = (f"부채비율 {drank['debt']:.0f}%(동일섹터 {drank['n']}개 중 부채 낮은순 "
+                    f"{drank['rank']}위·{drank['band']})")
+    elif lblt is not None and not pd.isna(lblt):
+        debt_str = f"부채비율 {lblt:.0f}%(섹터순위 미산출)"
+    else:
+        debt_str = "부채비율 미제공"
     eb = ebitda or {}
     cf_parts = []
     if eb.get("ebitda") is not None:
@@ -396,7 +403,7 @@ def _gemini_full(c, r, fl, roe, ebitda=None):
         f"데이터: {stat}\n\n"
         "규칙:\n"
         "- 밸류에이션 수치는 위 제공된 PER/PBR/ROE/섹터순위/부채비율/EBITDA만 사용(웹의 다른 수치 절대 인용 금지). 없으면 '미제공'.\n"
-        "- ⚠️ 부채비율 해석은 섹터 맥락 필수: 은행·보험·증권·지주 등 금융업은 예수금·보험준비금이 회계상 부채라 부채비율이 구조적으로 수백~수천%가 정상이다. 금융주는 부채비율 절대수치로 위험을 단정하지 말고 '업종 특성상 정상' 또는 자본적정성 관점으로 서술하라. 비금융 제조·서비스업만 부채비율 100~200% 초과를 레버리지 부담으로 해석.\n"
+        "- 부채비율은 절대수치로 정상/위험을 단정하지 말 것(예: '100% 넘으면 위험', '금융이면 무조건 정상' 식의 고정 판정 금지). 반드시 제공된 '동일 섹터 내 부채 순위'로 해석하라 — 같은 업종 피어들 사이에서 부채가 높은 편(고부채 그룹)인지 낮은 편(저부채 그룹)인지가 핵심이다. 그 상대 위치가 무엇을 의미하는지(동종 대비 레버리지 부담/여력) 서술하라.\n"
         "- 문체: 자연스럽게 풀어 쓴 완결 문장. 개조식·전보문·가운뎃점 나열 금지.\n"
         "- ⚠️ 분기별 ROE/EPS/매출 수치와 수급 금액(억)은 리포트에 표·막대로 따로 보여주므로 prose에 숫자를 나열하지 말 것. 그 수치들의 '의미·방향·해석'만 서술하라.\n"
         "- 각 섹션 4~7문장, 실제 사실·뉴스·공시·증권사 리포트 근거로. 모르면 '확인 안 됨'.\n"
@@ -406,7 +413,7 @@ def _gemini_full(c, r, fl, roe, ebitda=None):
         "사업실적: <사업 개요 + 최근 실적의 의미·방향 해석(숫자 나열 금지) 4~6문장>\n"
         "촉매: <주가를 끌어올린 요인 — 테마·정책·공시·뉴스를 시간순으로 4~6문장>\n"
         "수급분석: <외인/기관/개인 흐름의 해석(금액 나열 말고 누가 주도/이탈하며 의미가 뭔지) 2~4문장>\n"
-        "밸류: <재무 건전성·현금흐름 중심으로 서술. ① 부채비율로 재무 레버리지/안정성(금융주는 섹터 특성 반영) ② EBITDA로 영업현금 창출 규모·추세, EV/EBITDA 있으면 현금흐름 대비 밸류 ③ ROE로 수익성. PER/PBR은 보조로 한 줄. 피어/업종 대비 적정성까지 4~6문장>\n"
+        "밸류: <재무 건전성·현금흐름 중심으로 서술. ① 부채비율을 '동일 섹터 내 순위'로 해석(동종 N개 중 몇 위, 저/중/고부채 그룹 — 절대수치 판정 말고 피어 상대) ② EBITDA로 영업현금 창출 규모·추세, EV/EBITDA 있으면 현금흐름 대비 밸류 ③ ROE로 수익성. PER/PBR은 보조로 한 줄. 동종 대비 적정성까지 4~6문장>\n"
         "강세론: <상승 지속 시나리오와 근거 3~4문장>\n"
         "리스크: <구체적 하방 리스크와 영향 3~5문장>\n"
         "관전: <향후 트리거·실적발표일·정책·지표 체크포인트 3~5문장>\n"
@@ -455,10 +462,34 @@ def _gemini_update(c, name, code, prev_summary):
         return {"업데이트": "", "추정": ""}
 
 
-def gemini_analyze(top10, flows, roes, cache, ebitdas=None):
+def load_debt_ranks():
+    """latest_kospi_quality.csv(전종목 부채비율+섹터, 매일갱신) → code별 섹터내 부채 순위.
+    반환 {code: {debt, rank(1=섹터최저부채), n, band(저부채/중간/고부채 그룹)}}. 절대수치 판정 없이 동종 상대위치."""
+    try:
+        d = pd.read_csv(os.path.join(_DIR, "latest_kospi_quality.csv"), dtype={"종목코드": str})
+    except Exception:
+        return {}
+    if "부채비율(%)" not in d.columns or "섹터" not in d.columns:
+        return {}
+    d = d.dropna(subset=["부채비율(%)", "섹터"]).copy()
+    d["종목코드"] = d["종목코드"].str.zfill(6)
+    out = {}
+    for sec, g in d.groupby("섹터"):
+        nn = len(g)
+        if nn < 4:
+            continue
+        g = g.assign(rk=g["부채비율(%)"].rank(method="min"))  # 1=섹터 내 최저 부채
+        for _, x in g.iterrows():
+            pos = x["rk"] / nn
+            band = "저부채 그룹" if pos <= 1/3 else ("고부채 그룹" if pos > 2/3 else "중간")
+            out[x["종목코드"]] = {"debt": float(x["부채비율(%)"]), "rank": int(x["rk"]), "n": nn, "band": band}
+    return out
+
+
+def gemini_analyze(top10, flows, roes, cache, ebitdas=None, dranks=None):
     """캐시 인식: 재등장(7일내) 종목은 어제 8섹션 재사용 + 오늘 업데이트만 호출. 신규/묵은건 전체분석."""
     from google import genai
-    ebitdas = ebitdas or {}
+    ebitdas = ebitdas or {}; dranks = dranks or {}
     c = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     today = datetime.now(KST); out = {}
     for _, r in top10.iterrows():
@@ -477,7 +508,7 @@ def gemini_analyze(top10, flows, roes, cache, ebitdas=None):
                 a["업데이트"], a["추정"] = u["업데이트"], u["추정"]
                 log(f"  {r['종목명']}: 캐시 재사용 + 업데이트")
             else:
-                a = _gemini_full(c, r, fl, roe, ebitdas.get(code)); a["업데이트"] = ""
+                a = _gemini_full(c, r, fl, roe, ebitdas.get(code), dranks.get(code)); a["업데이트"] = ""
                 log(f"  {r['종목명']}: 전체 분석")
         except Exception as e:
             log(f"  Gemini {code} 실패: {str(e)[:80]}")
