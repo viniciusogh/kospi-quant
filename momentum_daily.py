@@ -119,29 +119,42 @@ EBITDA_CACHE = os.path.join(_DIR, "fin_ebitda_cache")
 
 
 def fetch_ebitda(code, tok):
-    """FHKST66430500 기타주요비율 → 최근 '연간(결산 12월)' EBITDA(억)·EV/EBITDA. 1콜. 캐시.
-    데이터가 누적(YTD)이라 분기 최신행은 1분기값뿐 → 반드시 12월 결산행(=연간)을 사용."""
+    """FHKST66430500 기타주요비율 → TTM(최근 4분기) EBITDA(억)·EV/EBITDA. 1콜. 캐시.
+    데이터는 누적(YTD)이라: TTM = 최신YTD + 직전연도FY - 직전연도同기간YTD (최신분기 반영+12개월 규모).
+    최신행이 12월(연간)이면 그대로 사용."""
     cache = os.path.join(EBITDA_CACHE, f"{code}.pkl")
     if os.path.exists(cache):
         return pd.read_pickle(cache)
     j = _get(f"{BASE}/uapi/domestic-stock/v1/finance/other-major-ratios",
              {"authorization": f"Bearer {tok}", "appkey": APP_KEY, "appsecret": APP_SECRET,
               "tr_id": "FHKST66430500", "custtype": "P"},
-             {"fid_input_iscd": code, "fid_div_cls_code": "0", "fid_cond_mrkt_div_code": "J"})
+             {"fid_input_iscd": code, "fid_div_cls_code": "1", "fid_cond_mrkt_div_code": "J"})
     time.sleep(random.uniform(0.15, 0.3))
     o = (j or {}).get("output", []) or []
     res = None
-    fy = [r for r in o if str(r.get("stac_yymm", "")).endswith("12")]   # 연간 결산행만
-    if fy:
-        r0 = fy[0]
-        def _f(k):
+    if o:
+        def _f(v):
             try:
-                return float(r0.get(k))
+                return float(v)
             except (TypeError, ValueError):
                 return None
-        eveb = _f("ev_ebitda")
-        res = {"q": r0.get("stac_yymm"), "ebitda": _f("ebitda"),
-               "ev_ebitda": eveb if (eveb and eveb > 0) else None}
+        eb = {str(r.get("stac_yymm")): _f(r.get("ebitda")) for r in o if r.get("stac_yymm")}
+        ym = sorted(eb, reverse=True)
+        latest = ym[0]; yr, mm = int(latest[:4]), latest[4:]
+        if mm == "12":                       # 최신이 연간 결산
+            ttm, basis = eb[latest], latest
+        else:                                # TTM = 최신YTD + 직전FY - 직전연도 同기간YTD
+            pfy, psame = f"{yr-1}12", f"{yr-1}{mm}"
+            if eb.get(latest) is not None and eb.get(pfy) is not None and eb.get(psame) is not None:
+                ttm, basis = eb[latest] + eb[pfy] - eb[psame], f"TTM~{latest}"
+            elif eb.get(pfy) is not None:
+                ttm, basis = eb[pfy], pfy        # 폴백: 직전 연간
+            else:
+                ttm, basis = eb.get(latest), latest
+        # EV/EBITDA: 연간 결산행 API값(표준 연간배수), 0이면 무효
+        evr = next((r for r in o if str(r.get("stac_yymm", "")).endswith("12")), None)
+        eveb = _f(evr.get("ev_ebitda")) if evr else None
+        res = {"q": basis, "ebitda": ttm, "ev_ebitda": eveb if (eveb and eveb > 0) else None}
     os.makedirs(EBITDA_CACHE, exist_ok=True); pd.to_pickle(res, cache)
     return res
 
@@ -401,7 +414,7 @@ def _gemini_full(c, r, fl, roe, ebitda=None, drank=None):
     else:
         cf_parts = []
         if eb.get("ebitda") is not None:
-            cf_parts.append(f"연간 EBITDA {eb['ebitda']:,.0f}억")
+            cf_parts.append(f"최근4분기 EBITDA {eb['ebitda']:,.0f}억")
         if eb.get("ev_ebitda") is not None:
             cf_parts.append(f"EV/EBITDA {eb['ev_ebitda']:.1f}배")
         cf_str = ("현금흐름 " + "·".join(cf_parts)) if cf_parts else "현금흐름(EBITDA) 미제공"
@@ -422,7 +435,7 @@ def _gemini_full(c, r, fl, roe, ebitda=None, drank=None):
         "사업실적: <사업 개요 + 최근 실적의 의미·방향 해석(숫자 나열 금지) 4~6문장>\n"
         "촉매: <주가를 끌어올린 요인 — 테마·정책·공시·뉴스를 시간순으로 4~6문장>\n"
         "수급분석: <외인/기관/개인 흐름의 해석(금액 나열 말고 누가 주도/이탈하며 의미가 뭔지) 2~4문장>\n"
-        "밸류: <재무 건전성·현금흐름 중심으로 서술. ① 부채비율을 '동일 섹터 내 순위'로 해석(동종 N개 중 몇 위, 저/중/고부채 그룹 — 절대수치 판정 말고 피어 상대) ② EBITDA는 '연간' 수치임(분기 아님), 영업현금 창출 규모·EV/EBITDA로 현금흐름 대비 밸류. 단 은행·보험·증권은 EBITDA가 비표준이라 제공 안 됨 → 그 경우 EBITDA 언급 말고 ROE·자본적정성으로 대체 평가 ③ ROE로 수익성. PER/PBR은 보조로 한 줄. 동종 대비 적정성까지 4~6문장>\n"
+        "밸류: <재무 건전성·현금흐름 중심으로 서술. ① 부채비율을 '동일 섹터 내 순위'로 해석(동종 N개 중 몇 위, 저/중/고부채 그룹 — 절대수치 판정 말고 피어 상대) ② EBITDA는 '최근 4분기 합산(TTM, 12개월 규모)' 수치임(1개 분기 아님), 영업현금 창출 규모·EV/EBITDA로 현금흐름 대비 밸류. 단 은행·보험·증권은 EBITDA가 비표준이라 제공 안 됨 → 그 경우 EBITDA 언급 말고 ROE·자본적정성으로 대체 평가 ③ ROE로 수익성. PER/PBR은 보조로 한 줄. 동종 대비 적정성까지 4~6문장>\n"
         "강세론: <상승 지속 시나리오와 근거 3~4문장>\n"
         "리스크: <구체적 하방 리스크와 영향 3~5문장>\n"
         "관전: <향후 트리거·실적발표일·정책·지표 체크포인트 3~5문장>\n"
