@@ -124,30 +124,34 @@ def _get_or_create_date_page(date_str: str, headers: dict, root_parent_id: str) 
 
 
 def _archive_same_title_pages(title: str, headers: dict, parent_id: str):
-    """동일 제목 페이지가 부모 하위에 이미 있으면 archive — 중복 방지."""
+    """부모(날짜) 페이지의 자식 목록을 직접 조회해 동일 제목 child_page 를 archive — 중복 방지.
+    /v1/search 는 인덱싱 지연으로 연속 실행 시 누락 → children 직접 조회(즉시 일관성)로 변경(2026-06)."""
     try:
-        r = requests.post(
-            "https://api.notion.com/v1/search", headers=headers, timeout=15,
-            json={"query": title, "filter": {"property": "object", "value": "page"}},
-        )
-        if r.status_code != 200:
-            return
-        target_parent = parent_id.replace("-", "")
-        for result in r.json().get("results", []):
-            parent = result.get("parent", {})
-            if parent.get("type") != "page_id":
-                continue
-            if parent.get("page_id", "").replace("-", "") != target_parent:
-                continue
-            t_arr = result.get("properties", {}).get("title", {}).get("title", [])
-            actual = t_arr[0]["text"]["content"] if t_arr else ""
-            if actual.strip() == title.strip() and not result.get("archived", False):
-                page_id = result["id"]
-                requests.patch(
-                    f"https://api.notion.com/v1/pages/{page_id}",
-                    headers=headers, json={"archived": True}, timeout=15,
-                )
-                log(f"  기존 동일 제목 페이지 archive: {page_id}")
+        cursor = None
+        while True:
+            params = {"page_size": 100}
+            if cursor:
+                params["start_cursor"] = cursor
+            r = requests.get(
+                f"https://api.notion.com/v1/blocks/{parent_id}/children",
+                headers=headers, params=params, timeout=15,
+            )
+            if r.status_code != 200:
+                return
+            data = r.json()
+            for blk in data.get("results", []):
+                if blk.get("type") != "child_page":
+                    continue
+                actual = blk.get("child_page", {}).get("title", "")
+                if actual.strip() == title.strip() and not blk.get("archived", False):
+                    requests.patch(
+                        f"https://api.notion.com/v1/pages/{blk['id']}",
+                        headers=headers, json={"archived": True}, timeout=15,
+                    )
+                    log(f"  기존 동일 제목 페이지 archive: {blk['id']}")
+            if not data.get("has_more"):
+                break
+            cursor = data.get("next_cursor")
     except Exception as e:
         log(f"  기존 페이지 확인 중 오류 (무시): {e}")
 
