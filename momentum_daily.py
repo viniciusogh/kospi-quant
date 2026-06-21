@@ -119,19 +119,21 @@ EBITDA_CACHE = os.path.join(_DIR, "fin_ebitda_cache")
 
 
 def fetch_ebitda(code, tok):
-    """FHKST66430500 기타주요비율 → 최신 EBITDA(억)·EV/EBITDA(0이면 무효). 1콜. 캐시."""
+    """FHKST66430500 기타주요비율 → 최근 '연간(결산 12월)' EBITDA(억)·EV/EBITDA. 1콜. 캐시.
+    데이터가 누적(YTD)이라 분기 최신행은 1분기값뿐 → 반드시 12월 결산행(=연간)을 사용."""
     cache = os.path.join(EBITDA_CACHE, f"{code}.pkl")
     if os.path.exists(cache):
         return pd.read_pickle(cache)
     j = _get(f"{BASE}/uapi/domestic-stock/v1/finance/other-major-ratios",
              {"authorization": f"Bearer {tok}", "appkey": APP_KEY, "appsecret": APP_SECRET,
               "tr_id": "FHKST66430500", "custtype": "P"},
-             {"fid_input_iscd": code, "fid_div_cls_code": "1", "fid_cond_mrkt_div_code": "J"})
+             {"fid_input_iscd": code, "fid_div_cls_code": "0", "fid_cond_mrkt_div_code": "J"})
     time.sleep(random.uniform(0.15, 0.3))
     o = (j or {}).get("output", []) or []
     res = None
-    if o:
-        r0 = o[0]
+    fy = [r for r in o if str(r.get("stac_yymm", "")).endswith("12")]   # 연간 결산행만
+    if fy:
+        r0 = fy[0]
         def _f(k):
             try:
                 return float(r0.get(k))
@@ -145,12 +147,14 @@ def fetch_ebitda(code, tok):
 
 
 def roe_latest(code, tok):
-    """최근 분기 ROE (FHKST66430300 캐시 재활용)."""
+    """최근 0 아닌 ROE (FHKST66430300). KIS가 미발표 최근분기를 0.00으로 주므로 0은 건너뜀."""
     try:
         from value_increment import fetch_fin
         fd = fetch_fin(code, tok)
         if fd is not None and len(fd):
-            return float(fd.iloc[-1].get("roe"))
+            nz = fd[pd.to_numeric(fd["roe"], errors="coerce").fillna(0) != 0]
+            if len(nz):
+                return float(nz.iloc[-1].get("roe"))
     except Exception:
         pass
     return None
@@ -389,13 +393,18 @@ def _gemini_full(c, r, fl, roe, ebitda=None, drank=None):
         debt_str = f"부채비율 {lblt:.0f}%(섹터순위 미산출)"
     else:
         debt_str = "부채비율 미제공"
+    # 현금흐름(연간 EBITDA·EV/EBITDA). 금융·보험·증권은 EBITDA 비표준 지표라 생략.
+    is_fin = str(r.get("섹터", "")) in {"금융", "증권", "보험", "외국증권"}
     eb = ebitda or {}
-    cf_parts = []
-    if eb.get("ebitda") is not None:
-        cf_parts.append(f"EBITDA {eb['ebitda']:,.0f}억")
-    if eb.get("ev_ebitda") is not None:
-        cf_parts.append(f"EV/EBITDA {eb['ev_ebitda']:.1f}배")
-    cf_str = ("현금흐름 " + "·".join(cf_parts)) if cf_parts else "현금흐름(EBITDA) 미제공"
+    if is_fin:
+        cf_str = "현금흐름: 은행·보험·증권업은 EBITDA 비표준 → 생략(자산운용·수익성으로 평가)"
+    else:
+        cf_parts = []
+        if eb.get("ebitda") is not None:
+            cf_parts.append(f"연간 EBITDA {eb['ebitda']:,.0f}억")
+        if eb.get("ev_ebitda") is not None:
+            cf_parts.append(f"EV/EBITDA {eb['ev_ebitda']:.1f}배")
+        cf_str = ("현금흐름 " + "·".join(cf_parts)) if cf_parts else "현금흐름(EBITDA) 미제공"
     stat = (f"{r['종목명']}({code}, {r['섹터']}): 20일 {r['ret20']*100:+.0f}%·{hi}, "
             f"{per_str}·PBR {r['pbr']:.1f}{roe_str}, {debt_str}, {cf_str}, {sup}. {qtrend}")
     prompt = (
@@ -413,7 +422,7 @@ def _gemini_full(c, r, fl, roe, ebitda=None, drank=None):
         "사업실적: <사업 개요 + 최근 실적의 의미·방향 해석(숫자 나열 금지) 4~6문장>\n"
         "촉매: <주가를 끌어올린 요인 — 테마·정책·공시·뉴스를 시간순으로 4~6문장>\n"
         "수급분석: <외인/기관/개인 흐름의 해석(금액 나열 말고 누가 주도/이탈하며 의미가 뭔지) 2~4문장>\n"
-        "밸류: <재무 건전성·현금흐름 중심으로 서술. ① 부채비율을 '동일 섹터 내 순위'로 해석(동종 N개 중 몇 위, 저/중/고부채 그룹 — 절대수치 판정 말고 피어 상대) ② EBITDA로 영업현금 창출 규모·추세, EV/EBITDA 있으면 현금흐름 대비 밸류 ③ ROE로 수익성. PER/PBR은 보조로 한 줄. 동종 대비 적정성까지 4~6문장>\n"
+        "밸류: <재무 건전성·현금흐름 중심으로 서술. ① 부채비율을 '동일 섹터 내 순위'로 해석(동종 N개 중 몇 위, 저/중/고부채 그룹 — 절대수치 판정 말고 피어 상대) ② EBITDA는 '연간' 수치임(분기 아님), 영업현금 창출 규모·EV/EBITDA로 현금흐름 대비 밸류. 단 은행·보험·증권은 EBITDA가 비표준이라 제공 안 됨 → 그 경우 EBITDA 언급 말고 ROE·자본적정성으로 대체 평가 ③ ROE로 수익성. PER/PBR은 보조로 한 줄. 동종 대비 적정성까지 4~6문장>\n"
         "강세론: <상승 지속 시나리오와 근거 3~4문장>\n"
         "리스크: <구체적 하방 리스크와 영향 3~5문장>\n"
         "관전: <향후 트리거·실적발표일·정책·지표 체크포인트 3~5문장>\n"
