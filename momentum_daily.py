@@ -115,6 +115,35 @@ def fetch_income(code, tok):
     return res
 
 
+EBITDA_CACHE = os.path.join(_DIR, "fin_ebitda_cache")
+
+
+def fetch_ebitda(code, tok):
+    """FHKST66430500 기타주요비율 → 최신 EBITDA(억)·EV/EBITDA(0이면 무효). 1콜. 캐시."""
+    cache = os.path.join(EBITDA_CACHE, f"{code}.pkl")
+    if os.path.exists(cache):
+        return pd.read_pickle(cache)
+    j = _get(f"{BASE}/uapi/domestic-stock/v1/finance/other-major-ratios",
+             {"authorization": f"Bearer {tok}", "appkey": APP_KEY, "appsecret": APP_SECRET,
+              "tr_id": "FHKST66430500", "custtype": "P"},
+             {"fid_input_iscd": code, "fid_div_cls_code": "1", "fid_cond_mrkt_div_code": "J"})
+    time.sleep(random.uniform(0.15, 0.3))
+    o = (j or {}).get("output", []) or []
+    res = None
+    if o:
+        r0 = o[0]
+        def _f(k):
+            try:
+                return float(r0.get(k))
+            except (TypeError, ValueError):
+                return None
+        eveb = _f("ev_ebitda")
+        res = {"q": r0.get("stac_yymm"), "ebitda": _f("ebitda"),
+               "ev_ebitda": eveb if (eveb and eveb > 0) else None}
+    os.makedirs(EBITDA_CACHE, exist_ok=True); pd.to_pickle(res, cache)
+    return res
+
+
 def roe_latest(code, tok):
     """최근 분기 ROE (FHKST66430300 캐시 재활용)."""
     try:
@@ -269,13 +298,14 @@ def main():
         log(f"KOSPI 추세: {trend['emoji']} {trend['text']}")
     # 게이트 발동: MOM_GATE 이고 비강세(추세이탈)면 현금 모드 — 추천 비우고 enrichment 생략
     cash_mode = MOM_GATE and trend is not None and not trend.get("uptrend", True)
-    flows, roes, incomes = {}, {}, {}
+    flows, roes, incomes, ebitdas = {}, {}, {}, {}
     if not cash_mode:
-        log("상위10 수급·ROE 수집")
+        log("상위10 수급·ROE·EBITDA 수집")
         for code in top10["code"]:
             flows[code] = investor_flows(code, tok)
             roes[code] = roe_latest(code, tok)
             incomes[code] = fetch_income(code, tok)
+            ebitdas[code] = fetch_ebitda(code, tok)
     else:
         log("⚠️ 추세 이탈 + 게이트 ON → 현금 모드 (추천 생략)")
     import json
@@ -285,7 +315,7 @@ def main():
             cache = json.load(open(CACHE_JSON, encoding="utf-8"))
         except Exception:
             cache = {}
-    analysis = {} if cash_mode else (gemini_analyze(top10, flows, roes, cache) if os.environ.get("GEMINI_API_KEY") else {})
+    analysis = {} if cash_mode else (gemini_analyze(top10, flows, roes, cache, ebitdas) if os.environ.get("GEMINI_API_KEY") else {})
     if analysis:                                  # 캐시 저장 (등장한 종목만 유지 + 오래된건 정리)
         json.dump({k: v for k, v in cache.items()}, open(CACHE_JSON, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
     if os.environ.get("NOTION_API_KEY"):
@@ -330,7 +360,7 @@ def _is_clean(t):
 SEC_KEYS = ["issue", "요약", "사업실적", "촉매", "수급분석", "밸류", "강세론", "리스크", "관전"]
 
 
-def _gemini_full(c, r, fl, roe):
+def _gemini_full(c, r, fl, roe, ebitda=None):
     """종목 전체 심층 분석 (8섹션). 분기 숫자는 표로 별도 제공 → prose엔 나열 금지."""
     code = r["code"]
     hi = "60일 신고가" if r.get("hi60", 0) >= 0.999 else f"60일 고점대비 {(r['hi60']-1)*100:.0f}%"
@@ -340,22 +370,33 @@ def _gemini_full(c, r, fl, roe):
     per_str = (f"PER {r['per']:.0f}(섹터 {int(r['per_rank'])}/{int(n)}위)"
                if (r.get('per', 0) > 0 and not pd.isna(r.get('per_rank')) and n) else "PER 적자/-")
     roe_str = f"·ROE {roe:.1f}%" if roe is not None else ""
-    qtrend = ""
+    qtrend = ""; lblt = None
     try:
         from value_increment import fetch_fin
         fd = fetch_fin(code, None)
         if fd is not None and len(fd):
+            lblt = fd.iloc[-1].get("lblt")
             qtrend = "참고 분기추이: " + " · ".join(
                 f"{x['stac_yymm']} ROE{x['roe']:.1f}/EPS{x['eps']:.0f}/매출{x['grs']:.0f}%" for _, x in fd.tail(4).iterrows())
     except Exception:
         pass
+    # 부채(부채비율) + 현금흐름(EBITDA·EV/EBITDA) — 밸류 파트 핵심 데이터
+    debt_str = f"부채비율 {lblt:.0f}%" if (lblt is not None and not pd.isna(lblt)) else "부채비율 미제공"
+    eb = ebitda or {}
+    cf_parts = []
+    if eb.get("ebitda") is not None:
+        cf_parts.append(f"EBITDA {eb['ebitda']:,.0f}억")
+    if eb.get("ev_ebitda") is not None:
+        cf_parts.append(f"EV/EBITDA {eb['ev_ebitda']:.1f}배")
+    cf_str = ("현금흐름 " + "·".join(cf_parts)) if cf_parts else "현금흐름(EBITDA) 미제공"
     stat = (f"{r['종목명']}({code}, {r['섹터']}): 20일 {r['ret20']*100:+.0f}%·{hi}, "
-            f"{per_str}·PBR {r['pbr']:.1f}{roe_str}, {sup}. {qtrend}")
+            f"{per_str}·PBR {r['pbr']:.1f}{roe_str}, {debt_str}, {cf_str}, {sup}. {qtrend}")
     prompt = (
         "너는 한국 주식 애널리스트다. 최근 뉴스·공시·실적을 광범위하게 검색해 아래 종목의 '심층 분석 리포트'를 작성하라.\n"
         f"데이터: {stat}\n\n"
         "규칙:\n"
-        "- 밸류에이션 수치는 위 제공된 PER/PBR/ROE/섹터순위만 사용(웹의 다른 PER 절대 인용 금지). 0/없으면 '밸류 데이터 미제공'.\n"
+        "- 밸류에이션 수치는 위 제공된 PER/PBR/ROE/섹터순위/부채비율/EBITDA만 사용(웹의 다른 수치 절대 인용 금지). 없으면 '미제공'.\n"
+        "- ⚠️ 부채비율 해석은 섹터 맥락 필수: 은행·보험·증권·지주 등 금융업은 예수금·보험준비금이 회계상 부채라 부채비율이 구조적으로 수백~수천%가 정상이다. 금융주는 부채비율 절대수치로 위험을 단정하지 말고 '업종 특성상 정상' 또는 자본적정성 관점으로 서술하라. 비금융 제조·서비스업만 부채비율 100~200% 초과를 레버리지 부담으로 해석.\n"
         "- 문체: 자연스럽게 풀어 쓴 완결 문장. 개조식·전보문·가운뎃점 나열 금지.\n"
         "- ⚠️ 분기별 ROE/EPS/매출 수치와 수급 금액(억)은 리포트에 표·막대로 따로 보여주므로 prose에 숫자를 나열하지 말 것. 그 수치들의 '의미·방향·해석'만 서술하라.\n"
         "- 각 섹션 4~7문장, 실제 사실·뉴스·공시·증권사 리포트 근거로. 모르면 '확인 안 됨'.\n"
@@ -365,7 +406,7 @@ def _gemini_full(c, r, fl, roe):
         "사업실적: <사업 개요 + 최근 실적의 의미·방향 해석(숫자 나열 금지) 4~6문장>\n"
         "촉매: <주가를 끌어올린 요인 — 테마·정책·공시·뉴스를 시간순으로 4~6문장>\n"
         "수급분석: <외인/기관/개인 흐름의 해석(금액 나열 말고 누가 주도/이탈하며 의미가 뭔지) 2~4문장>\n"
-        "밸류: <제공된 섹터 PER/PBR 순위·ROE 해석, 피어 대비 적정성 3~4문장>\n"
+        "밸류: <재무 건전성·현금흐름 중심으로 서술. ① 부채비율로 재무 레버리지/안정성(금융주는 섹터 특성 반영) ② EBITDA로 영업현금 창출 규모·추세, EV/EBITDA 있으면 현금흐름 대비 밸류 ③ ROE로 수익성. PER/PBR은 보조로 한 줄. 피어/업종 대비 적정성까지 4~6문장>\n"
         "강세론: <상승 지속 시나리오와 근거 3~4문장>\n"
         "리스크: <구체적 하방 리스크와 영향 3~5문장>\n"
         "관전: <향후 트리거·실적발표일·정책·지표 체크포인트 3~5문장>\n"
@@ -414,9 +455,10 @@ def _gemini_update(c, name, code, prev_summary):
         return {"업데이트": "", "추정": ""}
 
 
-def gemini_analyze(top10, flows, roes, cache):
+def gemini_analyze(top10, flows, roes, cache, ebitdas=None):
     """캐시 인식: 재등장(7일내) 종목은 어제 8섹션 재사용 + 오늘 업데이트만 호출. 신규/묵은건 전체분석."""
     from google import genai
+    ebitdas = ebitdas or {}
     c = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     today = datetime.now(KST); out = {}
     for _, r in top10.iterrows():
@@ -435,7 +477,7 @@ def gemini_analyze(top10, flows, roes, cache):
                 a["업데이트"], a["추정"] = u["업데이트"], u["추정"]
                 log(f"  {r['종목명']}: 캐시 재사용 + 업데이트")
             else:
-                a = _gemini_full(c, r, fl, roe); a["업데이트"] = ""
+                a = _gemini_full(c, r, fl, roe, ebitdas.get(code)); a["업데이트"] = ""
                 log(f"  {r['종목명']}: 전체 분석")
         except Exception as e:
             log(f"  Gemini {code} 실패: {str(e)[:80]}")

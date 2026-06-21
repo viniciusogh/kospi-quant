@@ -51,3 +51,4 @@ kospi_index.pkl
 fin_is_cache/
 kosdaq_ohlc_cache/
 kosdaq_fin_cache/
+fin_ebitda_cache/
