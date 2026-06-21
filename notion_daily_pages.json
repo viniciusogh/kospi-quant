@@ -376,7 +376,9 @@
   "2026-06-21": {
     "page_id": "3854a006-32f8-81a7-9e0f-ea183df15c73",
     "channels": {
-      "moneydo": "3854a006-32f8-8144-81fa-e20f5b1cb343"
+      "moneydo": "3854a006-32f8-8144-81fa-e20f5b1cb343",
+      "3proTV": "3864a006-32f8-8122-98ae-e2a8bb67010a",
+      "moneyinside": "3864a006-32f8-811a-830d-c6de904526c2"
     }
   }
 }
