@@ -739,12 +739,21 @@ def upload_notion(top, analysis=None, trend=None, flows=None, roes=None, deltas=
 
     date_parent = sg._get_or_create_date_page(asof, headers, parent)
     sg._archive_same_title_pages(title, headers, date_parent)
-    r = requests.post("https://api.notion.com/v1/pages", headers=headers, timeout=20,
-                      json={"parent": {"page_id": date_parent},
-                            "properties": {"title": {"title": [{"text": {"content": title}}]}},
-                            "children": header})
-    if r.status_code != 200:
-        log(f"❌ Notion 페이지 생성 실패 {r.status_code}: {r.text[:200]}"); return
+    r = None
+    for attempt in range(3):     # 페이지 생성도 일시 timeout 재시도
+        try:
+            r = requests.post("https://api.notion.com/v1/pages", headers=headers, timeout=30,
+                              json={"parent": {"page_id": date_parent},
+                                    "properties": {"title": {"title": [{"text": {"content": title}}]}},
+                                    "children": header})
+            if r.status_code == 200:
+                break
+            log(f"  ⚠️ 페이지 생성 {r.status_code} ({attempt+1}/3): {r.text[:150]}")
+        except Exception as e:
+            log(f"  ⚠️ 페이지 생성 예외({attempt+1}/3): {str(e)[:120]}")
+        time.sleep(2 * (attempt + 1))
+    if r is None or r.status_code != 200:
+        log("❌ Notion 페이지 생성 최종 실패"); return
     page_id = r.json()["id"]
     page_url = r.json().get("url", "")
     if cash:     # 현금 모드: 종목 토글 없이 종료
@@ -752,12 +761,21 @@ def upload_notion(top, analysis=None, trend=None, flows=None, roes=None, deltas=
         return
 
     def append(block_id, blocks):
-        rr = requests.patch(f"https://api.notion.com/v1/blocks/{block_id}/children",
-                            headers=headers, json={"children": blocks}, timeout=20)
-        time.sleep(0.35)
-        if rr.status_code != 200:
-            log(f"  ⚠️ append 실패 {rr.status_code}: {rr.text[:150]}"); return None
-        return rr.json().get("results", [])
+        # Notion API 일시 지연(ReadTimeout)·5xx·429 재시도 — 1종목 실패가 리포트 전체 중단 막음
+        for attempt in range(3):
+            try:
+                rr = requests.patch(f"https://api.notion.com/v1/blocks/{block_id}/children",
+                                    headers=headers, json={"children": blocks}, timeout=30)
+                time.sleep(0.35)
+                if rr.status_code == 200:
+                    return rr.json().get("results", [])
+                log(f"  ⚠️ append {rr.status_code} ({attempt+1}/3): {rr.text[:120]}")
+                if rr.status_code < 500 and rr.status_code != 429:
+                    return None      # 4xx(429제외)는 재시도 무의미
+            except Exception as e:
+                log(f"  ⚠️ append 예외({attempt+1}/3): {str(e)[:120]}")
+            time.sleep(2 * (attempt + 1))
+        return None
 
     # 종목별: 토글 append → 그 토글 안에 분기 실적 표 별도 append (중첩 한도 회피)
     for rank, (_, r) in enumerate(top.head(10).iterrows(), 1):
