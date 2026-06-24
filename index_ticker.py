@@ -119,16 +119,33 @@ def nheaders(key, json_ct=True):
     return h
 
 
-def find_page(key):
-    """부모 페이지 자식 중 PAGE_TITLE child_page 의 id 반환 (없으면 None)."""
+def get_date_page(key, date_str):
+    """'준비 중' 날짜 페이지(=NOTION_DAILY_DB_ID DB 의 오늘 row) id. 없으면 생성.
+    수급.py 와 동일 규약(제목 '준비 중' + 날짜 프로퍼티) → 17:30 수급이 같은 row 재사용."""
+    db_id = os.environ["NOTION_DAILY_DB_ID"]
+    r = requests.post(f"https://api.notion.com/v1/databases/{db_id}/query", headers=nheaders(key),
+                      json={"filter": {"property": "날짜", "date": {"equals": date_str}}, "page_size": 1},
+                      timeout=20)
+    res = r.json().get("results", [])
+    if res:
+        return res[0]["id"]
+    r = requests.post("https://api.notion.com/v1/pages", headers=nheaders(key), timeout=30,
+                      json={"parent": {"database_id": db_id},
+                            "properties": {"이름": {"title": [{"text": {"content": "준비 중"}}]},
+                                           "날짜": {"date": {"start": date_str}}}})
+    r.raise_for_status()
+    return r.json()["id"]
+
+
+def find_child_page(key, parent_id):
+    """parent_id 자식 중 PAGE_TITLE child_page id (없으면 None)."""
     cursor = None
     while True:
         params = {"page_size": 100}
         if cursor:
             params["start_cursor"] = cursor
-        r = requests.get(f"https://api.notion.com/v1/blocks/{PARENT_PAGE_ID}/children",
-                         headers=nheaders(key), params=params, timeout=20)
-        j = r.json()
+        j = requests.get(f"https://api.notion.com/v1/blocks/{parent_id}/children",
+                         headers=nheaders(key), params=params, timeout=20).json()
         for b in j.get("results", []):
             if b.get("type") == "child_page" and b["child_page"].get("title") == PAGE_TITLE \
                and not b.get("archived"):
@@ -138,12 +155,22 @@ def find_page(key):
         cursor = j.get("next_cursor")
 
 
-def create_page(key):
+def create_child_page(key, parent_id):
     r = requests.post("https://api.notion.com/v1/pages", headers=nheaders(key), timeout=30,
-                      json={"parent": {"page_id": PARENT_PAGE_ID},
+                      json={"parent": {"page_id": parent_id},
                             "properties": {"title": {"title": [{"text": {"content": PAGE_TITLE}}]}}})
     r.raise_for_status()
     return r.json()["id"]
+
+
+def archive_strays(key):
+    """루트 부모(PARENT_PAGE_ID)에 잘못 붙은 '지수 현황' 페이지 정리 (초기 오배치 자가복구)."""
+    sid = find_child_page(key, PARENT_PAGE_ID)
+    while sid:
+        requests.patch(f"https://api.notion.com/v1/pages/{sid}", headers=nheaders(key),
+                       json={"archived": True}, timeout=20)
+        log(f"  🧹 루트 오배치 페이지 아카이브: {sid}")
+        sid = find_child_page(key, PARENT_PAGE_ID)
 
 
 def clear_children(key, page_id):
@@ -170,8 +197,10 @@ def upload_png(key, png_bytes):
     return fu["id"]
 
 
-def update_notion(key, png_bytes, summary_md, asof):
-    page_id = find_page(key) or create_page(key)
+def update_notion(key, png_bytes, summary_md, asof, date_str):
+    archive_strays(key)
+    date_page = get_date_page(key, date_str)
+    page_id = find_child_page(key, date_page) or create_child_page(key, date_page)
     clear_children(key, page_id)
     file_id = upload_png(key, png_bytes)
     children = [
@@ -195,7 +224,9 @@ def fmt(name, cur, chg):
 
 # ──────────────────────────── main ────────────────────────────
 def main():
-    asof = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
+    now_kst = datetime.now(KST)
+    asof = now_kst.strftime("%Y-%m-%d %H:%M")
+    date_str = now_kst.strftime("%Y-%m-%d")
     tok = get_token()
 
     kospi_cur, kospi_chg = get_kospi_index(tok)
@@ -240,7 +271,7 @@ def main():
         log("NOTION_API_KEY 없음 → Notion 업로드 생략 (로컬). Actions 에선 업로드됨")
         return
     try:
-        pid = update_notion(key, png, summary, asof)
+        pid = update_notion(key, png, summary, asof, date_str)
         log(f"✅ Notion 갱신 완료: {pid}")
     except Exception as e:
         log(f"❌ Notion 갱신 실패: {e}")

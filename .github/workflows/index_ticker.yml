@@ -41,4 +41,5 @@ jobs:
           APP_SECRET: ${{ secrets.APP_SECRET }}
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
+          NOTION_DAILY_DB_ID: ${{ secrets.NOTION_DAILY_DB_ID }}
         run: python index_ticker.py
