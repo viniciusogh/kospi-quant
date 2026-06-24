@@ -33,6 +33,9 @@ KOSDAQ_재무데이터_*.xlsx
 *_cron.log
 *.lock
 
+# index_ticker 로컬 디버그 산출물 (Notion 파일업로드라 커밋 불필요)
+latest_index_dashboard.png
+
 # Excel 임시 파일 (Excel 열어둘 때 생기는 lock)
 ~$*.xlsx
 ~$*.xls

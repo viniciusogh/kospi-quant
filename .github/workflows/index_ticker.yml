@@ -1,0 +1,44 @@
+name: Index Ticker (hourly)
+
+on:
+  schedule:
+    - cron: '0 * * * *'   # 매시 정각 (UTC=KST-9). 한국장·미국장·FX 전부 커버. 누락돼도 다음 시간 자동복구
+  workflow_dispatch:
+
+permissions:
+  contents: read           # Notion 파일업로드만 — git commit 안 함(충돌·노이즈 회피)
+
+concurrency:
+  group: index-ticker
+  cancel-in-progress: false
+
+jobs:
+  ticker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run index ticker
+        env:
+          APP_KEY: ${{ secrets.APP_KEY }}
+          APP_SECRET: ${{ secrets.APP_SECRET }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
+        run: python index_ticker.py
