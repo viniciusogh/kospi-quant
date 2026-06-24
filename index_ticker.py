@@ -35,10 +35,21 @@ def get_token():
             return c["token"]
     except Exception:
         pass
-    r = requests.post(KIS_BASE + "/oauth2/tokenP", timeout=15,
-                      json={"grant_type": "client_credentials", "appkey": APP_KEY, "appsecret": APP_SECRET})
-    r.raise_for_status()
-    tok = r.json()["access_token"]
+    # KIS 토큰 엔드포인트 일시 ConnectTimeout 잦음(AGENTS: 6/16 전멸) → 재시도+백오프
+    tok = None
+    for attempt in range(1, 5):
+        try:
+            r = requests.post(KIS_BASE + "/oauth2/tokenP", timeout=15,
+                              json={"grant_type": "client_credentials", "appkey": APP_KEY, "appsecret": APP_SECRET})
+            r.raise_for_status()
+            tok = r.json()["access_token"]
+            break
+        except Exception as e:
+            log(f"⚠️ 토큰 발급 실패({attempt}/4): {str(e)[:80]}")
+            if attempt < 4:
+                time.sleep(min(5 * attempt, 20))
+    if not tok:
+        raise RuntimeError("KIS 토큰 발급 최종 실패")
     try:
         json.dump({"token": tok, "ts": time.time()}, open(TOKEN_CACHE, "w"))
     except Exception:
@@ -49,8 +60,14 @@ def get_token():
 def kis_get(tr, url, params, tok):
     h = {"authorization": f"Bearer {tok}", "appkey": APP_KEY, "appsecret": APP_SECRET,
          "tr_id": tr, "custtype": "P"}
-    r = requests.get(KIS_BASE + url, headers=h, params=params, timeout=10)
-    return r.json()
+    for attempt in range(1, 4):
+        try:
+            r = requests.get(KIS_BASE + url, headers=h, params=params, timeout=10)
+            return r.json()
+        except Exception as e:
+            log(f"⚠️ KIS {tr} 실패({attempt}/3): {str(e)[:80]}")
+            time.sleep(2 * attempt)
+    raise RuntimeError(f"KIS {tr} 최종 실패")
 
 
 def get_kospi_index(tok):
