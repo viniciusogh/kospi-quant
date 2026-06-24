@@ -136,88 +136,103 @@ def nheaders(key, json_ct=True):
     return h
 
 
+def _nreq(method, url, *, retry=3, timeout=30, **kw):
+    """Notion 일시 ReadTimeout·5xx·429 재시도. 4xx(429 제외)는 즉시 반환."""
+    last = None
+    for attempt in range(1, retry + 1):
+        try:
+            r = requests.request(method, url, timeout=timeout, **kw)
+            if r.status_code < 400 or (400 <= r.status_code < 500 and r.status_code != 429):
+                return r
+            log(f"  ⚠️ Notion {r.status_code} ({attempt}/{retry}): {r.text[:120]}")
+            last = r
+        except Exception as e:
+            log(f"  ⚠️ Notion 요청 예외({attempt}/{retry}): {str(e)[:100]}")
+        time.sleep(2 * attempt)
+    if last is not None:
+        return last
+    raise RuntimeError(f"Notion {method} {url} 최종 실패")
+
+
 def get_date_page(key, date_str):
     """'준비 중' 날짜 페이지(=NOTION_DAILY_DB_ID DB 의 오늘 row) id. 없으면 생성.
     수급.py 와 동일 규약(제목 '준비 중' + 날짜 프로퍼티) → 17:30 수급이 같은 row 재사용."""
     db_id = os.environ["NOTION_DAILY_DB_ID"]
-    r = requests.post(f"https://api.notion.com/v1/databases/{db_id}/query", headers=nheaders(key),
-                      json={"filter": {"property": "날짜", "date": {"equals": date_str}}, "page_size": 1},
-                      timeout=20)
+    r = _nreq("POST", f"https://api.notion.com/v1/databases/{db_id}/query", headers=nheaders(key),
+              json={"filter": {"property": "날짜", "date": {"equals": date_str}}, "page_size": 1})
     res = r.json().get("results", [])
     if res:
         return res[0]["id"]
-    r = requests.post("https://api.notion.com/v1/pages", headers=nheaders(key), timeout=30,
-                      json={"parent": {"database_id": db_id},
-                            "properties": {"이름": {"title": [{"text": {"content": "준비 중"}}]},
-                                           "날짜": {"date": {"start": date_str}}}})
-    r.raise_for_status()
+    r = _nreq("POST", "https://api.notion.com/v1/pages", headers=nheaders(key),
+              json={"parent": {"database_id": db_id},
+                    "properties": {"이름": {"title": [{"text": {"content": "준비 중"}}]},
+                                   "날짜": {"date": {"start": date_str}}}})
     return r.json()["id"]
 
 
-def find_child_page(key, parent_id):
-    """parent_id 자식 중 PAGE_TITLE child_page id (없으면 None)."""
-    cursor = None
+def find_child_pages(key, parent_id):
+    """parent_id 자식 중 PAGE_TITLE child_page id 전부 (단일 페이지네이션 패스)."""
+    ids, cursor = [], None
     while True:
         params = {"page_size": 100}
         if cursor:
             params["start_cursor"] = cursor
-        j = requests.get(f"https://api.notion.com/v1/blocks/{parent_id}/children",
-                         headers=nheaders(key), params=params, timeout=20).json()
+        j = _nreq("GET", f"https://api.notion.com/v1/blocks/{parent_id}/children",
+                  headers=nheaders(key), params=params).json()
         for b in j.get("results", []):
             if b.get("type") == "child_page" and b["child_page"].get("title") == PAGE_TITLE \
                and not b.get("archived"):
-                return b["id"]
+                ids.append(b["id"])
         if not j.get("has_more"):
-            return None
+            return ids
         cursor = j.get("next_cursor")
 
 
 def create_child_page(key, parent_id):
-    r = requests.post("https://api.notion.com/v1/pages", headers=nheaders(key), timeout=30,
-                      json={"parent": {"page_id": parent_id},
-                            "properties": {"title": {"title": [{"text": {"content": PAGE_TITLE}}]}}})
-    r.raise_for_status()
+    r = _nreq("POST", "https://api.notion.com/v1/pages", headers=nheaders(key),
+              json={"parent": {"page_id": parent_id},
+                    "properties": {"title": {"title": [{"text": {"content": PAGE_TITLE}}]}}})
     return r.json()["id"]
 
 
+def archive_page(key, pid):
+    _nreq("PATCH", f"https://api.notion.com/v1/pages/{pid}", headers=nheaders(key),
+          json={"archived": True})
+
+
 def archive_strays(key):
-    """루트 부모(PARENT_PAGE_ID)에 잘못 붙은 '지수 현황' 페이지 정리 (초기 오배치 자가복구)."""
-    sid = find_child_page(key, PARENT_PAGE_ID)
-    while sid:
-        requests.patch(f"https://api.notion.com/v1/pages/{sid}", headers=nheaders(key),
-                       json={"archived": True}, timeout=20)
+    """루트 부모(PARENT_PAGE_ID)에 잘못 붙은 '지수 현황' 페이지 정리 (초기 오배치 자가복구). 단일 패스."""
+    for sid in find_child_pages(key, PARENT_PAGE_ID):
+        archive_page(key, sid)
         log(f"  🧹 루트 오배치 페이지 아카이브: {sid}")
-        sid = find_child_page(key, PARENT_PAGE_ID)
 
 
 def clear_children(key, page_id):
-    r = requests.get(f"https://api.notion.com/v1/blocks/{page_id}/children",
-                     headers=nheaders(key), params={"page_size": 100}, timeout=20)
-    for b in r.json().get("results", []):
+    j = _nreq("GET", f"https://api.notion.com/v1/blocks/{page_id}/children",
+              headers=nheaders(key), params={"page_size": 100}).json()
+    for b in j.get("results", []):
         try:
-            requests.delete(f"https://api.notion.com/v1/blocks/{b['id']}",
-                            headers=nheaders(key), timeout=20)
+            _nreq("DELETE", f"https://api.notion.com/v1/blocks/{b['id']}", headers=nheaders(key))
             time.sleep(0.2)
         except Exception as e:
             log(f"  ⚠️ 블록 삭제 실패: {e}")
 
 
 def upload_png(key, png_bytes):
-    r = requests.post("https://api.notion.com/v1/file_uploads", headers=nheaders(key), timeout=30,
-                      json={"filename": "index_dashboard.png", "content_type": "image/png"})
-    r.raise_for_status()
+    r = _nreq("POST", "https://api.notion.com/v1/file_uploads", headers=nheaders(key),
+              json={"filename": "index_dashboard.png", "content_type": "image/png"})
     fu = r.json()
     files = {"file": ("index_dashboard.png", png_bytes, "image/png")}
-    r2 = requests.post(f"https://api.notion.com/v1/file_uploads/{fu['id']}/send",
-                       headers=nheaders(key, json_ct=False), files=files, timeout=60)
-    r2.raise_for_status()
+    _nreq("POST", f"https://api.notion.com/v1/file_uploads/{fu['id']}/send",
+          headers=nheaders(key, json_ct=False), files=files, timeout=60)
     return fu["id"]
 
 
 def update_notion(key, png_bytes, summary_md, asof, date_str):
     archive_strays(key)
     date_page = get_date_page(key, date_str)
-    page_id = find_child_page(key, date_page) or create_child_page(key, date_page)
+    existing = find_child_pages(key, date_page)
+    page_id = existing[0] if existing else create_child_page(key, date_page)
     clear_children(key, page_id)
     file_id = upload_png(key, png_bytes)
     children = [
@@ -227,9 +242,8 @@ def update_notion(key, png_bytes, summary_md, asof, date_str):
         {"object": "block", "type": "image",
          "image": {"type": "file_upload", "file_upload": {"id": file_id}}},
     ]
-    r = requests.patch(f"https://api.notion.com/v1/blocks/{page_id}/children",
-                       headers=nheaders(key), json={"children": children}, timeout=30)
-    r.raise_for_status()
+    _nreq("PATCH", f"https://api.notion.com/v1/blocks/{page_id}/children",
+          headers=nheaders(key), json={"children": children})
     return page_id
 
 

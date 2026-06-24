@@ -1,9 +1,11 @@
 name: Index Ticker (hourly)
 
 on:
+  # 주 트리거: cron-job.org 가 매시 정각 workflow_dispatch (네이티브 schedule 지연/누락 회피 — daily_quant 와 동일 패턴).
+  # 네이티브 schedule 은 cron-job.org 장애 시 백업용으로만 유지.
   schedule:
-    - cron: '0 * * * *'   # 매시 정각 (UTC=KST-9). 한국장·미국장·FX 전부 커버. 누락돼도 다음 시간 자동복구
-  workflow_dispatch:
+    - cron: '0 * * * *'   # 매시 정각 백업 (UTC=KST-9). 한국장·미국장·FX 커버
+  workflow_dispatch:      # ← cron-job.org 가 매시 trigger
 
 permissions:
   contents: read           # Notion 파일업로드만 — git commit 안 함(충돌·노이즈 회피)
