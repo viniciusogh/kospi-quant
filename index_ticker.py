@@ -19,9 +19,10 @@ APP_SECRET = os.environ["APP_SECRET"]
 KIS_BASE   = "https://openapi.koreainvestment.com:9443"
 TOKEN_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".kis_token.json")
 
-PARENT_PAGE_ID = os.environ.get("NOTION_PARENT_PAGE_ID", "3324a00632f880fbb014d766d87a1079")
-PAGE_TITLE     = "📈 지수 현황"
-NOTION_VERSION = "2026-03-11"   # 파일 업로드 API 최소 버전. page/block 만 써서 구버전 호환 깨짐 없음
+PARENT_PAGE_ID  = os.environ.get("NOTION_PARENT_PAGE_ID", "3324a00632f880fbb014d766d87a1079")
+SENTINEL        = "📈 지수 현황"    # 일별 페이지 내 콜아웃 식별 마커(매시 이 블록만 교체)
+NOTION_VER_DB   = "2022-06-28"     # DB 쿼리·블록 (수급.py 검증). 신버전은 database→data source 분리로 날짜필터 빈결과
+NOTION_VER_FILE = "2026-03-11"     # 파일 업로드 + 이미지 블록 최소 버전
 
 
 def log(msg): print(f"[{datetime.now(KST).strftime('%H:%M:%S')}] {msg}")
@@ -129,8 +130,8 @@ def render(panels, asof):
     return buf.getvalue()
 
 # ──────────────────────────── Notion ────────────────────────────
-def nheaders(key, json_ct=True):
-    h = {"Authorization": f"Bearer {key}", "Notion-Version": NOTION_VERSION}
+def nheaders(key, ver=NOTION_VER_DB, json_ct=True):
+    h = {"Authorization": f"Bearer {key}", "Notion-Version": ver}
     if json_ct:
         h["Content-Type"] = "application/json"
     return h
@@ -154,15 +155,30 @@ def _nreq(method, url, *, retry=3, timeout=30, **kw):
     raise RuntimeError(f"Notion {method} {url} 최종 실패")
 
 
-def get_date_page(key, date_str):
-    """'준비 중' 날짜 페이지(=NOTION_DAILY_DB_ID DB 의 오늘 row) id. 없으면 생성.
-    수급.py 와 동일 규약(제목 '준비 중' + 날짜 프로퍼티) → 17:30 수급이 같은 row 재사용."""
+def _row_title(row):
+    for prop in row.get("properties", {}).values():
+        if prop.get("type") == "title":
+            t = prop.get("title", [])
+            return t[0]["plain_text"] if t else ""
+    return ""
+
+
+def query_today_rows(key, date_str, size=10):
     db_id = os.environ["NOTION_DAILY_DB_ID"]
     r = _nreq("POST", f"https://api.notion.com/v1/databases/{db_id}/query", headers=nheaders(key),
-              json={"filter": {"property": "날짜", "date": {"equals": date_str}}, "page_size": 1})
-    res = r.json().get("results", [])
-    if res:
-        return res[0]["id"]
+              json={"filter": {"property": "날짜", "date": {"equals": date_str}}, "page_size": size})
+    return r.json().get("results", [])
+
+
+def get_date_page(key, date_str):
+    """오늘 날짜 리포트 페이지(=NOTION_DAILY_DB_ID DB row) id. 수급.py 와 동일 규약.
+    여러 row 면 '준비 중' 아닌(=리포트 제목 붙은) 걸 우선. 없으면 '준비 중' 생성(daily flow 와 공유)."""
+    rows = query_today_rows(key, date_str)
+    log(f"  오늘({date_str}) DB row {len(rows)}개: {[_row_title(x) for x in rows]}")
+    if rows:
+        named = [x for x in rows if _row_title(x) != "준비 중"]
+        return (named or rows)[0]["id"]
+    db_id = os.environ["NOTION_DAILY_DB_ID"]
     r = _nreq("POST", "https://api.notion.com/v1/pages", headers=nheaders(key),
               json={"parent": {"database_id": db_id},
                     "properties": {"이름": {"title": [{"text": {"content": "준비 중"}}]},
@@ -170,29 +186,25 @@ def get_date_page(key, date_str):
     return r.json()["id"]
 
 
-def find_child_pages(key, parent_id):
-    """parent_id 자식 중 PAGE_TITLE child_page id 전부 (단일 페이지네이션 패스)."""
-    ids, cursor = [], None
+def list_children(key, parent_id):
+    out, cursor = [], None
     while True:
         params = {"page_size": 100}
         if cursor:
             params["start_cursor"] = cursor
         j = _nreq("GET", f"https://api.notion.com/v1/blocks/{parent_id}/children",
                   headers=nheaders(key), params=params).json()
-        for b in j.get("results", []):
-            if b.get("type") == "child_page" and b["child_page"].get("title") == PAGE_TITLE \
-               and not b.get("archived"):
-                ids.append(b["id"])
+        out.extend(j.get("results", []))
         if not j.get("has_more"):
-            return ids
+            return out
         cursor = j.get("next_cursor")
 
 
-def create_child_page(key, parent_id):
-    r = _nreq("POST", "https://api.notion.com/v1/pages", headers=nheaders(key),
-              json={"parent": {"page_id": parent_id},
-                    "properties": {"title": {"title": [{"text": {"content": PAGE_TITLE}}]}}})
-    return r.json()["id"]
+def _is_my_callout(b):
+    if b.get("type") != "callout":
+        return False
+    rt = b["callout"].get("rich_text", [])
+    return bool(rt) and rt[0].get("plain_text", "").startswith(SENTINEL)
 
 
 def archive_page(key, pid):
@@ -200,50 +212,59 @@ def archive_page(key, pid):
           json={"archived": True})
 
 
-def archive_strays(key):
-    """루트 부모(PARENT_PAGE_ID)에 잘못 붙은 '지수 현황' 페이지 정리 (초기 오배치 자가복구). 단일 패스."""
-    for sid in find_child_pages(key, PARENT_PAGE_ID):
-        archive_page(key, sid)
-        log(f"  🧹 루트 오배치 페이지 아카이브: {sid}")
+def cleanup_legacy(key, keep_id, date_str):
+    """과거 잘못 만든 구조 자가정리: ①루트에 박은 '지수 현황' child page ②내가 만든 중복 '준비 중' row.
+    중복 row 판별 = keep_id 아닌 오늘 row 중 '📈 지수 현황' child page 를 가진 것(=옛 구조)."""
+    for b in list_children(key, PARENT_PAGE_ID):
+        if b.get("type") == "child_page" and b["child_page"].get("title") == SENTINEL:
+            archive_page(key, b["id"]); log(f"  🧹 루트 오배치 페이지 아카이브: {b['id']}")
+    for row in query_today_rows(key, date_str):
+        if row["id"] == keep_id:
+            continue
+        kids = list_children(key, row["id"])
+        if any(c.get("type") == "child_page" and c["child_page"].get("title") == SENTINEL for c in kids):
+            archive_page(key, row["id"]); log(f"  🧹 중복 '준비 중' row 아카이브: {row['id']}")
 
 
-def clear_children(key, page_id):
-    j = _nreq("GET", f"https://api.notion.com/v1/blocks/{page_id}/children",
-              headers=nheaders(key), params={"page_size": 100}).json()
-    for b in j.get("results", []):
-        try:
-            _nreq("DELETE", f"https://api.notion.com/v1/blocks/{b['id']}", headers=nheaders(key))
-            time.sleep(0.2)
-        except Exception as e:
-            log(f"  ⚠️ 블록 삭제 실패: {e}")
+def remove_my_blocks(key, page_id):
+    """일별 페이지 직속 children 중 내 콜아웃(SENTINEL)·이미지만 삭제 (리포트 링크는 보존)."""
+    for b in list_children(key, page_id):
+        if _is_my_callout(b) or b.get("type") == "image":
+            try:
+                _nreq("DELETE", f"https://api.notion.com/v1/blocks/{b['id']}", headers=nheaders(key))
+                time.sleep(0.2)
+            except Exception as e:
+                log(f"  ⚠️ 블록 삭제 실패: {e}")
 
 
 def upload_png(key, png_bytes):
-    r = _nreq("POST", "https://api.notion.com/v1/file_uploads", headers=nheaders(key),
+    r = _nreq("POST", "https://api.notion.com/v1/file_uploads",
+              headers=nheaders(key, NOTION_VER_FILE),
               json={"filename": "index_dashboard.png", "content_type": "image/png"})
     fu = r.json()
     files = {"file": ("index_dashboard.png", png_bytes, "image/png")}
     _nreq("POST", f"https://api.notion.com/v1/file_uploads/{fu['id']}/send",
-          headers=nheaders(key, json_ct=False), files=files, timeout=60)
+          headers=nheaders(key, NOTION_VER_FILE, json_ct=False), files=files, timeout=60)
     return fu["id"]
 
 
-def update_notion(key, png_bytes, summary_md, asof, date_str):
-    archive_strays(key)
-    date_page = get_date_page(key, date_str)
-    existing = find_child_pages(key, date_page)
-    page_id = existing[0] if existing else create_child_page(key, date_page)
-    clear_children(key, page_id)
+def update_notion(key, png_bytes, lines, asof, date_str):
+    page_id = get_date_page(key, date_str)
+    cleanup_legacy(key, page_id, date_str)
+    remove_my_blocks(key, page_id)
     file_id = upload_png(key, png_bytes)
+    # 줄별 분리: 헤더 1줄 + 지수별 1줄씩
+    rich = [{"type": "text", "text": {"content": f"{SENTINEL} · {asof} KST 기준\n"},
+             "annotations": {"bold": True}}]
+    rich.append({"type": "text", "text": {"content": "\n".join(lines)}})
     children = [
-        {"object": "block", "type": "callout", "callout": {
-            "icon": {"emoji": "🕒"},
-            "rich_text": [{"type": "text", "text": {"content": f"{asof} KST 기준\n{summary_md}"}}]}},
+        {"object": "block", "type": "callout",
+         "callout": {"icon": {"emoji": "🕒"}, "color": "gray_background", "rich_text": rich}},
         {"object": "block", "type": "image",
          "image": {"type": "file_upload", "file_upload": {"id": file_id}}},
     ]
     _nreq("PATCH", f"https://api.notion.com/v1/blocks/{page_id}/children",
-          headers=nheaders(key), json={"children": children})
+          headers=nheaders(key, NOTION_VER_FILE), json={"children": children})
     return page_id
 
 
@@ -289,20 +310,20 @@ def main():
     open(out, "wb").write(png)
     log(f"차트 저장: {out} ({len(png)//1024} KB)")
 
-    summary = "  ·  ".join([
+    lines = [
         fmt("코스피", kospi_cur, kospi_chg),
-        fmt(f"선물({fut_name.strip()})", fut_cur, fut_chg),
+        fmt(f"선물 {fut_name.strip()}", fut_cur, fut_chg),
         fmt("나스닥", ndx_cur, ndx_chg),
         fmt("USD/KRW", fx_cur, fx_chg),
-    ])
-    print(summary)
+    ]
+    print("\n".join(lines))
 
     key = os.environ.get("NOTION_API_KEY")
     if not key:
         log("NOTION_API_KEY 없음 → Notion 업로드 생략 (로컬). Actions 에선 업로드됨")
         return
     try:
-        pid = update_notion(key, png, summary, asof, date_str)
+        pid = update_notion(key, png, lines, asof, date_str)
         log(f"✅ Notion 갱신 완료: {pid}")
     except Exception as e:
         log(f"❌ Notion 갱신 실패: {e}")
