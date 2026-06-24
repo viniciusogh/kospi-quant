@@ -4,9 +4,14 @@ import numpy as np
 import time
 import random
 import os
+import json
+import re
 import _env  # .env 자동 로드
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
+# 모멘텀 레포트와 동일한 토글/분기표·Gemini 형식 재사용 (signal-agnostic 헬퍼)
+from momentum_daily import (fetch_income, fetch_ebitda, _quarter_table, _para,
+                            _gemini_update, _trim_phrase, _is_clean)
 
 KST = timezone(timedelta(hours=9))   # GitHub Actions 러너는 UTC, 모든 날짜·시각은 KST 기준
 
@@ -22,7 +27,7 @@ input_csv = os.environ.get("INPUT_CSV",
     os.path.join(_BASE_DIR, "KOSDAQ재무데이터한투.csv"))
 
 # Notion
-NOTION_API_KEY        = os.environ["NOTION_API_KEY"]
+NOTION_API_KEY        = os.environ.get("NOTION_API_KEY", "")   # 없으면 업로드 생략(로컬 dry-run)
 NOTION_PARENT_PAGE_ID = os.environ.get("NOTION_PARENT_PAGE_ID", "3324a00632f880fbb014d766d87a1079")
 
 # Gemini (종목 설명 생성용 — 키 없으면 설명 생략, 카드/표는 정상)
@@ -460,70 +465,22 @@ def _cross_z(s: pd.Series, clip: float = 3.0) -> pd.Series:
     return z.clip(-clip, clip)
 
 
-# 섹터 중립화 임계값: 종목 수가 이보다 작으면 전체 풀 폴백
-_SECTOR_MIN_N = 5
+def compute_slim3_score(df: pd.DataFrame) -> pd.Series:
+    """slim3 = 이익수익률(1/PER) + ROE(±40윈저) + 저부채(-부채비율), 동일가중 단면 z합.
 
-def _cz_by_sector(s: pd.Series, sector: pd.Series, min_n: int = _SECTOR_MIN_N) -> pd.Series:
-    """섹터 내 Z-score. 작은 섹터·섹터 결측 시 전체 풀 폴백."""
-    if sector is None or sector.isna().all():
-        return _cross_z(s)
-    pool_z = _cross_z(s)
-    out = pd.Series(index=s.index, dtype=float)
-    for sec, idx in sector.groupby(sector).groups.items():
-        sub = s.loc[idx]
-        if len(sub) >= min_n and sub.std(skipna=True) > 1e-8:
-            out.loc[idx] = _cross_z(sub)
-        else:
-            out.loc[idx] = pool_z.loc[idx]
-    return out
-
-
-def compute_multifactor_score(df: pd.DataFrame) -> pd.Series:
+    백테 검증(2026-06, kosdaq_fundamental_backtest.py): 코스닥은 가격모멘텀이 IC 음수로 죽었지만
+    이 셋(ey·roe·lowdebt)은 정상 레짐 롱숏 +3~5%p/반기로 유효. 수급·성장·PBR은 노이즈/부호반전이라 제외.
+    데이터 없으면 해당 팩터 z=0(중립). ROE 윈저는 자본잠식 종목의 z 폭주 차단(라이브 전용).
     """
-    수급 0.20 + 밸류 0.30 + 퀄리티 0.25 + 성장 0.15 + 안정성 0.10
-    밸류·퀄리티·안정성은 섹터 내 Z-score (섹터 중립), 수급·성장은 시장 전체 Z-score.
-    가격 부담(밸류) 가중치를 0.20→0.30 으로 상향, 수급(0.25→0.20)·안정성(0.15→0.10) 살짝 하향.
-    "이미 오른 종목" 편향 완화 — 코스피와 동일 가중치.
-    데이터 없는 종목은 해당 팩터 기여도 = 0 (중립) 처리.
-    """
-    sec = df["industry"] if "industry" in df.columns else None
+    def _ey(x):   # 1/PER, 부호 그대로 (= eps/px). 적자(PER<0)면 자연히 음수. 0/결측만 NaN.
+        return (1.0 / x) if (pd.notna(x) and x != 0) else np.nan
+    z_ey      = _cross_z(df["per"].apply(_ey)).fillna(0)
+    roe_w     = pd.to_numeric(df["roe"], errors="coerce").clip(-40, 40)
+    z_roe     = _cross_z(roe_w).fillna(0)
+    z_lowdebt = _cross_z(-pd.to_numeric(df["debt_ratio"], errors="coerce")).fillna(0)
 
-    # 수급 팩터 (시장 전체 — 섹터 회전 알파 보존)
-    z_supply = _cross_z(df["strength_score"].fillna(0))
-
-    # 밸류 팩터: 1/PER + 1/PBR (섹터 중립)
-    def _inv_per(x):
-        if pd.isna(x):   return np.nan
-        elif x > 0:      return 1 / x
-        else:            return -1.0
-    def _inv_pbr(x):
-        if pd.isna(x):   return np.nan
-        elif x > 0:      return 1 / x
-        else:            return -1.0
-    inv_per = df["per"].apply(_inv_per)
-    inv_pbr = df["pbr"].apply(_inv_pbr)
-    z_val = (_cz_by_sector(inv_per, sec).fillna(0)
-           + _cz_by_sector(inv_pbr, sec).fillna(0)) / 2
-
-    # 퀄리티 팩터: ROE (섹터 중립)
-    z_quality = _cz_by_sector(df["roe"], sec).fillna(0)
-
-    # 성장 팩터 (시장 전체)
-    z_growth = (_cross_z(df["rev_growth"]).fillna(0)
-              + _cross_z(df["op_profit_growth"]).fillna(0)) / 2
-
-    # 안정성 팩터 (섹터 중립: 금융 ↔ 비금융 자본구조 차이 흡수)
-    debt_filled = df["debt_ratio"].fillna(df["debt_ratio"].median()).fillna(100)
-    z_safety = _cz_by_sector(-debt_filled, sec).fillna(0)
-
-    # 팩터별 가중 기여도 노출 (리포트 카드용 — 합 = raw_score)
-    df["f_supply"]  = 0.20 * z_supply
-    df["f_value"]   = 0.30 * z_val
-    df["f_quality"] = 0.25 * z_quality
-    df["f_growth"]  = 0.15 * z_growth
-    df["f_safety"]  = 0.10 * z_safety
-
-    return df["f_supply"] + df["f_value"] + df["f_quality"] + df["f_growth"] + df["f_safety"]
+    df["f_ey"], df["f_roe"], df["f_lowdebt"] = z_ey, z_roe, z_lowdebt
+    return z_ey + z_roe + z_lowdebt
 
 
 # ==========================
@@ -715,190 +672,310 @@ def _archive_same_title_pages(title: str, headers: dict, parent_id: str):
         log(f"  기존 페이지 확인 중 오류 (무시): {e}")
 
 
-# 팩터 라벨(2글자는 뒤 2칸 패딩 → monospace 폭을 3글자 퀄리티와 맞춤), 컬럼
-_FACTOR_COLS = [("수급  ", "f_supply"), ("밸류  ", "f_value"),
-                ("수익성", "f_quality"), ("성장  ", "f_growth"), ("안정  ", "f_safety")]
-_FACTOR_DENOM = 0.9   # 단일 팩터 최대 기여도 (0.30 가중 × z=3) — 막대 공통 분모
+# ==========================
+# Gemini 펀더멘탈 심층분석 (모멘텀 레포트와 동일 형식, 신호만 펀더로)
+# ==========================
+KOSDAQ_ANALYSIS_CACHE = os.path.join(_BASE_DIR, "kosdaq_analysis.json")
+FUND_SECTIONS = [("💡 요약", "요약"), ("📊 사업·실적", "사업실적"), ("⚡ 상승 촉매", "촉매"),
+                 ("💵 밸류·재무", "밸류"), ("📈 강세론", "강세론"), ("⚠️ 리스크", "리스크"),
+                 ("👀 관전 포인트", "관전")]
+FUND_KEYS = ["issue", "요약", "사업실적", "촉매", "밸류", "강세론", "리스크", "관전"]
 
 
-def describe_stocks(reco_kor: pd.DataFrame) -> dict:
-    """상위 10종목 한 줄 사업 설명 (Gemini 1콜). 키 없으면 {}. 반환 {종목코드: 설명}.
-    환각 억제: 모르는 회사는 '설명 없음' 으로 출력하게 지시."""
-    if not GEMINI_API_KEY:
-        return {}
-    items = []
-    for _, r in reco_kor.head(10).iterrows():
-        sector = r.get("섹터")
-        sector = sector if (sector and not pd.isna(sector)) else "-"
-        items.append(f"{r.get('종목코드', '')}|{r.get('종목명', '')}|{sector}")
-    prompt = (
-        "다음은 한국 KOSDAQ 상장사 목록이다 (종목코드|종목명|섹터). "
-        "각 회사가 무엇을 하는 회사인지 한 줄(공백 포함 30자 이내)로 설명하라. "
-        "확실히 아는 회사만 설명하고, 모르거나 불확실하면 추측하지 말고 '설명 없음' 이라고 써라. "
-        "출력은 각 줄 '종목코드|설명' 형식만, 다른 텍스트·머리말 금지.\n\n"
-        + "\n".join(items)
-    )
-    try:
-        from google import genai
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        resp = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
-        out = {}
-        for line in (resp.text or "").splitlines():
-            line = line.strip().strip("`").strip()
-            if "|" not in line:
-                continue
-            code, desc = line.split("|", 1)
-            code, desc = code.strip(), desc.strip()
-            if code.isdigit():
-                code = code.zfill(6)
-            if desc and "설명 없음" not in desc:
-                out[code] = desc
-        return out
-    except Exception as e:
-        log(f"  Gemini 종목설명 실패 (무시): {e}")
-        return {}
-
-
-def _factor_card(rank: int, row, desc: str = "") -> dict:
-    """종목 1개의 팩터 기여도를 monospace code 블록으로. 막대 정렬 위해 callout 대신 code."""
-    medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, f"{rank:>2}.")
-    sector = row.get("섹터")
-    sector = sector if (sector and not pd.isna(sector)) else "-"
-    jb = "  ✅정배열" if row.get("정배열") else ""
-    desc_line = f"   💬 {desc} (AI 추정)\n" if desc else ""
-    head = (f"{medal} {row.get('종목명', '')} ({row.get('종목코드', '')}) · {sector}\n"
-            + desc_line
-            + f"   점수 {float(row.get('멀티팩터점수', 0)):.2f}  |  "
-            f"등락 {fmt_pct(row.get('당일등락(%)'))}  |  "
-            f"순위 {fmt_rank_change(row.get('순위변동'))}{jb}\n")
-    lines, contribs = [], []
-    for label, col in _FACTOR_COLS:
-        try:
-            c = float(row.get(col, 0) or 0)
-        except Exception:
-            c = 0.0
-        contribs.append((label.strip(), c))
-        n = round(min(abs(c), _FACTOR_DENOM) / _FACTOR_DENOM * 10)
-        bar = "█" * n + "░" * (10 - n)
-        lines.append(f"   {label} {bar} {c:+.2f}")
-    pos = sorted([x for x in contribs if x[1] > 0], key=lambda x: -x[1])[:2]
-    drive = "   → 주도: " + ", ".join(p[0] for p in pos) if pos else "   → 전반 약세"
-    text = head + "\n".join(lines) + "\n" + drive
-    return {"object": "block", "type": "code", "code": {
-        "rich_text": [{"type": "text", "text": {"content": text}}],
-        "language": "plain text",
-    }}
-
-
-def upload_to_notion(reco_kor: pd.DataFrame):
-    """추천종목 표를 Notion 새 페이지에 업로드"""
-    headers = {
-        "Authorization": f"Bearer {NOTION_API_KEY}",
-        "Content-Type": "application/json",
-        "Notion-Version": "2022-06-28",
-    }
-    today_str = datetime.now(KST).strftime("%Y-%m-%d")
-
-    col_labels = ["랭킹", "순위변동", "당일등락(%)", "종목코드", "종목명", "섹터", "정배열", "멀티팩터점수", "수급강화점수",
-                  "시가총액(억)", "외국인순매수(백만)", "기관순매수(백만)",
-                  "PER", "PBR", "ROE(%)", "부채비율(%)", "매출증가율(%)", "영업이익증가율(%)"]
-
-    def cell(text):
-        return [{"type": "text", "text": {"content": str(text)}}]
-
-    rows = [{"type": "table_row", "table_row": {"cells": [cell(c) for c in col_labels]}}]
-
-    for _, row in reco_kor.iterrows():
-        try:
-            def _v(val):
-                """None / NaN 모두 None으로 통일"""
-                try:
-                    return None if (val is None or pd.isna(val)) else val
-                except Exception:
-                    return None
-
-            per_val  = _v(row.get("PER", None))
-            pbr_val  = _v(row.get("PBR", None))
-            roe_val  = _v(row.get("ROE(%)", None))
-            debt_val = _v(row.get("부채비율(%)", None))
-            rev_val  = _v(row.get("매출증가율(%)", None))
-            op_val   = _v(row.get("영업이익증가율(%)", None))
-            sector_val = row.get("섹터")
-            rows.append({"type": "table_row", "table_row": {"cells": [
-                cell(int(row.get("랭킹", ""))),
-                cell(fmt_rank_change(row.get("순위변동"))),
-                cell(fmt_pct(row.get("당일등락(%)"))),
-                cell(row.get("종목코드", "")),
-                cell(row.get("종목명", "")),
-                cell(sector_val if (sector_val and not pd.isna(sector_val)) else "-"),
-                cell("✅" if row.get("정배열") else "-"),
-                cell(f"{float(row.get('멀티팩터점수', 0)):.3f}"),
-                cell(f"{float(row.get('수급강화점수', 0)):.3f}"),
-                cell(f"{int(row.get('시가총액', 0)):,}"),
-                cell(f"{float(row.get('외국인_순매수대금(백만원)', 0)):,.0f}"),
-                cell(f"{float(row.get('기관_순매수대금(백만원)', 0)):,.0f}"),
-                cell(f"{float(per_val):.1f}"  if per_val  is not None else "-"),
-                cell(f"{float(pbr_val):.2f}"  if pbr_val  is not None else "-"),
-                cell(f"{float(roe_val):.1f}"  if roe_val  is not None else "-"),
-                cell(f"{float(debt_val):.1f}" if debt_val is not None else "-"),
-                cell(f"{float(rev_val):.1f}"  if rev_val  is not None else "-"),
-                cell(f"{float(op_val):.1f}"   if op_val   is not None else "-"),
-            ]}})
-        except Exception:
+def kosdaq_debt_ranks(all_df: pd.DataFrame) -> dict:
+    """all_df(섹터·부채비율) → code별 동일섹터 내 부채 순위(1=최저부채). 절대수치 판정 없이 상대위치."""
+    d = all_df.dropna(subset=["debt_ratio", "industry"]).copy()
+    out = {}
+    for sec, g in d.groupby("industry"):
+        nn = len(g)
+        if nn < 4:
             continue
+        g = g.assign(rk=g["debt_ratio"].rank(method="min"))   # 1 = 섹터 내 최저 부채
+        for _, x in g.iterrows():
+            pos = x["rk"] / nn
+            band = "저부채 그룹" if pos <= 1/3 else ("고부채 그룹" if pos > 2/3 else "중간")
+            out[x["code"]] = {"debt": float(x["debt_ratio"]), "rank": int(x["rk"]), "n": nn, "band": band}
+    return out
 
-    date_parent_id = _get_or_create_date_page(today_str, headers, NOTION_PARENT_PAGE_ID)
 
-    children = [
-        {"object": "block", "type": "heading_3",
-         "heading_3": {"rich_text": [{"type": "text", "text": {"content": "🏆 팩터 기여도 TOP10"}}]}},
-        {"object": "block", "type": "callout",
-         "callout": {
-             "rich_text": [{"type": "text", "text": {"content":
-                 "막대 = 점수 기여도 (가중 z-score, 길수록 그 팩터가 점수를 끌어올림).\n"
-                 "· 수급 (0.20): 외국인·기관 순매수 모멘텀\n"
-                 "· 밸류 (0.30): 저평가 — PER·PBR 낮을수록↑ (1/PER + 1/PBR)\n"
-                 "· 수익성 (0.25): ROE 높을수록↑\n"
-                 "· 성장 (0.15): 매출·영업이익 증가율\n"
-                 "· 안정 (0.10): 재무 안정성 — 부채비율 낮을수록↑\n"
-                 "💬 종목 설명은 AI 추정 — 부정확할 수 있으니 참고용"}}],
-             "icon": {"type": "emoji", "emoji": "ℹ️"},
-             "color": "gray_background"}},
-    ]
-    desc_map = describe_stocks(reco_kor)
-    for rank, (_, row) in enumerate(reco_kor.head(10).iterrows(), 1):
-        children.append(_factor_card(rank, row, desc_map.get(row.get("종목코드", ""), "")))
+def _gemini_full_fund(c, r, ebitda=None, drank=None):
+    """펀더 종목 7섹션 심층분석. 분기 숫자는 표로 별도 → prose엔 나열 금지. 수급·모멘텀 미포함."""
+    code = r["code"]
+    per, roe, pbr = r.get("per"), r.get("roe"), r.get("pbr")
+    per_str = f"PER {per:.1f}" if (per and per > 0) else "PER 적자/-"
+    pbr_str = f"PBR {pbr:.1f}" if (pbr and pbr > 0) else "PBR -"
+    roe_str = f"ROE {roe:.1f}%" if (roe is not None and not pd.isna(roe)) else "ROE -"
+    if drank:
+        debt_str = (f"부채비율 {drank['debt']:.0f}%(동일섹터 {drank['n']}개 중 부채 낮은순 "
+                    f"{drank['rank']}위·{drank['band']})")
+    elif r.get("debt_ratio") is not None and not pd.isna(r.get("debt_ratio")):
+        debt_str = f"부채비율 {r['debt_ratio']:.0f}%(섹터순위 미산출)"
+    else:
+        debt_str = "부채비율 미제공"
+    eb = ebitda or {}
+    cf_parts = []
+    if eb.get("ebitda") is not None:
+        cf_parts.append(f"최근4분기 EBITDA {eb['ebitda']:,.0f}억")
+    if eb.get("ev_ebitda") is not None:
+        cf_parts.append(f"EV/EBITDA {eb['ev_ebitda']:.1f}배")
+    cf_str = ("현금흐름 " + "·".join(cf_parts)) if cf_parts else "현금흐름(EBITDA) 미제공"
+    stat = (f"{r['name']}({code}, {r.get('industry', '-')}): {per_str}·{pbr_str}·{roe_str}, "
+            f"{debt_str}, {cf_str}")
+    prompt = (
+        "너는 한국 코스닥 종목 애널리스트다. 최근 뉴스·공시·실적을 광범위하게 검색해 아래 종목의 '펀더멘탈 심층 분석'을 작성하라.\n"
+        f"데이터: {stat}\n\n"
+        "이 종목은 '이익수익률(저PER)·ROE·저부채' 펀더 점수로 선정됐다(가격모멘텀·수급 미반영).\n"
+        "규칙:\n"
+        "- 밸류 수치는 위 제공된 PER/PBR/ROE/부채(섹터순위)/EBITDA만 사용(웹의 다른 수치 인용 금지). 없으면 '미제공'.\n"
+        "- 부채비율은 절대수치로 단정 말고 반드시 '동일 섹터 내 순위'로 해석(동종 대비 레버리지 부담/여력).\n"
+        "- 문체: 자연스러운 완결 문장. 개조식·가운뎃점 나열 금지.\n"
+        "- ⚠️ 분기 매출·영업이익 수치는 표로 따로 보여주므로 prose엔 숫자 나열 말고 의미·방향만.\n"
+        "- 각 섹션 3~6문장, 실제 사실·뉴스·공시 근거. 모르면 '확인 안 됨'.\n"
+        "아래 라벨 형식으로만 출력:\n"
+        "이슈: <핵심 키워드 3개 ·로 연결, 40자내>\n"
+        "요약: <펀더 투자포인트 thesis 2~3문장>\n"
+        "사업실적: <사업 개요 + 최근 실적의 의미·방향(숫자 나열 금지) 3~5문장>\n"
+        "촉매: <실적·정책·공시·뉴스 등 펀더 재평가 요인 시간순 3~5문장>\n"
+        "밸류: <① 저PER(이익수익률)의 적정성 ② ROE 수익성 ③ 부채비율을 '동일섹터 내 순위'로 해석(절대수치 판정 금지) ④ EBITDA(최근4분기 합산=TTM, 비금융만)로 현금흐름. 단 은행·보험·증권은 EBITDA 비표준이라 생략 → ROE·자본적정성으로 대체. 동종 대비 적정성 4~6문장>\n"
+        "강세론: <펀더 재평가/실적 개선 시나리오 근거 3~4문장>\n"
+        "리스크: <구체적 하방 리스크 3~5문장. 특히 2025형 저가잡주 랠리 시 소외·실적 둔화 우려>\n"
+        "관전: <실적발표일·정책·지표 체크포인트 3~4문장>\n"
+        "추정: <다음 분기 매출·영업이익 증권사 컨센서스 방향을 ▲상향/▼하향/→유지 중 하나로 시작 + 근거 1문장. 못 찾으면 '컨센서스 미확인'>")
+    resp = c.models.generate_content(model="gemini-2.5-flash", contents=prompt,
+        config={"tools": [{"google_search": {}}], "thinking_config": {"thinking_budget": 0}, "max_output_tokens": 12000})
+    d = {k: "" for k in FUND_KEYS}; d["추정"] = ""; cur = None
+    for line in (resp.text or "").splitlines():
+        s = line.strip()
+        m = re.match(r"^\**\s*(이슈|요약|사업실적|촉매|밸류|강세론|리스크|관전|추정)\s*[:：]\s*(.*)", s)
+        if m:
+            cur = "issue" if m.group(1) == "이슈" else m.group(1); d[cur] = m.group(2).strip()
+        elif cur and s:
+            d[cur] += " " + s
+    d["issue"] = _trim_phrase(d["issue"]) if _is_clean(_trim_phrase(d["issue"])) else ""
+    for k in FUND_KEYS[1:] + ["추정"]:
+        d[k] = d[k].strip().strip("'\"")
+    return d
 
-    children.append({"object": "block", "type": "divider", "divider": {}})
-    children.append({"object": "block", "type": "heading_3",
-        "heading_3": {"rich_text": [{"type": "text", "text": {"content": f"📋 전체 TOP{len(reco_kor)} 상세"}}]}})
-    children.append({
-        "object": "block", "type": "table",
-        "table": {
-            "table_width": len(col_labels),
-            "has_column_header": True,
-            "has_row_header": False,
-            "children": rows,
-        },
-    })
 
-    body = {
-        "parent": {"page_id": date_parent_id},
-        "properties": {"title": {"title": [{"text": {"content": f"🇰🇷 {today_str} KOSDAQ 추천종목"}}]}},
-        "children": children,
-    }
+def gemini_analyze_fund(top, ebitdas, dranks, cache):
+    """캐시 인식: 재등장(7일내) 종목은 7섹션 재사용 + 오늘 업데이트만 호출. 신규/묵은건 전체분석."""
+    from google import genai
+    c = genai.Client(api_key=GEMINI_API_KEY)
+    today = datetime.now(KST); out = {}
+    for _, r in top.iterrows():
+        code = r["code"]
+        cached = cache.get(code); fresh = False
+        if cached and cached.get("date"):
+            try:
+                fresh = (today - datetime.strptime(cached["date"], "%Y-%m-%d").replace(tzinfo=KST)).days <= 7
+            except Exception:
+                fresh = False
+        try:
+            if fresh:
+                a = {k: cached.get(k, "") for k in FUND_KEYS}
+                u = _gemini_update(c, r["name"], code, cached.get("요약", ""))
+                a["업데이트"], a["추정"] = u["업데이트"], u["추정"]
+                log(f"  {r['name']}: 캐시 재사용 + 업데이트")
+            else:
+                a = _gemini_full_fund(c, r, ebitdas.get(code), dranks.get(code)); a["업데이트"] = ""
+                log(f"  {r['name']}: 전체 분석")
+        except Exception as e:
+            log(f"  Gemini {code} 실패: {str(e)[:80]}")
+            a = (cached or {k: "" for k in FUND_KEYS}); a.setdefault("업데이트", "")
+        a["date"] = today.strftime("%Y-%m-%d")
+        out[code] = a; cache[code] = a
+    return out
 
-    # 동일 제목 페이지 있으면 archive (중복 방지)
-    _archive_same_title_pages(f"🇰🇷 {today_str} KOSDAQ 추천종목", headers, date_parent_id)
 
+# ==========================
+# Notion 레포트 (모멘텀 레포트와 동일 형식 — 토글 펼치면 상세분석)
+# ==========================
+SCREENER_WARN = (
+    "이건 '사서 이긴다' 리스트가 아니라 하위회피 스크리너입니다. "
+    "백테스트(2026): 코스닥 펀더 롱온리 5종목은 등가중 벤치에 짐(누적 +4% vs 벤치 +43%). "
+    "알파는 저품질·고PER·고부채 '회피'에 있음 — 정상 레짐 롱숏은 +3~5%p/반기지만 2025형 잡주랠리엔 역행. "
+    "→ '안 살 종목 거르는' 용도로 보세요.")
+
+DISCLAIMER = (
+    "📊 선정: 시총 상위 200  →  펀더 점수(이익수익률 + ROE + 저부채) 상위 10\n"
+    "📈 백테(2023~26): 정상레짐 롱숏 +3~5%p/반기 · 7개 반기 중 5개 + · 생존편향(상폐 누락)으로 절대수익 과대\n"
+    "ℹ️ 수급·가격모멘텀 미반영(코스닥은 모멘텀 IC 음수 — 코스피와 정반대) · 종목 '이슈'는 AI 검색 추정(확정 아님) · 투자판단 보조용")
+
+METHOD = (
+    "🧮 이 리포트는 어떻게 만들어지나 — 시총 필터 + 펀더 점수(slim3)\n\n"
+    "[1단계] 시가총액 상위 200\n"
+    "코스닥 전 종목 중 시총 상위 200개만 후보로 둡니다. 거래가 얇은 부실 마이크로캡·잡주를 1차로 거르는 관문입니다.\n\n"
+    "[2단계] 펀더멘탈 점수 (slim3)\n"
+    "이익수익률(1/PER) + ROE + 저부채(낮은 부채비율), 세 지표를 그날 200종목과 비교해 표준화(Z-score)한 뒤 동일가중 합산합니다.\n"
+    "　· 이익수익률: 이익 대비 주가가 쌀수록(저PER) ↑\n"
+    "　· ROE: 자기자본 대비 이익이 클수록 ↑ (±40% 윈저로 자본잠식 왜곡 차단)\n"
+    "　· 저부채: 부채비율이 낮을수록 ↑\n"
+    "　매출성장·PBR·수급은 백테스트에서 노이즈/부호반전이라 뺐습니다.\n\n"
+    "[왜 펀더인가] 코스닥은 가격 모멘텀이 안 먹힙니다(IC 7개 반기 전부 음수 — 코스피와 정반대). "
+    "반면 이 세 펀더 지표는 정상 레짐에서 롱숏 +3~5%p/반기로 유효했습니다.\n\n"
+    "[한계] 롱온리 5~10종목으론 등가중 벤치를 못 이깁니다. 알파는 '하위(저품질·고PER·고부채) 회피'에 있으니, "
+    "이 리스트는 매수 확신보다 '거를 종목 판별'용으로 보세요. 2025형 저가잡주 랠리엔 역행합니다.\n\n"
+    "🔁 점수·순위는 매일 갱신되며 5일 EMA로 평탄화하고, 종목별 '전일 대비 변화'를 함께 표기합니다.")
+
+
+def _delta_line(dl):
+    """전일 대비 변화 한 줄."""
+    if not dl:
+        return ""
+    if dl.get("new"):
+        return "📌 전일대비: 신규 진입 (어제 추천 밖)"
+    parts = []
+    rp = dl.get("rank_prev")
+    if rp is not None:
+        parts.append(f"순위 {rp}위 유지" if rp == dl.get("_rank") else f"어제 {rp}위")
+    if dl.get("score_prev") is not None and dl.get("_score") is not None:
+        parts.append(f"점수 {dl['score_prev']:.2f}→{dl['_score']:.2f}")
+    return ("📌 전일대비: " + " · ".join(parts)) if parts else ""
+
+
+def _fnum(v, fmt, dash="—"):
     try:
-        r = requests.post("https://api.notion.com/v1/pages", headers=headers, json=body, timeout=15)
-        if r.status_code == 200:
-            log(f"✅ Notion 업로드 완료: {r.json().get('url', '')}")
-        else:
-            log(f"❌ Notion 업로드 실패 ({r.status_code}): {r.text[:300]}")
-    except Exception as e:
-        log(f"❌ Notion 요청 오류: {e}")
+        return fmt.format(float(v)) if (v is not None and not pd.isna(v)) else dash
+    except Exception:
+        return dash
+
+
+def _stock_toggle_fund(rank, r, a, ebitda=None, drank=None, dl=None):
+    """종목 1개 = 접이식 토글. 제목줄=펀더 요약지표, 펼치면 점수분해 + 7섹션 + 분기표."""
+    icon = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, "📈")
+    sec = r.get("industry") if pd.notna(r.get("industry")) else "-"
+    per_s, pbr_s = _fnum(r.get("per"), "{:.1f}"), _fnum(r.get("pbr"), "{:.1f}")
+    roe_s, debt_s = _fnum(r.get("roe"), "{:.0f}"), _fnum(r.get("debt_ratio"), "{:.0f}")
+    price = r.get("price")
+    price_s = f"{int(price):,}원" if (price and not pd.isna(price)) else "—"
+    chg = r.get("prdy_ctrt") or 0
+    chg_color = "red" if chg > 0 else ("blue" if chg < 0 else "gray")   # 상승 빨강·하락 파랑(국내 관습)
+    score = float(r.get("multi_score", 0) or 0)
+
+    def gray(t): return {"type": "text", "text": {"content": t}, "annotations": {"color": "gray"}}
+    title_rich = [
+        {"type": "text", "text": {"content": f"{icon} {rank}. {r['name']} "}, "annotations": {"bold": True}},
+        {"type": "text", "text": {"content": f"{chg:+.1f}% "}, "annotations": {"bold": True, "color": chg_color}},
+        gray(f"({r['code']}) · {sec}  |  펀더 {score:.2f} · PER {per_s} · ROE {roe_s}% · 부채 {debt_s}% · {price_s}")]
+
+    kids = []
+    if dl:
+        dl = {**dl, "_rank": rank, "_score": score}
+        dtxt = _delta_line(dl)
+        if dtxt:
+            kids.append(_para([{"type": "text", "text": {"content": dtxt},
+                                "annotations": {"bold": True, "color": "blue"}}]))
+    if a.get("업데이트"):
+        kids.append(_para([
+            {"type": "text", "text": {"content": "🆕 오늘 업데이트  "}, "annotations": {"bold": True, "color": "green"}},
+            {"type": "text", "text": {"content": a["업데이트"]}}]))
+    # 펀더 점수 분해 (막대 대신 텍스트 — 무엇이 점수를 끌어올렸나)
+    drk = f" (섹터 부채 낮은순 {drank['rank']}/{drank['n']}위·{drank['band']})" if drank else ""
+    fline = (f"🏢 PER {per_s} · PBR {pbr_s} · ROE {roe_s}% · 부채 {debt_s}%{drk}\n"
+             f"🧮 펀더 {score:.2f} = 이익수익률 {float(r.get('f_ey', 0)):+.2f} · "
+             f"ROE {float(r.get('f_roe', 0)):+.2f} · 저부채 {float(r.get('f_lowdebt', 0)):+.2f}")
+    if a.get("issue"):
+        fline += f"\n📰 이슈 — {a['issue']}"
+    kids.append(_para([gray(fline)]))
+    for label, key in FUND_SECTIONS:
+        v = (a.get(key) or "").strip()
+        if v:
+            kids.append(_para([
+                {"type": "text", "text": {"content": f"{label}\n"}, "annotations": {"bold": True}},
+                {"type": "text", "text": {"content": v[:1900]}}]))
+    return {"object": "block", "type": "toggle", "toggle": {
+        "rich_text": title_rich,
+        "color": "blue_background" if rank <= 3 else "default",
+        "children": kids}}
+
+
+def upload_notion_fund(top, analysis, ebitdas, dranks, deltas, newly, dropped, incomes, today_str):
+    """Notion 업로드(모멘텀 레포트와 동일 흐름): 헤더 생성 → 종목별 토글 append → 토글 안 분기표·추정 append."""
+    analysis = analysis or {}; ebitdas = ebitdas or {}; dranks = dranks or {}; deltas = deltas or {}; incomes = incomes or {}
+    headers = {"Authorization": f"Bearer {NOTION_API_KEY}",
+               "Content-Type": "application/json", "Notion-Version": "2022-06-28"}
+    title = f"🇰🇷 {today_str} KOSDAQ 펀더 추천 (저PER·고ROE·저부채)"
+
+    header = [
+        {"object": "block", "type": "callout", "callout": {
+            "rich_text": [{"type": "text", "text": {"content": SCREENER_WARN}, "annotations": {"bold": True}}],
+            "icon": {"type": "emoji", "emoji": "⚠️"}, "color": "orange_background"}},
+        {"object": "block", "type": "callout", "callout": {
+            "rich_text": [{"type": "text", "text": {"content": DISCLAIMER}}],
+            "icon": {"type": "emoji", "emoji": "📐"}, "color": "yellow_background"}},
+        {"object": "block", "type": "toggle", "toggle": {
+            "rich_text": [{"type": "text", "text": {"content": "🧮 산출 방법 — 펼쳐 보기 (시총 필터 + 펀더 점수)"},
+                           "annotations": {"bold": True, "color": "gray"}}],
+            "children": [_para([{"type": "text", "text": {"content": METHOD}, "annotations": {"color": "gray"}}])]}},
+    ]
+    if newly or dropped:
+        chg = []
+        if newly:
+            chg.append(f"🆕 신규 진입: {', '.join(newly)}")
+        if dropped:
+            chg.append(f"📉 이탈: {', '.join(dropped)}")
+        header.append({"object": "block", "type": "callout", "callout": {
+            "rich_text": [{"type": "text", "text": {"content": "어제 대비  " + "   ·   ".join(chg)}}],
+            "icon": {"type": "emoji", "emoji": "📌"}, "color": "blue_background"}})
+    header.append({"object": "block", "type": "heading_3",
+                   "heading_3": {"rich_text": [{"type": "text", "text": {"content": "🏆 상위 10 — 종목을 펼치면 상세 분석"}}]}})
+
+    date_parent = _get_or_create_date_page(today_str, headers, NOTION_PARENT_PAGE_ID)
+    _archive_same_title_pages(title, headers, date_parent)
+    _archive_same_title_pages(f"🇰🇷 {today_str} KOSDAQ 추천종목", headers, date_parent)   # 옛 포맷 페이지 정리
+
+    r0 = None
+    for attempt in range(3):
+        try:
+            r0 = requests.post("https://api.notion.com/v1/pages", headers=headers, timeout=30,
+                               json={"parent": {"page_id": date_parent},
+                                     "properties": {"title": {"title": [{"text": {"content": title}}]}},
+                                     "children": header})
+            if r0.status_code == 200:
+                break
+            log(f"  ⚠️ 페이지 생성 {r0.status_code} ({attempt+1}/3): {r0.text[:150]}")
+        except Exception as e:
+            log(f"  ⚠️ 페이지 생성 예외({attempt+1}/3): {str(e)[:120]}")
+        time.sleep(2 * (attempt + 1))
+    if r0 is None or r0.status_code != 200:
+        log("❌ Notion 페이지 생성 최종 실패"); return
+    page_id = r0.json()["id"]; page_url = r0.json().get("url", "")
+
+    def append(block_id, blocks):
+        for attempt in range(3):    # 일시 timeout·5xx·429 재시도 — 1종목 실패가 전체 중단 막음
+            try:
+                rr = requests.patch(f"https://api.notion.com/v1/blocks/{block_id}/children",
+                                    headers=headers, json={"children": blocks}, timeout=30)
+                time.sleep(0.35)
+                if rr.status_code == 200:
+                    return rr.json().get("results", [])
+                log(f"  ⚠️ append {rr.status_code} ({attempt+1}/3): {rr.text[:120]}")
+                if rr.status_code < 500 and rr.status_code != 429:
+                    return None
+            except Exception as e:
+                log(f"  ⚠️ append 예외({attempt+1}/3): {str(e)[:120]}")
+            time.sleep(2 * (attempt + 1))
+        return None
+
+    for rank, (_, r) in enumerate(top.head(10).iterrows(), 1):
+        tog = _stock_toggle_fund(rank, r, analysis.get(r["code"], {}),
+                                 ebitdas.get(r["code"]), dranks.get(r["code"]), deltas.get(r["code"]))
+        res = append(page_id, [tog])
+        if not res:
+            continue
+        tid = res[0]["id"]
+        a = analysis.get(r["code"], {})
+        extra = []
+        qt = _quarter_table(incomes.get(r["code"]))
+        if qt:
+            extra.append(_para([{"type": "text", "text": {"content": "📊 분기 실적 추이 (단일분기)"}, "annotations": {"bold": True}}]))
+            extra.append(qt)
+        if a.get("추정"):
+            extra.append(_para([{"type": "text", "text": {"content": "📈 다음 분기 컨센서스  "}, "annotations": {"bold": True}},
+                                {"type": "text", "text": {"content": a["추정"]}}]))
+        if extra:
+            append(tid, extra)
+    log(f"✅ Notion 업로드 완료: {page_url}")
 
 
 # ==========================
@@ -919,72 +996,19 @@ def main():
     log(f"✅ 로드 완료: 총 {total}개 (코스닥)")
 
     # ------------------------------------
-    # 1) 수급 점수 계산 (병렬)
-    # ------------------------------------
-    log(f"▶ 수급(30일) 조회 + 점수 계산 시작 (workers={WORKERS_NETFLOW})")
-    start_time = time.time()
-    score_rows = []
-
-    def nf_worker(row):
-        code = row["단축코드"]
-        name = row.get("한글명", "")
-        df_nf = get_netflow_history(code, access_token)
-        if df_nf.empty:
-            return None
-        return compute_strength_score(code, name, df_nf)
-
-    with ThreadPoolExecutor(max_workers=WORKERS_NETFLOW) as ex:
-        futures = {
-            ex.submit(nf_worker, row): idx
-            for idx, (_, row) in enumerate(base_df.iterrows())
-        }
-        for cnt, future in enumerate(as_completed(futures), start=1):
-            res = future.result()
-            if res is not None:
-                score_rows.append(res)
-
-            # 진행률 로그(요구 포맷 유지)
-            elapsed = time.time() - start_time
-            speed = cnt / elapsed if elapsed > 0 else 0
-            remaining = (total - cnt) / speed if speed > 0 else 0
-            pct = cnt / total * 100
-
-            print(
-                f"[{cnt}/{total} | {pct:5.2f}%] "
-                f"경과 {elapsed:6.1f}s | 남은 {remaining:6.1f}s | "
-                f"속도 {speed:4.2f} 종목/s"
-            )
-
-    if not score_rows:
-        log("❌ 수급 점수 데이터가 없습니다. 종료합니다.")
-        return
-
-    score_df = pd.DataFrame(score_rows)
-    # 전체 종목: 점수 내림차순 + 랭킹
-    score_df.sort_values("strength_score", ascending=False, inplace=True)
-    score_df.reset_index(drop=True, inplace=True)
-    score_df["rank"] = np.arange(1, len(score_df) + 1)
-
-    log(f"✅ 수급 점수 계산 완료: 유효 {len(score_df)}개")
-
-    # ------------------------------------
-    # 2) 시가총액 + PER + EPS 조회 (전 종목, 병렬=5)
+    # 1) 시가총액 + PER/EPS/PBR/섹터/등락 조회 (전 종목, 병렬)
+    #    (수급 30일 조회 단계는 slim3 펀더 점수에 불필요 → 제거)
     # ------------------------------------
     log(f"▶ 시가총액 + PER/EPS 조회 시작 (전 종목, workers={WORKERS_MKTCAP})")
     start_cap = time.time()
 
-    caps = [None] * total
-    pers = [None] * total
-    epss = [None] * total
-    pbrs = [None] * total
-    industries = [None] * total
-    prdy_ctrts = [None] * total
+    caps = [None] * total; pers = [None] * total; epss = [None] * total
+    pbrs = [None] * total; industries = [None] * total; prdy_ctrts = [None] * total
     rows = list(base_df.reset_index(drop=True).iterrows())
 
     def cap_worker(pos_and_row):
         pos, row = pos_and_row
-        code = row["단축코드"]
-        mktcap, per, eps, pbr, industry, prdy_ctrt = get_valuation_info(code, access_token)
+        mktcap, per, eps, pbr, industry, prdy_ctrt = get_valuation_info(row["단축코드"], access_token)
         time.sleep(0.15)  # 호출 매너
         return pos, mktcap, per, eps, pbr, industry, prdy_ctrt
 
@@ -992,31 +1016,14 @@ def main():
         futures = {ex.submit(cap_worker, pr): pr[0] for pr in rows}
         for cnt, future in enumerate(as_completed(futures), start=1):
             pos, cap, per, eps, pbr, industry, prdy_ctrt = future.result()
-            caps[pos] = cap
-            pers[pos] = per
-            epss[pos] = eps
-            pbrs[pos] = pbr
-            industries[pos] = industry
-            prdy_ctrts[pos] = prdy_ctrt
-
-            elapsed = time.time() - start_cap
-            speed = cnt / elapsed if elapsed > 0 else 0
-            remaining = (total - cnt) / speed if speed > 0 else 0
-            pct = cnt / total * 100
-
-            print(
-                f"[시총 {cnt}/{total} | {pct:5.2f}%] "
-                f"경과 {elapsed:6.1f}s | 남은 {remaining:6.1f}s | "
-                f"속도 {speed:4.2f} 종목/s"
-            )
+            caps[pos], pers[pos], epss[pos] = cap, per, eps
+            pbrs[pos], industries[pos], prdy_ctrts[pos] = pbr, industry, prdy_ctrt
+            if cnt % 200 == 0 or cnt == total:
+                log(f"  시총 {cnt}/{total} ({time.time()-start_cap:.0f}s)")
 
     cap_df = base_df[["단축코드", "한글명"]].copy()
-    cap_df["market_cap"] = caps
-    cap_df["per"] = pers
-    cap_df["eps"] = epss
-    cap_df["pbr"] = pbrs
-    cap_df["industry"] = industries
-    cap_df["prdy_ctrt"] = prdy_ctrts
+    cap_df["market_cap"] = caps; cap_df["per"] = pers; cap_df["eps"] = epss
+    cap_df["pbr"] = pbrs; cap_df["industry"] = industries; cap_df["prdy_ctrt"] = prdy_ctrts
     cap_df.rename(columns={"단축코드": "code", "한글명": "name"}, inplace=True)
 
     # 시총 결측/0 제거 후 상위 200
@@ -1024,98 +1031,116 @@ def main():
     cap_df = cap_df.dropna(subset=["market_cap"])
     cap_df = cap_df[cap_df["market_cap"] > 0].copy()
     cap_df.sort_values("market_cap", ascending=False, inplace=True)
-    top200 = cap_df.head(TOP_MKTCAP_N)[["code", "market_cap"]].copy()
-
-    log(f"✅ 시가총액 + PER/EPS 조회 완료: 유효 {len(cap_df)}개 / 시총상위200 확보")
-
-    # ------------------------------------
-    # 3) 전체 점수표에 시총/밸류 붙이기 + 추천 N개 뽑기
-    # ------------------------------------
-    all_df = score_df.merge(
-        cap_df[["code", "market_cap", "per", "eps", "pbr", "industry", "prdy_ctrt"]],
-        on="code", how="left",
-    )
+    top200_codes = set(cap_df.head(TOP_MKTCAP_N)["code"])
+    log(f"✅ 시가총액 조회 완료: 유효 {len(cap_df)}개 / 시총상위{TOP_MKTCAP_N} 확보")
 
     # ------------------------------------
-    # 3.5) 재무비율 조회/캐시 + 멀티팩터 점수 계산
+    # 2) 재무비율(ROE/부채) 붙이기 — 전 종목 (캐시 공유)
     # ------------------------------------
-    fin_df = load_or_fetch_fin_ratios(all_df["code"].tolist(), access_token)
-    all_df = all_df.merge(fin_df, on="code", how="left")
+    fin_df = load_or_fetch_fin_ratios(cap_df["code"].tolist(), access_token)
+    all_df = cap_df.merge(fin_df, on="code", how="left")
 
-    all_df["raw_score"] = compute_multifactor_score(all_df)
-    log("✅ 멀티팩터 raw 점수 계산 완료 (섹터 중립화 적용)")
+    # ------------------------------------
+    # 3) slim3 펀더 점수 (시총상위200 단면 z) + EMA 평탄화 + 추천 TOP_RECO_N
+    # ------------------------------------
+    uni_df = all_df[all_df["code"].isin(top200_codes)].copy()
+    uni_df["raw_score"] = compute_slim3_score(uni_df)
+    log("✅ slim3 펀더 점수 계산 완료 (이익수익률 + ROE + 저부채, 시총상위200 단면)")
 
-    # 5일 EMA 평탄화 (이력 누적, 단일 시점 노이즈 완화)
     today_dt = datetime.now(KST)
-    smoothed, history_updated = smooth_with_ema(all_df, today_dt)
-    all_df["multi_score"] = all_df["code"].map(smoothed).fillna(all_df["raw_score"])
+    smoothed, history_updated = smooth_with_ema(uni_df, today_dt)
+    uni_df["multi_score"] = uni_df["code"].map(smoothed).fillna(uni_df["raw_score"])
     history_updated.to_csv(KOSDAQ_SCORE_HISTORY, index=False)
-    n_days = history_updated["date"].nunique()
-    log(f"✅ EMA 평탄화 (span={EMA_SPAN}일, 누적 이력 {n_days}일치)")
+    log(f"✅ EMA 평탄화 (span={EMA_SPAN}일, 누적 이력 {history_updated['date'].nunique()}일치)")
 
-    # 어제 대비 순위 변동
     rank_changes = compute_rank_change(history_updated)
-
-    # 추천: 시총 상위 200 유니버스에 포함되는 종목 중 점수 상위 TOP_RECO_N
-    uni_df = all_df.merge(top200[["code"]], on="code", how="inner").copy()
     uni_df.sort_values("multi_score", ascending=False, inplace=True)
     uni_df.reset_index(drop=True, inplace=True)
     uni_df["rank"] = np.arange(1, len(uni_df) + 1)
     reco_df = uni_df.head(TOP_RECO_N).copy()
     reco_df["rank_change"] = reco_df["code"].map(rank_changes)
-
-    log(f"✅ 추천 유니버스(시총상위200) 내 유효 종목: {len(uni_df)}개")
-    log(f"✅ 추천 종목(상위 {TOP_RECO_N}) 생성 완료")
-
-    # ------------------------------------
-    # 3.7) 정배열 확인 (추천 30종목만)
-    # ------------------------------------
-    log("▶ 이동평균선 정배열 확인 시작")
-    jb_map = {}
-    for _, r in reco_df.iterrows():
-        prices = get_daily_prices(r["code"], access_token)
-        jb_map[r["code"]] = is_jeong_baeyeol(prices)
-        time.sleep(0.2)
-    reco_df = reco_df.copy()
-    reco_df["jeong_baeyeol"] = reco_df["code"].map(jb_map)
-    jb_count = sum(jb_map.values())
-    log(f"✅ 정배열 확인 완료: {jb_count}/{TOP_RECO_N}종목")
+    today_str = today_dt.strftime("%Y-%m-%d")
+    log(f"✅ 추천 종목(시총상위200 내 펀더 상위 {TOP_RECO_N}) 생성 완료")
 
     # ------------------------------------
-    # 4) 엑셀 저장 규칙
+    # 4) 전일 대비 신규 진입 / 이탈 (추천 이력 비교)
     # ------------------------------------
-    today_str = datetime.now(KST).strftime("%Y-%m-%d")
+    reco_hist_path = os.path.join(_BASE_DIR, "kosdaq_reco_history.csv")
+    rhist = pd.read_csv(reco_hist_path, dtype={"code": str}) if os.path.exists(reco_hist_path) else pd.DataFrame()
+    deltas, prev_names = {}, {}
+    if len(rhist):
+        rhist["code"] = rhist["code"].str.zfill(6)
+        prev_dates = sorted(d for d in rhist["date"].unique() if d < today_str)
+        if prev_dates:
+            pv = rhist[rhist["date"] == prev_dates[-1]]
+            prev_names = dict(zip(pv["code"], pv["name"]))
+            pmap = pv.set_index("code")[["rank", "multi_score"]].to_dict("index")
+            for _, r in reco_df.iterrows():
+                p = pmap.get(r["code"])
+                deltas[r["code"]] = ({"rank_prev": int(p["rank"]), "score_prev": float(p["multi_score"])}
+                                     if p else {"new": True})
+    today_codes = set(reco_df["code"])
+    newly = [r["name"] for _, r in reco_df.iterrows() if deltas.get(r["code"], {}).get("new")]
+    dropped = [prev_names[c] for c in prev_names if c not in today_codes]
+    # 이력 갱신 (오늘 행 교체 + 60일 보관)
+    snap = reco_df[["code", "name", "rank", "multi_score"]].copy(); snap.insert(0, "date", today_str)
+    rhist = pd.concat([rhist[rhist["date"] != today_str] if len(rhist) else rhist, snap], ignore_index=True)
+    rhist = rhist[rhist["date"] >= (today_dt - timedelta(days=HISTORY_RETAIN_D)).strftime("%Y-%m-%d")]
+    rhist.to_csv(reco_hist_path, index=False, encoding="utf-8-sig")
+
+    # ------------------------------------
+    # 5) 상위 10 enrich: 현재가 · 분기실적 · EBITDA · 섹터 부채순위 + Gemini 심층분석
+    # ------------------------------------
+    top10 = reco_df.head(10).copy()
+    log("▶ 상위10 현재가·분기실적·EBITDA 수집")
+    prices, incomes, ebitdas = {}, {}, {}
+    for code in top10["code"]:
+        px = get_daily_prices(code, access_token)
+        prices[code] = px[-1] if px else None
+        incomes[code] = fetch_income(code, access_token)
+        ebitdas[code] = fetch_ebitda(code, access_token)
+        time.sleep(0.15)
+    reco_df["price"] = reco_df["code"].map(prices)
+    top10["price"] = top10["code"].map(prices)
+    dranks = kosdaq_debt_ranks(all_df)
+
+    cache = {}
+    if os.path.exists(KOSDAQ_ANALYSIS_CACHE):
+        try:
+            cache = json.load(open(KOSDAQ_ANALYSIS_CACHE, encoding="utf-8"))
+        except Exception:
+            cache = {}
+    analysis = gemini_analyze_fund(top10, ebitdas, dranks, cache) if GEMINI_API_KEY else {}
+    if analysis:
+        json.dump(cache, open(KOSDAQ_ANALYSIS_CACHE, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+
+    # ------------------------------------
+    # 6) 엑셀 + latest_kosdaq.csv 저장 (다운스트림용 — 컬럼 유지)
+    # ------------------------------------
     output_file = os.path.join(OUTPUT_DIR, f"{today_str}_코스닥퀀트데이터.xlsx")
-
-    # 시트: 전체 종목 / 추천 종목
-    all_kor = to_korean_columns(all_df.sort_values("multi_score", ascending=False).reset_index(drop=True))
-    all_kor["랭킹"] = np.arange(1, len(all_kor) + 1)  # 한국어 컬럼명과 별개로 확실히
-    all_kor.drop(columns=["rank"], inplace=True, errors="ignore")
-
+    all_kor = to_korean_columns(all_df.sort_values("market_cap", ascending=False).reset_index(drop=True))
     reco_kor = to_korean_columns(reco_df)
     reco_kor["랭킹"] = np.arange(1, len(reco_kor) + 1)
     reco_kor.drop(columns=["rank"], inplace=True, errors="ignore")
-
     log("▶ 엑셀 저장 시작")
     with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
         all_kor.to_excel(writer, index=False, sheet_name="전체 종목")
         reco_kor.to_excel(writer, index=False, sheet_name="추천 종목")
-
     log(f"🎉 엑셀 저장 완료: {output_file}")
 
-    # ------------------------------------
-    # 4.5) latest_kosdaq.csv 저장 (AI 조회용, 코스피와 별도)
-    # ------------------------------------
     csv_path = os.path.join(_BASE_DIR, "latest_kosdaq.csv")
     all_kor["기준일자"] = today_str
     all_kor.to_csv(csv_path, index=False, encoding="utf-8-sig")
     log(f"✅ latest_kosdaq.csv 저장: {csv_path}")
 
     # ------------------------------------
-    # 5) Notion 업로드
+    # 7) Notion 업로드 (모멘텀 레포트와 동일 형식)
     # ------------------------------------
-    log("▶ Notion 업로드 시작")
-    upload_to_notion(reco_kor)
+    if NOTION_API_KEY:
+        log("▶ Notion 업로드 시작")
+        upload_notion_fund(top10, analysis, ebitdas, dranks, deltas, newly, dropped, incomes, today_str)
+    else:
+        log("NOTION_API_KEY 없음 → Notion 업로드 생략 (로컬). Actions 에선 업로드됨")
 
 if __name__ == "__main__":
     main()
