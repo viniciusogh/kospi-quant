@@ -147,34 +147,14 @@ def _is_my_callout(b):
     return bool(rt) and rt[0].get("plain_text", "").startswith(SENTINEL)
 
 
-def pick_report_page(key, date_str):
-    """리포트들이 달린 진짜 일별 페이지 선택. ⚠️ row 아카이브/삭제 절대 안 함(2026-06-24 사고 재발방지).
-    여러 row 면 child_page 자식이 가장 많은 row = 실제 리포트 페이지. row 없으면 '준비 중' 생성(daily flow 공유)."""
-    rows = query_today_rows(key, date_str)
-    log(f"  오늘({date_str}) DB row {len(rows)}개: {[_row_title(x) for x in rows]}")
-    if not rows:
-        db_id = os.environ["NOTION_DAILY_DB_ID"]
-        r = _nreq("POST", "https://api.notion.com/v1/pages", headers=nheaders(key),
-                  json={"parent": {"database_id": db_id},
-                        "properties": {"이름": {"title": [{"text": {"content": "준비 중"}}]},
-                                       "날짜": {"date": {"start": date_str}}}})
-        return r.json()["id"]
-    best, best_n = rows[0], -1
-    for row in rows:
-        n = sum(1 for c in list_children(key, row["id"]) if c.get("type") == "child_page")
-        if n > best_n:
-            best, best_n = row, n
-    if len(rows) > 1:
-        log(f"  ⚠️ row 여러개 — 자식 {best_n}개인 '{_row_title(best)}' 선택(나머지는 안 건드림)")
-    return best["id"]
-
-
 def cleanup_my_extras(key, page_id):
-    """내가 과거에 잘못 넣은 잔재만 surgical 제거: '📈 지수 현황' child page + 차트 이미지 블록.
+    """내 잔재만 제거: 차트 이미지 + '📈 지수 현황' child page + 지수 콜아웃.
     리포트(다른 제목 child_page)·다른 블록은 절대 안 건드림."""
     for b in list_children(key, page_id):
         t = b.get("type")
-        if (t == "child_page" and b["child_page"].get("title") == SENTINEL) or t == "image":
+        mine = (t == "child_page" and b["child_page"].get("title") == SENTINEL) or t == "image" \
+            or _is_my_callout(b)
+        if mine:
             try:
                 _nreq("DELETE", f"https://api.notion.com/v1/blocks/{b['id']}", headers=nheaders(key))
                 log(f"  🧹 잔재 제거({t}): {b['id']}")
@@ -183,28 +163,41 @@ def cleanup_my_extras(key, page_id):
                 log(f"  ⚠️ 잔재 제거 실패: {e}")
 
 
-def upsert_callout(key, page_id, lines, asof):
-    """지수 콜아웃을 제자리 갱신(있으면 PATCH, 없으면 append). 차트·페이지 생성 없음."""
+def append_callout(key, page_id, lines, asof):
     rich = [{"type": "text", "text": {"content": f"{SENTINEL} · {asof} KST 기준\n"},
              "annotations": {"bold": True}},
             {"type": "text", "text": {"content": "\n".join(lines)}}]
     body = {"icon": {"emoji": "🕒"}, "color": "gray_background", "rich_text": rich}
-    existing = [b for b in list_children(key, page_id) if _is_my_callout(b)]
-    if existing:
-        _nreq("PATCH", f"https://api.notion.com/v1/blocks/{existing[0]['id']}",
-              headers=nheaders(key), json={"callout": body})
-        for dup in existing[1:]:   # 혹시 중복 콜아웃 있으면 정리
-            _nreq("DELETE", f"https://api.notion.com/v1/blocks/{dup['id']}", headers=nheaders(key))
-    else:
-        _nreq("PATCH", f"https://api.notion.com/v1/blocks/{page_id}/children", headers=nheaders(key),
-              json={"children": [{"object": "block", "type": "callout", "callout": body}]})
+    _nreq("PATCH", f"https://api.notion.com/v1/blocks/{page_id}/children", headers=nheaders(key),
+          json={"children": [{"object": "block", "type": "callout", "callout": body}]})
 
 
 def update_notion(key, lines, asof, date_str):
-    page_id = pick_report_page(key, date_str)
-    cleanup_my_extras(key, page_id)
-    upsert_callout(key, page_id, lines, asof)
-    return page_id
+    """⚠️ DB row 아카이브/삭제 절대 안 함(2026-06-24 사고 재발방지)."""
+    rows = query_today_rows(key, date_str)
+    log(f"  오늘({date_str}) DB row {len(rows)}개: {[_row_title(x) for x in rows]}")
+    if not rows:
+        db_id = os.environ["NOTION_DAILY_DB_ID"]
+        r = _nreq("POST", "https://api.notion.com/v1/pages", headers=nheaders(key),
+                  json={"parent": {"database_id": db_id},
+                        "properties": {"이름": {"title": [{"text": {"content": "준비 중"}}]},
+                                       "날짜": {"date": {"start": date_str}}}})
+        picked = r.json()["id"]
+        append_callout(key, picked, lines, asof)
+        return picked
+    # 리포트(child_page) 최다 행 = 실제 일별 페이지
+    picked, best_n = rows[0]["id"], -1
+    for row in rows:
+        n = sum(1 for c in list_children(key, row["id"]) if c.get("type") == "child_page")
+        if n > best_n:
+            picked, best_n = row["id"], n
+    if len(rows) > 1:
+        log(f"  ⚠️ row 여러개 — 자식 {best_n}개 행 선택, 나머지는 콜아웃/차트 잔재만 청소")
+    # 모든 행에서 내 잔재(차트·지수현황페이지·구콜아웃) 제거 → 콜아웃은 picked 에 1개만
+    for row in rows:
+        cleanup_my_extras(key, row["id"])
+    append_callout(key, picked, lines, asof)
+    return picked
 
 
 def restore_pages(key, ids):
