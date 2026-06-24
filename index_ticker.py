@@ -171,19 +171,20 @@ def query_today_rows(key, date_str, size=10):
 
 
 def get_date_page(key, date_str):
-    """오늘 날짜 리포트 페이지(=NOTION_DAILY_DB_ID DB row) id. 수급.py 와 동일 규약.
+    """오늘 날짜 리포트 페이지(=NOTION_DAILY_DB_ID DB row) (id, title). 수급.py 와 동일 규약.
     여러 row 면 '준비 중' 아닌(=리포트 제목 붙은) 걸 우선. 없으면 '준비 중' 생성(daily flow 와 공유)."""
     rows = query_today_rows(key, date_str)
     log(f"  오늘({date_str}) DB row {len(rows)}개: {[_row_title(x) for x in rows]}")
     if rows:
         named = [x for x in rows if _row_title(x) != "준비 중"]
-        return (named or rows)[0]["id"]
+        pick = (named or rows)[0]
+        return pick["id"], _row_title(pick)
     db_id = os.environ["NOTION_DAILY_DB_ID"]
     r = _nreq("POST", "https://api.notion.com/v1/pages", headers=nheaders(key),
               json={"parent": {"database_id": db_id},
                     "properties": {"이름": {"title": [{"text": {"content": "준비 중"}}]},
                                    "날짜": {"date": {"start": date_str}}}})
-    return r.json()["id"]
+    return r.json()["id"], "준비 중"
 
 
 def list_children(key, parent_id):
@@ -212,18 +213,24 @@ def archive_page(key, pid):
           json={"archived": True})
 
 
-def cleanup_legacy(key, keep_id, date_str):
-    """과거 잘못 만든 구조 자가정리: ①루트에 박은 '지수 현황' child page ②내가 만든 중복 '준비 중' row.
-    중복 row 판별 = keep_id 아닌 오늘 row 중 '📈 지수 현황' child page 를 가진 것(=옛 구조)."""
+def cleanup_legacy(key, keep_id, keep_title, date_str):
+    """과거 잘못 만든 구조 자가정리:
+    ①루트에 박은 '지수 현황' child page  ②중복 '준비 중' row.
+    중복 row 판별: keep 가 리포트 제목 행이면(=오늘 본 행 확정) 나머지 '준비 중' row 는 전부 잔재 → 아카이브.
+    또는 '📈 지수 현황' child page 를 가진 옛 구조 행. (아침에 아직 이름 안 붙은 정상 '준비 중' 은 보존)"""
     for b in list_children(key, PARENT_PAGE_ID):
         if b.get("type") == "child_page" and b["child_page"].get("title") == SENTINEL:
             archive_page(key, b["id"]); log(f"  🧹 루트 오배치 페이지 아카이브: {b['id']}")
+    real_named = keep_title != "준비 중"
     for row in query_today_rows(key, date_str):
         if row["id"] == keep_id:
             continue
+        title = _row_title(row)
         kids = list_children(key, row["id"])
-        if any(c.get("type") == "child_page" and c["child_page"].get("title") == SENTINEL for c in kids):
-            archive_page(key, row["id"]); log(f"  🧹 중복 '준비 중' row 아카이브: {row['id']}")
+        has_mine = any(c.get("type") == "child_page" and c["child_page"].get("title") == SENTINEL
+                       for c in kids)
+        if has_mine or (real_named and title == "준비 중"):
+            archive_page(key, row["id"]); log(f"  🧹 중복 '{title}' row 아카이브: {row['id']}")
 
 
 def remove_my_blocks(key, page_id):
@@ -249,8 +256,8 @@ def upload_png(key, png_bytes):
 
 
 def update_notion(key, png_bytes, lines, asof, date_str):
-    page_id = get_date_page(key, date_str)
-    cleanup_legacy(key, page_id, date_str)
+    page_id, page_title = get_date_page(key, date_str)
+    cleanup_legacy(key, page_id, page_title, date_str)
     remove_my_blocks(key, page_id)
     file_id = upload_png(key, png_bytes)
     # 줄별 분리: 헤더 1줄 + 지수별 1줄씩
