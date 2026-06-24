@@ -6,6 +6,11 @@ on:
   schedule:
     - cron: '0 * * * *'   # 매시 정각 백업 (UTC=KST-9). 한국장·미국장·FX 커버
   workflow_dispatch:      # ← cron-job.org 가 매시 trigger
+    inputs:
+      restore:
+        description: '복구할 페이지 ID(쉼표구분). 비우면 평소 갱신.'
+        required: false
+        default: ''
 
 permissions:
   contents: read           # Notion 파일업로드만 — git commit 안 함(충돌·노이즈 회피)
@@ -44,4 +49,5 @@ jobs:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
           NOTION_DAILY_DB_ID: ${{ secrets.NOTION_DAILY_DB_ID }}
+          INDEX_RESTORE: ${{ github.event.inputs.restore }}
         run: python index_ticker.py
