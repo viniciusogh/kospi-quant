@@ -148,12 +148,11 @@ def _is_my_callout(b):
 
 
 def cleanup_my_extras(key, page_id):
-    """내 잔재만 제거: 차트 이미지 + '📈 지수 현황' child page + 지수 콜아웃.
-    리포트(다른 제목 child_page)·다른 블록은 절대 안 건드림."""
+    """명확히 '내 것'만 제거: '📈 지수 현황' child page + 내 지수 콜아웃(SENTINEL).
+    이미지·리포트(다른 제목 child_page)·다른 블록은 절대 안 건드림 (오삭제 위험 0)."""
     for b in list_children(key, page_id):
         t = b.get("type")
-        mine = (t == "child_page" and b["child_page"].get("title") == SENTINEL) or t == "image" \
-            or _is_my_callout(b)
+        mine = (t == "child_page" and b["child_page"].get("title") == SENTINEL) or _is_my_callout(b)
         if mine:
             try:
                 _nreq("DELETE", f"https://api.notion.com/v1/blocks/{b['id']}", headers=nheaders(key))
