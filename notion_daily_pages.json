@@ -457,7 +457,8 @@
   "2026-06-30": {
     "page_id": "38e4a006-32f8-8193-bcbe-e5094fbb286b",
     "channels": {
-      "3proTV": "38e4a006-32f8-81ef-9f85-e5f0958bea5e"
+      "3proTV": "38e4a006-32f8-81ef-9f85-e5f0958bea5e",
+      "futuresnow": "38e4a006-32f8-8181-9b8b-e9b333fed4a3"
     }
   }
 }
