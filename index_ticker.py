@@ -148,30 +148,54 @@ def _is_my_callout(b):
 
 
 def cleanup_my_extras(key, page_id):
-    """명확히 '내 것'만 제거: '📈 지수 현황' child page + 내 지수 콜아웃(SENTINEL).
-    이미지·리포트(다른 제목 child_page)·다른 블록은 절대 안 건드림 (오삭제 위험 0)."""
-    for b in list_children(key, page_id):
+    """명확히 '내 것'만 제거: '📈 지수 현황' child page + 내 지수 콜아웃(SENTINEL) + 그 콜아웃 바로 뒤 표.
+    리포트(다른 제목 child_page)·다른 블록은 절대 안 건드림 (오삭제 위험 0)."""
+    kids = list_children(key, page_id)
+    to_del = []
+    for i, b in enumerate(kids):
         t = b.get("type")
-        mine = (t == "child_page" and b["child_page"].get("title") == SENTINEL) or _is_my_callout(b)
-        if mine:
-            try:
-                _nreq("DELETE", f"https://api.notion.com/v1/blocks/{b['id']}", headers=nheaders(key))
-                log(f"  🧹 잔재 제거({t}): {b['id']}")
-                time.sleep(0.2)
-            except Exception as e:
-                log(f"  ⚠️ 잔재 제거 실패: {e}")
+        if (t == "child_page" and b["child_page"].get("title") == SENTINEL) or _is_my_callout(b):
+            to_del.append(b["id"])
+            # 내 콜아웃 바로 뒤 표 = 내 지수표 → 함께 제거 (인접한 것만이라 안전)
+            if _is_my_callout(b) and i + 1 < len(kids) and kids[i + 1].get("type") == "table":
+                to_del.append(kids[i + 1]["id"])
+    for bid in to_del:
+        try:
+            _nreq("DELETE", f"https://api.notion.com/v1/blocks/{bid}", headers=nheaders(key))
+            log(f"  🧹 잔재 제거: {bid}")
+            time.sleep(0.2)
+        except Exception as e:
+            log(f"  ⚠️ 잔재 제거 실패: {e}")
 
 
-def append_callout(key, page_id, lines, asof):
-    rich = [{"type": "text", "text": {"content": f"{SENTINEL} · {asof} KST 기준\n"},
-             "annotations": {"bold": True}},
-            {"type": "text", "text": {"content": "\n".join(lines)}}]
-    body = {"icon": {"emoji": "🕒"}, "color": "gray_background", "rich_text": rich}
-    _nreq("PATCH", f"https://api.notion.com/v1/blocks/{page_id}/children", headers=nheaders(key),
-          json={"children": [{"object": "block", "type": "callout", "callout": body}]})
+def _cell(text, color="default", bold=False):
+    return [{"type": "text", "text": {"content": text},
+             "annotations": {"color": color, "bold": bold}}]
 
 
-def update_notion(key, lines, asof, date_str):
+def append_index(key, page_id, data, asof):
+    """제목 콜아웃 + 컬러 표(상승=빨강/하락=파랑)를 한 번에 append. data=[(name,cur,chg),...]."""
+    rows_blk = [{"type": "table_row", "table_row": {"cells": [
+        _cell("지수", bold=True), _cell("현재가", bold=True), _cell("등락", bold=True)]}}]
+    for name, cur, chg in data:
+        up = chg >= 0
+        color = "red" if up else "blue"          # 한국식: 상승 빨강 / 하락 파랑
+        prev = cur - chg
+        pct = 100 * chg / prev if prev else 0
+        chg_txt = f"{'▲' if up else '▼'} {chg:+,.2f} ({pct:+.2f}%)"
+        rows_blk.append({"type": "table_row", "table_row": {"cells": [
+            _cell(name, bold=True), _cell(f"{cur:,.2f}"), _cell(chg_txt, color=color, bold=True)]}})
+    callout = {"object": "block", "type": "callout", "callout": {
+        "icon": {"emoji": "🕒"}, "color": "gray_background",
+        "rich_text": [{"type": "text", "text": {"content": f"{SENTINEL} · {asof} KST 기준"},
+                       "annotations": {"bold": True}}]}}
+    table = {"object": "block", "type": "table", "table": {
+        "table_width": 3, "has_column_header": True, "has_row_header": False, "children": rows_blk}}
+    _nreq("PATCH", f"https://api.notion.com/v1/blocks/{page_id}/children",
+          headers=nheaders(key), json={"children": [callout, table]})
+
+
+def update_notion(key, data, asof, date_str):
     """⚠️ DB row 아카이브/삭제 절대 안 함(2026-06-24 사고 재발방지)."""
     rows = query_today_rows(key, date_str)
     log(f"  오늘({date_str}) DB row {len(rows)}개: {[_row_title(x) for x in rows]}")
@@ -182,7 +206,7 @@ def update_notion(key, lines, asof, date_str):
                         "properties": {"이름": {"title": [{"text": {"content": "준비 중"}}]},
                                        "날짜": {"date": {"start": date_str}}}})
         picked = r.json()["id"]
-        append_callout(key, picked, lines, asof)
+        append_index(key, picked, data, asof)
         return picked
     # 리포트(child_page) 최다 행 = 실제 일별 페이지
     picked, best_n = rows[0]["id"], -1
@@ -191,11 +215,11 @@ def update_notion(key, lines, asof, date_str):
         if n > best_n:
             picked, best_n = row["id"], n
     if len(rows) > 1:
-        log(f"  ⚠️ row 여러개 — 자식 {best_n}개 행 선택, 나머지는 콜아웃/차트 잔재만 청소")
-    # 모든 행에서 내 잔재(차트·지수현황페이지·구콜아웃) 제거 → 콜아웃은 picked 에 1개만
+        log(f"  ⚠️ row 여러개 — 자식 {best_n}개 행 선택, 나머지는 잔재만 청소")
+    # 모든 행에서 내 잔재(표·지수현황페이지·구콜아웃) 제거 → picked 에 1세트만
     for row in rows:
         cleanup_my_extras(key, row["id"])
-    append_callout(key, picked, lines, asof)
+    append_index(key, picked, data, asof)
     return picked
 
 
@@ -236,20 +260,20 @@ def main():
     ndx_cur = yf_last("^IXIC");    ndx_chg = ndx_cur - yf_prev_close("^IXIC")
     fx_cur  = yf_last("USDKRW=X"); fx_chg  = fx_cur - yf_prev_close("USDKRW=X")
 
-    lines = [
-        fmt("코스피", kospi_cur, kospi_chg),
-        fmt(f"선물 {fut_name.strip()}", fut_cur, fut_chg),
-        fmt("나스닥", ndx_cur, ndx_chg),
-        fmt("USD/KRW", fx_cur, fx_chg),
+    data = [
+        ("코스피", kospi_cur, kospi_chg),
+        (f"선물 {fut_name.strip()}", fut_cur, fut_chg),
+        ("나스닥", ndx_cur, ndx_chg),
+        ("USD/KRW", fx_cur, fx_chg),
     ]
-    print("\n".join(lines))
+    print("\n".join(fmt(n, c, ch) for n, c, ch in data))
 
     key = os.environ.get("NOTION_API_KEY")
     if not key:
         log("NOTION_API_KEY 없음 → Notion 업로드 생략 (로컬). Actions 에선 업로드됨")
         return
     try:
-        pid = update_notion(key, lines, asof, date_str)
+        pid = update_notion(key, data, asof, date_str)
         log(f"✅ Notion 갱신 완료: {pid}")
     except Exception as e:
         log(f"❌ Notion 갱신 실패: {e}")
