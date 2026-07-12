@@ -579,6 +579,9 @@
   },
   "2026-07-13": {
     "page_id": "39b4a006-32f8-8126-abcb-c958abdd4af6",
-    "channels": {}
+    "channels": {
+      "3proTV": "39b4a006-32f8-81bb-83ee-cccfb04dfa6d",
+      "moneyinside": "39b4a006-32f8-8128-b699-d1a5ea5515dd"
+    }
   }
 }
