@@ -572,7 +572,9 @@
   "2026-07-12": {
     "page_id": "39a4a006-32f8-81b0-90b5-c010811a1be1",
     "channels": {
-      "3proTV": "39a4a006-32f8-8179-a3d0-d74bfb8abfb7"
+      "3proTV": "39a4a006-32f8-8179-a3d0-d74bfb8abfb7",
+      "moneyinside": "39b4a006-32f8-81e6-a17e-c29ae0829e7c",
+      "moneydo": "39b4a006-32f8-817f-bc3e-c913d8a81b01"
     }
   }
 }
