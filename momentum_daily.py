@@ -597,6 +597,16 @@ def _delta_line(dl):
     return "📌 전일대비: " + " · ".join(parts)
 
 
+def _strip_won(txt):
+    """수급분석 prose의 금액(억/조/만/원) 표기 제거 — 정확한 수치는 막대가 담당.
+    Gemini가 google_search로 다른 기간 순매수액을 지어내 막대와 불일치하던 문제 차단(2026-07-13)."""
+    if not txt:
+        return txt
+    txt = re.sub(r"\s*약?\s*[\d,]+\s*(?:조|억|만)+\s*원?(?:어치)?\s*"
+                 r"(?:을|를|의|가|이|은|는|씩|만큼|가량|이상|이하)?", " ", txt)
+    return re.sub(r"\s{2,}", " ", txt).strip()
+
+
 def _stock_toggle(rank, r, a, fl, roe, dl=None):
     """종목 1개 = 접이식 토글. 제목줄=요약지표, 펼치면 8개 섹션 문단."""
     icon = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, "📈")
@@ -644,6 +654,8 @@ def _stock_toggle(rank, r, a, fl, roe, dl=None):
     # 8개 섹션
     for label, key in SECTIONS:
         v = (a.get(key) or "").strip()
+        if key == "수급분석":
+            v = _strip_won(v)   # 캐시 재사용분도 렌더 시점에 금액 제거
         if v:
             kids.append(_para([
                 {"type": "text", "text": {"content": f"{label}\n"}, "annotations": {"bold": True}},
