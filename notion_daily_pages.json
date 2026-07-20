@@ -652,5 +652,11 @@
       "moneyinside": "3a24a006-32f8-8192-a45b-c4a44fbd93a6",
       "chaegookjang": "3a34a006-32f8-81b6-ab4f-e2b09243d356"
     }
+  },
+  "2026-07-21": {
+    "page_id": "3a34a006-32f8-8108-9753-c911eec66872",
+    "channels": {
+      "3proTV": "3a34a006-32f8-8164-a3b6-f97138b08f55"
+    }
   }
 }
