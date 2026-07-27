@@ -711,6 +711,8 @@
   },
   "2026-07-27": {
     "page_id": "3a94a006-32f8-81e0-85d7-de6f5dd0089f",
-    "channels": {}
+    "channels": {
+      "3proTV": "3aa4a006-32f8-819b-a784-f6f4e500ec48"
+    }
   }
 }
