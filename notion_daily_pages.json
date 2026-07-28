@@ -727,5 +727,11 @@
       "chaegookjang": "3ab4a006-32f8-81f2-bf16-f6ee08766a65",
       "donkkang": "3ab4a006-32f8-81c2-a2f2-ecc96b2c6eba"
     }
+  },
+  "2026-07-29": {
+    "page_id": "3ab4a006-32f8-81dc-8cab-c889b26f0220",
+    "channels": {
+      "3proTV": "3ab4a006-32f8-81a5-b1e6-f8a708a8a86e"
+    }
   }
 }
