@@ -731,7 +731,8 @@
   "2026-07-29": {
     "page_id": "3ab4a006-32f8-81dc-8cab-c889b26f0220",
     "channels": {
-      "3proTV": "3ab4a006-32f8-81a5-b1e6-f8a708a8a86e"
+      "3proTV": "3ab4a006-32f8-81a5-b1e6-f8a708a8a86e",
+      "futuresnow": "3ab4a006-32f8-8135-9fc2-c513d5ff1bba"
     }
   }
 }
