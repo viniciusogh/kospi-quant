@@ -746,5 +746,11 @@
       "moneydo": "3ad4a006-32f8-81c1-b34e-ff9456b63899",
       "moneyinside": "3ad4a006-32f8-810b-99e4-f0c09eb0ff79"
     }
+  },
+  "2026-07-31": {
+    "page_id": "3ad4a006-32f8-8118-92ef-e9ecd3c7af73",
+    "channels": {
+      "3proTV": "3ad4a006-32f8-81ef-98d2-fa63605b99eb"
+    }
   }
 }
