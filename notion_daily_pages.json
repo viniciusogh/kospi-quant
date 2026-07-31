@@ -756,5 +756,11 @@
       "chaegookjang": "3ae4a006-32f8-8193-b0c6-ed744a6691ae",
       "moneyinside": "3ae4a006-32f8-81a9-9ee0-da1741e4a6b0"
     }
+  },
+  "2026-08-01": {
+    "page_id": "3ae4a006-32f8-81ff-b793-c0d679f0f832",
+    "channels": {
+      "3proTV": "3ae4a006-32f8-8135-91c4-e66e701715ad"
+    }
   }
 }
