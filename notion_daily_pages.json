@@ -789,5 +789,11 @@
       "futuresnow": "3b14a006-32f8-8129-b034-d9b9e3134af8",
       "moneydo": "3b24a006-32f8-81db-b357-cd3cde234473"
     }
+  },
+  "2026-08-05": {
+    "page_id": "3b24a006-32f8-815b-ab13-dc866a0bd3c8",
+    "channels": {
+      "3proTV": "3b24a006-32f8-81fb-b01d-c4c501bdbb21"
+    }
   }
 }
