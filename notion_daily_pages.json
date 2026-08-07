@@ -821,6 +821,9 @@
   },
   "2026-08-08": {
     "page_id": "3b54a006-32f8-8148-9d2b-e191f34b9ad9",
-    "channels": {}
+    "channels": {
+      "3proTV": "3b54a006-32f8-814e-a562-d934c6bf399b",
+      "futuresnow": "3b54a006-32f8-814e-8c31-f166e6eb0865"
+    }
   }
 }
