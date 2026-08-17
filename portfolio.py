@@ -113,6 +113,24 @@ def _toss_token():
     return j["access_token"]
 
 
+def _ip_help(resp):
+    """토스 허용IP 위반이면 현재 공인 IP 를 찍어준다 — 가정용 유동 IP 라 수시로 터진다."""
+    try:
+        if "ip-not-allowed" not in resp.text:
+            return False
+    except Exception:
+        return False
+    ip = "?"
+    try:
+        ip = requests.get("https://api.ipify.org", timeout=8).text.strip()
+    except Exception:
+        pass
+    print(f"  ⛔ 토스 허용 IP 불일치. 현재 공인 IP = {ip}")
+    print("     토스증권 → 설정 > Open API > 허용 IP 관리 > [IP 추가] 에 위 값을 등록하면 즉시 해결.")
+    print("     (통신사 유동 IP 라 몇 시간~며칠 단위로 바뀜. 기존 IP 는 지우지 말고 추가만 하면 됨)")
+    return True
+
+
 def toss_holdings():
     """토스증권 보유주식. accountSeq 는 /accounts 로 자동 조회 (수동 입력 불필요)."""
     tok = _toss_token()
@@ -123,7 +141,8 @@ def toss_holdings():
     if not seq:
         r = requests.get(f"{TOSS_BASE}/api/v1/accounts", headers=h, timeout=20)
         if r.status_code != 200:
-            print(f"  ⚠️ 토스 계좌조회 실패 HTTP {r.status_code}: {r.text[:160]}")
+            if not _ip_help(r):
+                print(f"  ⚠️ 토스 계좌조회 실패 HTTP {r.status_code}: {r.text[:160]}")
             return []
         accts = (r.json().get("result") or [])
         broker = [a for a in accts if a.get("accountType") == "BROKERAGE"] or accts
@@ -136,7 +155,8 @@ def toss_holdings():
     r = requests.get(f"{TOSS_BASE}/api/v1/holdings", timeout=20,
                      headers={**h, "X-Tossinvest-Account": str(seq)})
     if r.status_code != 200:
-        print(f"  ⚠️ 토스 보유조회 실패 HTTP {r.status_code}: {r.text[:160]}")
+        if not _ip_help(r):
+            print(f"  ⚠️ 토스 보유조회 실패 HTTP {r.status_code}: {r.text[:160]}")
         return []
     res = r.json().get("result") or {}
     rows, skipped = [], 0
