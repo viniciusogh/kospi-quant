@@ -717,6 +717,13 @@ def _archive_same_title_pages(title: str, headers: dict, parent_id: str):
 
 def upload_to_notion(reco_kor: pd.DataFrame):
     """추천종목 표를 Notion 새 페이지에 업로드"""
+    # 사용자가 안 보는 리포트 → 노션 생성 중단 (2026-08-17). CSV 산출물은 계속 만든다:
+    # latest_kospi_supply.csv = 모멘텀 유니버스, latest_kospi_quality.csv = 모멘텀 부채순위.
+    # 이 함수 안에서 Gemini 요약도 호출되므로 여기서 끊으면 토큰도 같이 절약된다.
+    if os.environ.get("SKIP_NOTION_REPORT") == "1":
+        print("  ⏭ 노션 리포트 생성 생략 (SKIP_NOTION_REPORT=1) — CSV 산출물은 정상 생성")
+        return
+
     headers = {
         "Authorization": f"Bearer {NOTION_API_KEY}",
         "Content-Type": "application/json",

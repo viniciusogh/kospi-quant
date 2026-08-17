@@ -157,6 +157,12 @@ def _archive_same_title_pages(title: str, headers: dict, parent_id: str):
 
 
 def upload_to_notion(df: pd.DataFrame, today_str: str):
+    # 사용자가 안 보는 리포트 → 노션 생성 중단 (2026-08-17).
+    # 교집합 계산·CSV 는 그대로 수행하고 노션 페이지만 만들지 않는다.
+    if os.environ.get("SKIP_NOTION_REPORT") == "1":
+        print("  ⏭ 노션 리포트 생성 생략 (SKIP_NOTION_REPORT=1) — CSV 산출물은 정상 생성")
+        return
+
     headers = {
         "Authorization": f"Bearer {NOTION_API_KEY}",
         "Content-Type": "application/json",

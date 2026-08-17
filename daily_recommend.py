@@ -142,7 +142,7 @@ def load_youtube_analysis_from_notion() -> str:
     yesterday = (datetime.now(KST) - timedelta(days=1)).strftime("%Y-%m-%d")
 
     out = []
-    for date in dates:
+    for date in (today, yesterday):        # 2026-08-14~16 크래시 원인: 정의 없는 `dates` 를 순회했음
         entry = pages.get(date)
         if entry is None:
             continue
@@ -399,8 +399,10 @@ def push_to_notion(text: str) -> str | None:
             timeout=60,
         )
         if r.status_code != 200:
-            log(f"⚠️ 블록 추가 실패 ({i}): {r.status_code} {r.text[:120]}")
-            return page_url
+            # 예전엔 여기서 return 해서 아래 row 제목 update 를 건너뛰었다 → 블록 하나 실패에
+            # 날짜 행이 "준비 중" 으로 남는 문제. 본문이 일부라도 올라갔으면 제목은 달아준다.
+            log(f"⚠️ 블록 추가 실패 ({i}/{len(blocks)}): {r.status_code} {r.text[:120]} — 나머지 중단, 제목은 계속")
+            break
         time.sleep(0.2)
 
     # 응답에서 SUMMARY 추출 후 database row 의 '이름' (title) UPDATE
@@ -459,8 +461,10 @@ def _run():
     log("▶ Gemini 호출 중...")
     rec = analyze_and_recommend(quant_csv, youtube_text)
     if not rec:
-        log("❌ Gemini 응답 실패. 종료.")
-        return
+        # 무음 실패 방지: 2026-08-10~13 Gemini 429 로 나흘간 제목이 "준비 중" 이었는데
+        # 워크플로가 success 로 보고돼 아무도 몰랐다. 이제는 실패로 드러난다.
+        log("❌ Gemini 응답 실패 (429 쿼터 초과 가능) — 종료코드 1")
+        raise SystemExit(1)
     log(f"✅ Gemini 응답: {len(rec):,}자")
 
     # 4. 노션 push
@@ -468,7 +472,8 @@ def _run():
     if url:
         log(f"🎉 완료: {url}")
     else:
-        log("⚠️ 노션 push 실패 — Gemini 응답은 정상 (로그 위에 출력됨)")
+        log("⚠️ 노션 push 실패 — Gemini 응답은 정상 (로그 위에 출력됨) — 종료코드 1")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

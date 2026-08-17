@@ -1,9 +1,12 @@
 name: Daily US Quant Analysis
 
 on:
-  schedule:
-    - cron: '0 22 * * *'   # 07:00 KST (UTC+9), 매일 - 미국 장 마감 후
-  workflow_dispatch:         # 수동 실행 가능
+  # 2026-08-17 자동실행 중단 — 사용자가 US 추천종목 리포트를 보지 않음(토큰·노션 낭비).
+  # 산출물(us_score_history.csv)을 참조하는 다른 스크립트가 없어 완전 중단 가능.
+  # 되살리려면 아래 schedule 주석을 풀면 된다.
+  # schedule:
+  #   - cron: '0 22 * * *'   # 07:00 KST (UTC+9), 매일 - 미국 장 마감 후
+  workflow_dispatch:         # 수동 실행만 유지
 
 permissions:
   contents: write

@@ -53,6 +53,7 @@ jobs:
           NOTION_DAILY_DB_ID: ${{ secrets.NOTION_DAILY_DB_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OUTPUT_DIR: ${{ github.workspace }}
+          SKIP_NOTION_REPORT: "1"   # 노션 리포트 폐지(사용자 미열람) — CSV 는 모멘텀이 사용하므로 계속 생성
         run: python 수급.py
 
       - name: Run KOSPI Quality analysis (별도 모델, fin_ratio_cache 공유)
@@ -63,6 +64,7 @@ jobs:
           NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
           NOTION_DAILY_DB_ID: ${{ secrets.NOTION_DAILY_DB_ID }}
           OUTPUT_DIR: ${{ github.workspace }}
+          SKIP_NOTION_REPORT: "1"   # 노션 리포트 폐지 — latest_kospi_quality.csv 는 모멘텀 부채순위에 필요
         run: python quality.py
 
       - name: Run intersection (수급 × Quality 교집합)
@@ -70,6 +72,7 @@ jobs:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
           NOTION_DAILY_DB_ID: ${{ secrets.NOTION_DAILY_DB_ID }}
+          SKIP_NOTION_REPORT: "1"   # 노션 리포트 폐지
         run: python intersection.py
         continue-on-error: true   # 교집합 없을 때도 워크플로 종료 안 됨
 
