@@ -63,3 +63,4 @@ fin_ebitda_hist_cache/
 portfolio.json
 holdings_manual.csv
 .notion_portfolio_page.json
+.notion_dashboard.json
