@@ -58,3 +58,7 @@ fin_ebitda_cache/
 fin_ebitda_hist_cache/
 .kis_trade_token.json
 .toss_token.json
+
+# 개인 보유·매매 데이터 (저장소가 public — 절대 커밋 금지)
+portfolio.json
+holdings_manual.csv
