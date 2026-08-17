@@ -62,6 +62,17 @@ def _title_of(page):
                    in (page.get("properties", {}).get("title", {}).get("title") or []))
 
 
+def _find_by_title(parent):
+    """부모 페이지의 자식 중 제목이 일치하는 child_page 를 찾는다 (상태파일 대체)."""
+    try:
+        for b in children(parent):
+            if b.get("type") == "child_page" and b["child_page"].get("title") == TITLE:
+                return b["id"]
+    except Exception:
+        pass
+    return None
+
+
 def page_id():
     """대시보드 페이지 id. 없으면 앵커+divider 뼈대까지 만들어 반환.
     안전장치: 기억한 id 의 제목이 다르면 건드리지 않고 새로 만든다(오삭제 방지)."""
@@ -84,6 +95,11 @@ def page_id():
                 return pid
         print("  ⚠️ 기억한 대시보드 페이지가 내 것이 아니거나 사라짐 → 새로 만듦")
     parent = os.environ.get("NOTION_PARENT_PAGE_ID", "3324a00632f880fbb014d766d87a1079")
+    found = _find_by_title(parent)          # 상태파일 없는 환경(GitHub Actions)에서도 같은 페이지를 찾는다
+    if found:
+        st["page_id"] = found
+        _save(st)
+        return found
     r = requests.post(f"{API}/pages", headers=_h(), timeout=30, json={
         "parent": {"page_id": parent},
         "properties": {"title": {"title": [{"text": {"content": TITLE}}]}},
@@ -143,41 +159,17 @@ def _delete(ids):
         requests.delete(f"{API}/blocks/{b}", headers=_h(), timeout=20)
 
 
-def set_holdings(blocks):
-    """보유현황 섹션 교체 — 앵커 바로 뒤에 넣어 항상 페이지 상단에 유지. 리포트 토글은 안 건드림."""
-    pid, st = _skeleton()
-    _delete(st.get("holdings", []))
-    ids = []
-    after = st["anchor"]
-    for b in blocks:                      # after 로 순서 유지하려면 1개씩 (묶으면 역순 위험)
-        r = requests.patch(f"{API}/blocks/{pid}/children", headers=_h(), timeout=30,
-                           json={"after": after, "children": [b]})
-        if r.status_code != 200:
-            print(f"  ⚠️ 보유현황 블록 추가 실패 {r.status_code}: {r.text[:140]}")
-            break
-        nid = r.json()["results"][0]["id"]
-        ids.append(nid); after = nid
-    st["holdings"] = ids
-    _save(st)
-    return pid
-
-
-def clear_reports():
-    """리포트 섹션 비우기 (하루 1회, 첫 리포트가 붙기 전에 호출)."""
-    pid, st = _skeleton()
-    _delete(st.get("reports", []))
-    st["reports"] = []
-    _save(st)
-    return pid
-
-
-def _append(bid, blocks, tries=3):
-    """일시 지연·5xx·429 재시도. 1개 실패가 리포트 전체를 중단시키지 않게."""
+def _append(bid, blocks, after=None, tries=3):
+    """일시 지연·5xx·429 재시도. 1개 실패가 리포트 전체를 중단시키지 않게.
+    after: 그 블록 바로 뒤에 삽입(기본은 맨 끝)."""
     import time
+    body = {"children": blocks}
+    if after:
+        body["after"] = after
     for attempt in range(tries):
         try:
             r = requests.patch(f"{API}/blocks/{bid}/children", headers=_h(),
-                               json={"children": blocks}, timeout=40)
+                               json=body, timeout=40)
             time.sleep(0.35)
             if r.status_code == 200:
                 return r.json().get("results", [])
@@ -190,25 +182,88 @@ def _append(bid, blocks, tries=3):
     return None
 
 
-def add_report(toggle_title, header_blocks, items=None, color="gray_background"):
-    """리포트 토글 1개를 페이지 맨 끝에 추가.
+# 리포트 슬롯 — 페이지에 늘 이 순서로 놓인다. 상태파일 없이 제목으로 판별하므로
+# GitHub Actions(상태파일 없음)와 로컬이 같은 페이지를 일관되게 갱신할 수 있다.
+SLOT_RULES = [(1, "내 보유종목"), (3, "추세게이트"), (2, "모멘텀 추천"), (4, "유튜브")]
 
-    header_blocks: 토글 바로 안에 들어갈 머리말 (콜아웃·heading 등)
-    items: [(자식토글 블록, [2차 블록…])] — 자식 토글을 1개씩 append 하고(요청당 100블록 한도 회피)
-           2차 블록(table 등, 3단계 불가)은 그 토글 id 로 따로 넣는다.
+
+def _slot_of(title):
+    for slot, needle in SLOT_RULES:        # 게이트를 모멘텀보다 먼저 검사 (부분일치 충돌 방지)
+        if needle in title:
+            return slot
+    return 99
+
+
+def _layout(pid):
+    """페이지를 앵커/divider 기준으로 나눈다. 블록 id 를 저장하지 않고 매번 구조에서 판별."""
+    ch = children(pid)
+    ai = next((i for i, b in enumerate(ch) if b["type"] == "heading_1"), None)
+    di = next((i for i, b in enumerate(ch) if b["type"] == "divider"), None)
+    if ai is None or di is None or di < ai:
+        return ch, None, None, [], []
+    return ch, ch[ai]["id"], ch[di]["id"], ch[ai + 1:di], ch[di + 1:]
+
+
+def set_holdings(blocks):
+    """보유현황 섹션 교체 — 앵커와 divider 사이만 갈아낀다. 리포트 토글은 건드리지 않음."""
+    pid, _ = _skeleton()
+    _, anchor, _, mid, _ = _layout(pid)
+    if anchor is None:
+        print("  ⚠️ 대시보드 뼈대(앵커/divider) 를 찾지 못함 — 중단")
+        return pid
+    _delete([b["id"] for b in mid])
+    after = anchor
+    for b in blocks:                      # after 로 순서 유지하려면 1개씩 (묶으면 역순 위험)
+        r = _append(pid, [b], after=after)
+        if not r:
+            break
+        after = r[0]["id"]
+    return pid
+
+
+def clear_reports():
+    """리포트 섹션 비우기 — divider 뒤 전부. (하루 1회, 첫 리포트 붙기 전)"""
+    pid, _ = _skeleton()
+    _, _, div, _, tail = _layout(pid)
+    if div is None:
+        return pid
+    _delete([b["id"] for b in tail])
+    return pid
+
+
+def add_report(toggle_title, header_blocks, items=None, color="gray_background"):
+    """리포트 토글 upsert. 같은 슬롯이 이미 있으면 지우고 같은 자리에 다시 넣는다.
+
+    같은 워크플로가 하루에 두 번 돌아도(오늘 daily_quant 2회 실행) 중복되지 않는다.
+    items: [(자식토글, [2차블록…])] — 자식은 1개씩 append(요청당 100블록 한도), table 은 2차로.
     """
-    pid, st = _skeleton()
+    pid, _ = _skeleton()
+    _, anchor, div, _, tail = _layout(pid)
+    if div is None:
+        print("  ⚠️ 대시보드 뼈대를 찾지 못함 — 중단")
+        return None
+    slot = _slot_of(toggle_title)
+
+    after = div                            # 내 슬롯보다 앞선 리포트 뒤에 삽입
+    for b in tail:
+        if b["type"] != "toggle":
+            continue
+        t = "".join(x.get("plain_text", "") for x in b["toggle"]["rich_text"])
+        s = _slot_of(t)
+        if s == slot:                      # 같은 슬롯 = 이전 실행분 → 제거하고 그 자리 차지
+            _delete([b["id"]])
+            continue
+        if s < slot:
+            after = b["id"]
+
     r = _append(pid, [{"object": "block", "type": "toggle", "toggle": {
         "rich_text": [{"type": "text", "text": {"content": toggle_title},
                        "annotations": {"bold": True}}],
-        "color": color, "children": header_blocks or []}}])
+        "color": color, "children": header_blocks or []}}], after=after)
     if not r:
         print(f"  ⚠️ 리포트 토글 생성 실패: {toggle_title[:40]}")
         return None
     tid = r[0]["id"]
-    st.setdefault("reports", []).append(tid)
-    _save(st)
-
     for tog, extra in (items or []):
         res = _append(tid, [tog])
         if not res:
