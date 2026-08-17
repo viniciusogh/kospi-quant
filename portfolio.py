@@ -50,37 +50,69 @@ def _hdr(tok, tr_id, trade=True):
             "tr_id": tr_id, "custtype": "P"}
 
 
-def kis_balance(tok):
-    """한투 국내주식 잔고. CANO 없으면 빈 결과 (수기분만으로도 대시보드는 돌게)."""
-    if not CANO:
-        print("  ⚠️ KIS_CANO 없음 → 한투 자동조회 건너뜀")
-        return [], {}
+def _kis_accounts():
+    """조회할 한투 계좌 목록. KIS_ACCOUNTS="12345678-01:ISA,87654321-01:위탁" (라벨 생략 가능).
+    없으면 기존 단일 KIS_CANO/KIS_ACNT_PRDT_CD 로 폴백."""
+    raw = os.environ.get("KIS_ACCOUNTS", "").strip()
+    if not raw:
+        return [(CANO, ACNT, "")] if CANO else []
+    out = []
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        acct, _, label = item.partition(":")
+        cano, _, prdt = acct.strip().partition("-")
+        if cano:
+            out.append((cano, prdt or "01", label.strip()))
+    return out
+
+
+def _one_balance(tok, cano, prdt, label):
+    """계좌 1개 잔고. 실패해도 다른 계좌는 계속 조회하도록 예외 대신 빈 결과 반환."""
     url = f"{BASE}/uapi/domestic-stock/v1/trading/inquire-balance"
-    params = {"CANO": CANO, "ACNT_PRDT_CD": ACNT, "AFHR_FLPR_YN": "N", "OFL_YN": "",
+    params = {"CANO": cano, "ACNT_PRDT_CD": prdt, "AFHR_FLPR_YN": "N", "OFL_YN": "",
               "INQR_DVSN": "02", "UNPR_DVSN": "01", "FUND_STTL_ICLD_YN": "N",
               "FNCG_AMT_AUTO_RDPT_YN": "N", "PRCS_DVSN": "00",
               "CTX_AREA_FK100": "", "CTX_AREA_NK100": ""}
-    rows, summary = [], {}
+    name = f"한투{' ' + label if label else ''}"
+    rows, cash = [], {}
     while True:
         r = requests.get(url, headers=_hdr(tok, "TTTC8434R"), params=params, timeout=20)
         j = r.json()
         if j.get("rt_cd") != "0":
-            print(f"  ⚠️ 한투 잔고조회 실패: {j.get('msg_cd')} {j.get('msg1')}")
-            return rows, summary
+            print(f"  ⚠️ {name}({cano}-{prdt}) 잔고조회 실패: {j.get('msg_cd')} {j.get('msg1')}")
+            return rows, cash
         for o in j.get("output1", []) or []:
             qty = float(o.get("hldg_qty") or 0)
             if qty <= 0:
                 continue
-            rows.append({"broker": "한투", "code": o["pdno"], "name": o["prdt_name"].strip(),
+            rows.append({"broker": name, "code": o["pdno"], "name": o["prdt_name"].strip(),
                          "qty": qty, "avg": float(o.get("pchs_avg_pric") or 0),
                          "price": float(o.get("prpr") or 0)})
         o2 = (j.get("output2") or [{}])[0]
-        summary = {"예수금": float(o2.get("dnca_tot_amt") or 0),
-                   "d2예수금": float(o2.get("prvs_rcdl_excc_amt") or 0)}
+        cash = {"예수금": float(o2.get("dnca_tot_amt") or 0),
+                "d2예수금": float(o2.get("prvs_rcdl_excc_amt") or 0)}
         if j.get("tr_cont") not in ("F", "M"):
             break
         params["CTX_AREA_FK100"] = j.get("ctx_area_fk100", "")
         params["CTX_AREA_NK100"] = j.get("ctx_area_nk100", "")
+    print(f"  {name}({cano}-{prdt}) 보유 {len(rows)}종목")
+    return rows, cash
+
+
+def kis_balance(tok):
+    """한투 국내주식 잔고 — 계좌 여러 개(위탁·ISA·CMA) 합산."""
+    accts = _kis_accounts()
+    if not accts:
+        print("  ⚠️ 한투 계좌 미설정(KIS_ACCOUNTS/KIS_CANO) → 건너뜀")
+        return [], {}
+    rows, summary = [], {}
+    for cano, prdt, label in accts:
+        r, c = _one_balance(tok, cano, prdt, label)
+        rows += r
+        for k, v in c.items():
+            summary[k] = summary.get(k, 0.0) + v
     return rows, summary
 
 
