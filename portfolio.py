@@ -158,6 +158,24 @@ def _toss_token():
     return j["access_token"]
 
 
+def market_open_today():
+    """오늘 국내장이 열리나. 토스 장운영 API — 주말뿐 아니라 대체공휴일까지 잡는다.
+    (2026-08-17 이 광복절 대체공휴일이라 휴장인데 30분마다 갱신이 돌던 문제.)
+    판단 불가면 True 로 두어 조회를 막지 않는다."""
+    tok = _toss_token()
+    if not tok:
+        return True
+    try:
+        r = requests.get(f"{TOSS_BASE}/api/v1/market-calendar/KR",
+                         headers={"Authorization": f"Bearer {tok}"}, timeout=15)
+        if r.status_code != 200:
+            return True
+        today = (r.json().get("result") or {}).get("today") or {}
+        return today.get("integrated") is not None
+    except Exception:
+        return True
+
+
 def _ip_help(resp):
     """토스 허용IP 위반이면 현재 공인 IP 를 찍어준다 — 가정용 유동 IP 라 수시로 터진다."""
     try:
@@ -375,6 +393,9 @@ def upload_notion(data):
 
 
 def main():
+    if os.environ.get("SKIP_MARKET_CHECK") != "1" and not market_open_today():
+        print("휴장일 — 시세가 바뀌지 않으므로 갱신 생략 (강제 실행: SKIP_MARKET_CHECK=1)")
+        return
     rows, summary = kis_balance(_trade_token())
     rows += toss_holdings()
     rows += manual_rows()
