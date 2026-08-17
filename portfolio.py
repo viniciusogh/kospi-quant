@@ -36,12 +36,23 @@ def _trade_token():
                 return c["token"]
         except Exception:
             pass
-    r = requests.post(f"{BASE}/oauth2/tokenP", timeout=20,
-                      json={"grant_type": "client_credentials",
-                            "appkey": TR_KEY, "appsecret": TR_SECRET})
-    tok = r.json()["access_token"]
-    json.dump({"token": tok, "ts": time.time()}, open(cache, "w"))
-    return tok
+    # KIS 는 토큰 발급을 1분당 1회로 제한 → 실패해도 죽지 않고 None 반환(다른 증권사는 계속 조회)
+    for attempt in range(3):
+        try:
+            r = requests.post(f"{BASE}/oauth2/tokenP", timeout=20,
+                              json={"grant_type": "client_credentials",
+                                    "appkey": TR_KEY, "appsecret": TR_SECRET})
+            j = r.json()
+            if "access_token" in j:
+                json.dump({"token": j["access_token"], "ts": time.time()}, open(cache, "w"))
+                return j["access_token"]
+            msg = j.get("error_description") or j.get("msg1") or str(j)[:80]
+        except Exception as e:
+            msg = f"{type(e).__name__}: {e}"
+        if attempt < 2:
+            time.sleep(20 * (attempt + 1))       # 1분 제한 → 20s·40s 백오프
+    print(f"  ⚠️ 한투 토큰 발급 실패 → 한투 건너뜀 ({msg})")
+    return None
 
 
 def _hdr(tok, tr_id, trade=True):
@@ -106,6 +117,8 @@ def kis_balance(tok):
     accts = _kis_accounts()
     if not accts:
         print("  ⚠️ 한투 계좌 미설정(KIS_ACCOUNTS/KIS_CANO) → 건너뜀")
+        return [], {}
+    if not tok:                      # 토큰 발급 실패 — 이미 사유를 출력했다
         return [], {}
     rows, summary = [], {}
     for cano, prdt, label in accts:
