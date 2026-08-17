@@ -171,41 +171,50 @@ def clear_reports():
     return pid
 
 
-def add_report(toggle_title, children_blocks, deferred=None, color="default"):
+def _append(bid, blocks, tries=3):
+    """일시 지연·5xx·429 재시도. 1개 실패가 리포트 전체를 중단시키지 않게."""
+    import time
+    for attempt in range(tries):
+        try:
+            r = requests.patch(f"{API}/blocks/{bid}/children", headers=_h(),
+                               json={"children": blocks}, timeout=40)
+            time.sleep(0.35)
+            if r.status_code == 200:
+                return r.json().get("results", [])
+            print(f"  ⚠️ append {r.status_code} ({attempt+1}/{tries}): {r.text[:120]}")
+            if r.status_code < 500 and r.status_code != 429:
+                return None            # 4xx(429 제외)는 재시도 무의미
+        except Exception as e:
+            print(f"  ⚠️ append 예외({attempt+1}/{tries}): {str(e)[:110]}")
+        time.sleep(2 * (attempt + 1))
+    return None
+
+
+def add_report(toggle_title, header_blocks, items=None, color="gray_background"):
     """리포트 토글 1개를 페이지 맨 끝에 추가.
 
-    children_blocks: 토글 안에 들어갈 블록들 (종목 토글 등). table 은 여기 넣지 말 것.
-    deferred: [(마커, [블록…])] — 3단계에 못 들어가는 table 등을 2차로 넣기 위한 목록.
-              children_blocks 안의 토글 제목이 마커와 일치하면 그 토글 id 로 append 한다.
+    header_blocks: 토글 바로 안에 들어갈 머리말 (콜아웃·heading 등)
+    items: [(자식토글 블록, [2차 블록…])] — 자식 토글을 1개씩 append 하고(요청당 100블록 한도 회피)
+           2차 블록(table 등, 3단계 불가)은 그 토글 id 로 따로 넣는다.
     """
     pid, st = _skeleton()
-    r = requests.patch(f"{API}/blocks/{pid}/children", headers=_h(), timeout=60, json={
-        "children": [{"object": "block", "type": "toggle", "toggle": {
-            "rich_text": [{"type": "text", "text": {"content": toggle_title},
-                           "annotations": {"bold": True}}],
-            "color": color, "children": children_blocks}}]})
-    if r.status_code != 200:
-        print(f"  ⚠️ 리포트 토글 추가 실패 {r.status_code}: {r.text[:200]}")
+    r = _append(pid, [{"object": "block", "type": "toggle", "toggle": {
+        "rich_text": [{"type": "text", "text": {"content": toggle_title},
+                       "annotations": {"bold": True}}],
+        "color": color, "children": header_blocks or []}}])
+    if not r:
+        print(f"  ⚠️ 리포트 토글 생성 실패: {toggle_title[:40]}")
         return None
-    tid = r.json()["results"][0]["id"]
+    tid = r[0]["id"]
     st.setdefault("reports", []).append(tid)
     _save(st)
 
-    if deferred:
-        inner = {}
-        for b in children(tid):
-            if b["type"] == "toggle":
-                key = "".join(t.get("plain_text", "") for t in b["toggle"]["rich_text"])
-                inner[key] = b["id"]
-        for marker, blocks in deferred:
-            bid = inner.get(marker)
-            if not bid or not blocks:
-                continue
-            for blk in blocks:            # table 은 1개씩 (한 요청에 여러 table 넣으면 실패 사례 있음)
-                rr = requests.patch(f"{API}/blocks/{bid}/children", headers=_h(), timeout=30,
-                                    json={"children": [blk]})
-                if rr.status_code != 200:
-                    print(f"  ⚠️ 2차 블록 추가 실패({marker[:18]}) {rr.status_code}: {rr.text[:120]}")
+    for tog, extra in (items or []):
+        res = _append(tid, [tog])
+        if not res:
+            continue
+        if extra:
+            _append(res[0]["id"], extra)
     return tid
 
 

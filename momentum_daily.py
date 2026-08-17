@@ -24,6 +24,7 @@ TOP_N     = 10                    # 최종 추천 종목 수
 MOM_CUT   = float(os.environ.get("MOM_CUT", "0.10"))   # 2단계 모멘텀 상위 컷
 MOM_GATE  = os.environ.get("MOM_GATE", "0") == "1"     # 추세이탈 게이트: 비강세(200·120일선 이탈)면 현금
 MOM_LABEL = os.environ.get("MOM_LABEL", "")            # 제목 구분자 (예: " (20%컷·추세게이트)")
+MOM_TARGET = os.environ.get("MOM_TARGET", "page")  # page=날짜별 자기 페이지 / dashboard=통합 대시보드 토글
 MOM_TAG   = os.environ.get("MOM_TAG", "")              # 출력파일 구분자(변형별 분리 — 기본 현행 파일명 유지)
 # 상태/출력 파일 — 변형은 별도(10% 현행과 충돌 방지). 분석캐시는 코드별이라 공유 안전.
 OUT_CSV  = os.path.join(_DIR, f"latest_momentum_reco{MOM_TAG}.csv")
@@ -749,6 +750,35 @@ def upload_notion(top, analysis=None, trend=None, flows=None, roes=None, deltas=
         header.append({"object": "block", "type": "heading_3",
                        "heading_3": {"rich_text": [{"type": "text", "text": {"content": "🏆 상위 10 — 종목을 펼치면 상세 분석"}}]}})
 
+    def _item(rank, r):
+        """종목 1개의 (토글, 2차블록) — 페이지 모드·대시보드 모드 공통. 2차블록은 table 등 3단계 불가분."""
+        tog = _stock_toggle(rank, r, analysis.get(r["code"], {}), flows.get(r["code"]) or {},
+                            roes.get(r["code"]), deltas.get(r["code"]))
+        a = analysis.get(r["code"], {})
+        extra = []
+        qt = _quarter_table(incomes.get(r["code"]))
+        if qt:
+            extra.append({"object": "block", "type": "paragraph", "paragraph": {
+                "rich_text": [{"type": "text", "text": {"content": "📊 분기 실적 추이 (단일분기)"},
+                               "annotations": {"bold": True}}]}})
+            extra.append(qt)
+        if a.get("추정"):
+            extra.append({"object": "block", "type": "paragraph", "paragraph": {
+                "rich_text": [{"type": "text", "text": {"content": "📈 다음 분기 컨센서스  "},
+                               "annotations": {"bold": True}},
+                              {"type": "text", "text": {"content": a["추정"]}}]}})
+        return tog, extra
+
+    if MOM_TARGET == "dashboard":
+        # 통합 대시보드에 토글 1개로 붙인다 (날짜별 페이지 생성 안 함)
+        import dashboard
+        items = [] if cash else [_item(rank, r) for rank, (_, r) in
+                                 enumerate(top.head(10).iterrows(), 1)]
+        tid = dashboard.add_report(title, header, items)
+        log(f"✅ 대시보드 리포트 추가{'(현금/추세이탈)' if cash else ''}: {dashboard.url()}"
+            if tid else "❌ 대시보드 리포트 추가 실패")
+        return
+
     date_parent = sg._get_or_create_date_page(asof, headers, parent)
     sg._archive_same_title_pages(title, headers, date_parent)
     r = None
@@ -791,25 +821,12 @@ def upload_notion(top, analysis=None, trend=None, flows=None, roes=None, deltas=
 
     # 종목별: 토글 append → 그 토글 안에 분기 실적 표 별도 append (중첩 한도 회피)
     for rank, (_, r) in enumerate(top.head(10).iterrows(), 1):
-        tog = _stock_toggle(rank, r, analysis.get(r["code"], {}), flows.get(r["code"]) or {},
-                            roes.get(r["code"]), deltas.get(r["code"]))
+        tog, extra = _item(rank, r)
         res = append(page_id, [tog])
         if not res:
             continue
-        tid = res[0]["id"]
-        a = analysis.get(r["code"], {})
-        extra = []
-        qt = _quarter_table(incomes.get(r["code"]))
-        if qt:
-            extra.append({"object": "block", "type": "paragraph", "paragraph": {
-                "rich_text": [{"type": "text", "text": {"content": "📊 분기 실적 추이 (단일분기)"}, "annotations": {"bold": True}}]}})
-            extra.append(qt)
-        if a.get("추정"):
-            extra.append({"object": "block", "type": "paragraph", "paragraph": {
-                "rich_text": [{"type": "text", "text": {"content": "📈 다음 분기 컨센서스  "}, "annotations": {"bold": True}},
-                              {"type": "text", "text": {"content": a["추정"]}}]}})
         if extra:
-            append(tid, extra)
+            append(res[0]["id"], extra)
 
     log(f"✅ Notion 업로드 완료: {page_url}")
 
