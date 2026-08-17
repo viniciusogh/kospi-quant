@@ -178,8 +178,17 @@ def get_transcript(video_id: str) -> str | None:
                 proxy_username=os.environ["WEBSHARE_USER"],
                 proxy_password=os.environ["WEBSHARE_PASS"],
             )
-        api  = YouTubeTranscriptApi(http_client=session, proxy_config=proxy_config)
-        t    = api.fetch(video_id, languages=["ko", "ko-KR"])
+        try:
+            api = YouTubeTranscriptApi(http_client=session, proxy_config=proxy_config)
+            t   = api.fetch(video_id, languages=["ko", "ko-KR"])
+        except Exception as e:
+            # 프록시 자체가 죽은 경우(구독 만료 402·인증 407 등) 프록시 없이 한 번 더.
+            # 2026-08-12~17 Webshare 402 로 자막이 5일간 0개였는데 그냥 넘어가고 있었다.
+            if proxy_config is None or not any(k in str(e) for k in ("402", "407", "Tunnel", "proxy", "Proxy")):
+                raise
+            log(f"    ⚠️ 프록시 실패({str(e)[:60]}) → 프록시 없이 재시도")
+            api = YouTubeTranscriptApi(http_client=session, proxy_config=None)
+            t   = api.fetch(video_id, languages=["ko", "ko-KR"])
         text = " ".join(x.text for x in t)
         return text[:MAX_TRANSCRIPT_CHARS]
     except _TranscriptTimeout as e:
@@ -663,6 +672,12 @@ def _process_channel(channel: dict, today: str, page_id: str):
                 log(f"    ❌ 처리 실패 {v['title'][:50]}: {e}")
 
     # target 순서로 재정렬 (Notion 에 시간순으로 쌓이도록)
+    # 무음 실패 방지: 처리 대상이 있었는데 하나도 못 받았으면 인프라 문제(프록시 만료·쿠키·차단)다.
+    # 2026-08-12~17 Webshare 402 로 자막이 5일간 0개였는데 워크플로가 success 로 떠서 아무도 몰랐다.
+    if target and not results:
+        log(f"❌ 처리 대상 {len(target)}개 전부 자막 실패 — 프록시/쿠키/차단 확인 필요 (종료코드 1)")
+        raise SystemExit(1)
+
     order = {v["id"]: i for i, v in enumerate(target)}
     results.sort(key=lambda r: order[r["video"]["id"]])
 

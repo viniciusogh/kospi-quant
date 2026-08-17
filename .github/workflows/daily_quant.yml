@@ -84,6 +84,7 @@ jobs:
           NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
           NOTION_DAILY_DB_ID: ${{ secrets.NOTION_DAILY_DB_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          MOM_TARGET: "dashboard"   # 날짜별 원본 페이지 대신 통합 대시보드 토글로 (2026-08-17)
         run: python momentum_daily.py
         continue-on-error: true   # 모멘텀 실패해도 나머지 커밋 진행
 
@@ -99,6 +100,7 @@ jobs:
           MOM_GATE: "1"
           MOM_LABEL: " (20%컷·추세게이트)"
           MOM_TAG: "_v20g"
+          MOM_TARGET: "dashboard"
         run: python momentum_daily.py
         continue-on-error: true
 
