@@ -640,7 +640,11 @@ def _process_channel(channel: dict, today: str, page_id: str):
     today_new   = [v for v in new_videos if v["published"] == today]
     other_new   = [v for v in new_videos if v["published"] != today]
     # RSS는 최신순 정렬 → reverse하여 오래된 것부터 처리 (Notion에 최신이 아래 쌓이도록)
-    target      = list(reversed((today_new + other_new)[:MAX_VIDEOS_PER_RUN]))
+    # YT_TODAY_ONLY=1 이면 오늘 게시분만 (밀린 backlog 를 한꺼번에 돌려 토큰 태우는 것 방지).
+    # YT_MAX_VIDEOS 로 1회 처리량 상한을 따로 줄 수 있다.
+    pool = today_new if os.environ.get("YT_TODAY_ONLY") == "1" else (today_new + other_new)
+    cap = int(os.environ.get("YT_MAX_VIDEOS") or MAX_VIDEOS_PER_RUN)
+    target      = list(reversed(pool[:cap]))
 
     if not target:
         log("✅ 처리할 새 영상 없음. 종료.")
