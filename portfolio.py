@@ -84,6 +84,75 @@ def kis_balance(tok):
     return rows, summary
 
 
+TOSS_BASE = "https://openapi.tossinvest.com"
+
+
+def _toss_token():
+    """토스 OAuth2 client_credentials. 유효 24h → 디스크 캐시로 재발급 억제."""
+    cid, sec = os.environ.get("TOSS_CLIENT_ID"), os.environ.get("TOSS_CLIENT_SECRET")
+    if not (cid and sec):
+        return None
+    import time
+    cache = os.path.join(_DIR, ".toss_token.json")
+    if os.path.exists(cache):
+        try:
+            c = json.load(open(cache))
+            if time.time() < c["exp"] - 300:
+                return c["token"]
+        except Exception:
+            pass
+    r = requests.post(f"{TOSS_BASE}/oauth2/token", timeout=20,
+                      data={"grant_type": "client_credentials",
+                            "client_id": cid, "client_secret": sec})
+    if r.status_code != 200:
+        print(f"  ⚠️ 토스 토큰 발급 실패 HTTP {r.status_code}: {r.text[:160]}")
+        return None
+    j = r.json()
+    json.dump({"token": j["access_token"], "exp": time.time() + float(j.get("expires_in", 86400))},
+              open(cache, "w"))
+    return j["access_token"]
+
+
+def toss_holdings():
+    """토스증권 보유주식. accountSeq 는 /accounts 로 자동 조회 (수동 입력 불필요)."""
+    tok = _toss_token()
+    if not tok:
+        return []
+    h = {"Authorization": f"Bearer {tok}"}
+    seq = os.environ.get("TOSS_ACCOUNT_SEQ")
+    if not seq:
+        r = requests.get(f"{TOSS_BASE}/api/v1/accounts", headers=h, timeout=20)
+        if r.status_code != 200:
+            print(f"  ⚠️ 토스 계좌조회 실패 HTTP {r.status_code}: {r.text[:160]}")
+            return []
+        accts = (r.json().get("result") or [])
+        broker = [a for a in accts if a.get("accountType") == "BROKERAGE"] or accts
+        if not broker:
+            print("  ⚠️ 토스 계좌 없음")
+            return []
+        seq = broker[0]["accountSeq"]
+        print(f"  토스 계좌 {broker[0].get('accountNo')} (seq={seq}) 사용"
+              + (f" · 계좌 {len(accts)}개 중 첫번째" if len(accts) > 1 else ""))
+    r = requests.get(f"{TOSS_BASE}/api/v1/holdings", timeout=20,
+                     headers={**h, "X-Tossinvest-Account": str(seq)})
+    if r.status_code != 200:
+        print(f"  ⚠️ 토스 보유조회 실패 HTTP {r.status_code}: {r.text[:160]}")
+        return []
+    res = r.json().get("result") or {}
+    rows, skipped = [], 0
+    for it in res.get("items") or []:
+        if it.get("marketCountry") != "KR":       # 해외분은 통화가 달라 원화 합산에서 제외
+            skipped += 1
+            continue
+        rows.append({"broker": "토스", "code": str(it["symbol"]).zfill(6),
+                     "name": it.get("name") or "", "qty": float(it["quantity"]),
+                     "avg": float(it["averagePurchasePrice"]),
+                     "price": float(it["lastPrice"])})
+    if skipped:
+        print(f"  ℹ️ 토스 해외종목 {skipped}건은 원화 합산에서 제외")
+    return rows
+
+
 def manual_rows():
     """holdings_manual.csv: broker,code,name,qty,avg — 나무증권·케이뱅크 등 API 없는 증권사."""
     if not os.path.exists(MANUAL):
@@ -133,6 +202,7 @@ def signal_overlap(codes):
 
 def main():
     rows, summary = kis_balance(_trade_token())
+    rows += toss_holdings()
     rows += manual_rows()
     if not rows:
         print("보유 종목 없음 (KIS_CANO 미설정 + holdings_manual.csv 없음)")
