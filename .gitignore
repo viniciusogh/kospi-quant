@@ -62,3 +62,4 @@ fin_ebitda_hist_cache/
 # 개인 보유·매매 데이터 (저장소가 public — 절대 커밋 금지)
 portfolio.json
 holdings_manual.csv
+.notion_portfolio_page.json

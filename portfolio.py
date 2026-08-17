@@ -200,6 +200,115 @@ def signal_overlap(codes):
     return hit
 
 
+NOTION_TITLE = "💼 통합 포트폴리오"
+PAGE_REF = os.path.join(_DIR, ".notion_portfolio_page.json")
+
+
+def _rt(text, bold=False, color=None):
+    a = {"bold": bold}
+    if color:
+        a["color"] = color
+    return [{"type": "text", "text": {"content": str(text)}, "annotations": a}]
+
+
+def _cell_rows(data):
+    """표 행: 종목(증권사) / 수량 / 평단→현재가 / 평가금액 / 수익률. 등락색은 한국식(상승 빨강)."""
+    head = [{"object": "block", "type": "table_row", "table_row": {"cells": [
+        _rt("종목", True), _rt("수량", True), _rt("평단 → 현재가", True),
+        _rt("평가금액", True), _rt("수익률", True)]}}]
+    rows = []
+    for r in data["positions"]:
+        col = "red" if r["ret"] > 0 else ("blue" if r["ret"] < 0 else "gray")
+        star = " ⭐" if r["signal"] else ""
+        name = [{"type": "text", "text": {"content": f"{r['name']}{star}"}, "annotations": {"bold": True}},
+                {"type": "text", "text": {"content": f"\n{r['broker']}"}, "annotations": {"color": "gray"}}]
+        rows.append({"object": "block", "type": "table_row", "table_row": {"cells": [
+            name, _rt(f"{r['qty']:,.0f}"),
+            _rt(f"{r['avg']:,.0f} → {r['price']:,.0f}"),
+            _rt(f"{r['eval']:,.0f}"),
+            _rt(f"{r['ret']*100:+.1f}%", True, col)]}})
+    return head + rows
+
+
+def _blocks(data):
+    t = data["total"]
+    col = "red_background" if t["pl"] > 0 else ("blue_background" if t["pl"] < 0 else "gray_background")
+    held = [r for r in data["positions"] if r["signal"]]
+    out = [{"object": "block", "type": "callout", "callout": {
+        "icon": {"type": "emoji", "emoji": "💰"}, "color": col,
+        "rich_text": [
+            {"type": "text", "text": {"content": f"총평가 {t['eval']:,.0f}원\n"}, "annotations": {"bold": True}},
+            {"type": "text", "text": {"content":
+                f"매입 {t['cost']:,.0f}원  ·  손익 {t['pl']:+,.0f}원 ({t['ret']*100:+.2f}%)\n"}},
+            {"type": "text", "text": {"content": f"{data['asof']} KST 기준"}, "annotations": {"color": "gray"}}]}}]
+    if len(data["by_broker"]) > 1:
+        parts = [f"{b} {v['eval']:,.0f}원({v['n']})" for b, v in data["by_broker"].items()]
+        out.append({"object": "block", "type": "paragraph",
+                    "paragraph": {"rich_text": _rt("증권사별: " + "  ·  ".join(parts), color="gray")}})
+    out.append({"object": "block", "type": "table", "table": {
+        "table_width": 5, "has_column_header": True, "has_row_header": False,
+        "children": _cell_rows(data)}})
+    sig = (f"⭐ 오늘 모멘텀 리포트 추천과 겹치는 보유: "
+           + ", ".join(f"{r['name']}({'/'.join(r['signal'])})" for r in held)) if held else \
+          "⭐ 오늘 리포트 추천과 겹치는 보유 종목 없음"
+    out.append({"object": "block", "type": "callout", "callout": {
+        "icon": {"type": "emoji", "emoji": "🎯"}, "color": "gray_background",
+        "rich_text": _rt(sig)}})
+    return out
+
+
+def upload_notion(data):
+    """고정 페이지 1개를 제자리 갱신. 매번 새 페이지를 만들지 않는다.
+
+    안전장치(2026-06-24 리포트 오삭제 사고 재발 방지): 페이지 id 를 로컬에 기억하고,
+    삭제 전 그 페이지의 제목이 NOTION_TITLE 인지 확인한다. DB row 는 절대 건드리지 않는다.
+    """
+    key = os.environ.get("NOTION_API_KEY")
+    if not key:
+        print("  ℹ️ NOTION_API_KEY 없음 → 노션 업로드 생략")
+        return
+    h = {"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+         "Notion-Version": "2022-06-28"}          # 블록/DB 조작은 이 버전 고정 (파일업로드 버전은 DB쿼리 깨짐)
+    parent = os.environ.get("NOTION_PARENT_PAGE_ID", "3324a00632f880fbb014d766d87a1079")
+
+    pid = None
+    if os.path.exists(PAGE_REF):
+        try:
+            pid = json.load(open(PAGE_REF)).get("page_id")
+        except Exception:
+            pid = None
+    if pid:                                        # 기억한 페이지가 정말 내 페이지인지 검증
+        r = requests.get(f"https://api.notion.com/v1/pages/{pid}", headers=h, timeout=20)
+        ok = False
+        if r.status_code == 200:
+            j = r.json()
+            title = "".join(t.get("plain_text", "") for t
+                            in (j.get("properties", {}).get("title", {}).get("title") or []))
+            ok = (not j.get("archived")) and title == NOTION_TITLE
+        if not ok:
+            print("  ⚠️ 기억한 페이지가 내 것이 아니거나 사라짐 → 새로 만듦 (기존 페이지 안 건드림)")
+            pid = None
+
+    if pid:                                        # 기존 페이지 자식만 제거 후 재작성
+        r = requests.get(f"https://api.notion.com/v1/blocks/{pid}/children?page_size=100",
+                         headers=h, timeout=20)
+        for b in (r.json().get("results") or []):
+            requests.delete(f"https://api.notion.com/v1/blocks/{b['id']}", headers=h, timeout=20)
+        requests.patch(f"https://api.notion.com/v1/blocks/{pid}/children", headers=h, timeout=30,
+                       json={"children": _blocks(data)})
+    else:
+        r = requests.post("https://api.notion.com/v1/pages", headers=h, timeout=30,
+                          json={"parent": {"page_id": parent},
+                                "properties": {"title": {"title": [{"text": {"content": NOTION_TITLE}}]}},
+                                "children": _blocks(data)})
+        if r.status_code >= 300:
+            print(f"  ⚠️ 노션 페이지 생성 실패 {r.status_code}: {r.text[:200]}")
+            return
+        pid = r.json()["id"]
+        json.dump({"page_id": pid}, open(PAGE_REF, "w"))
+    print(f"  ✅ 노션 갱신: https://notion.so/{pid.replace('-','')}")
+
+
 def main():
     rows, summary = kis_balance(_trade_token())
     rows += toss_holdings()
@@ -241,6 +350,7 @@ def main():
     for b, v in by_broker.items():
         print(f"  {b}: {v['eval']:,.0f}원 ({v['n']}종목, {(v['eval']/v['cost']-1)*100 if v['cost'] else 0:+.1f}%)")
     print(f"저장 {OUT}")
+    upload_notion(data)
 
 
 if __name__ == "__main__":
