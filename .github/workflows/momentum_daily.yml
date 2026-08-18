@@ -43,6 +43,7 @@ jobs:
           NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
           NOTION_DAILY_DB_ID: ${{ secrets.NOTION_DAILY_DB_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        MOM_TARGET: "dashboard"   # 통합 대시보드 토글로 (날짜별 페이지 생성 안 함)
         run: python momentum_daily.py
 
       - name: Run momentum report (20%컷·추세게이트 변형 — 별도 Notion 페이지)
@@ -57,6 +58,7 @@ jobs:
           MOM_GATE: "1"
           MOM_LABEL: " (20%컷·추세게이트)"
           MOM_TAG: "_v20g"
+        MOM_TARGET: "dashboard"   # 통합 대시보드 토글로 (날짜별 페이지 생성 안 함)
         run: python momentum_daily.py
         continue-on-error: true
 
