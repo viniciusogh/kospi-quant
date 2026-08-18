@@ -97,3 +97,46 @@
 - Notion 아카이브 오류 → archived 감지 시 ID 자동 삭제 로직 내장
 - 노트북 cron 과 클라우드 cron 의 git conflict (2026-05-22) → 노트북 cron 전체 폐기로 해결
 - `latest_*_reco.csv` 가 .gitignore 라 investment-chatbot 노트북에 안 옴 → .gitignore 풀고 workflow commit step 추가 (2026-05-24)
+
+## 비용·과금 구조 (2026-08-18 사고 후 정리 — 반드시 읽을 것)
+
+유료 서비스가 **둘**이고, 둘 다 조용히 소진되면 파이프라인이 멈춘다. 과거에 5일간 아무도 몰랐다.
+
+| 서비스 | 용도 | 소진되면 | 확인 위치 |
+|---|---|---|---|
+| **Webshare** 회전 프록시 | 유튜브 자막 취득(클라우드 IP 는 유튜브가 차단) | `402 Payment Required` → 자막 0건 | dashboard.webshare.io — **대역폭 잔량**(월 1GB), 요청당 실측 131KB ≈ 월 8,000요청 |
+| **Gemini API** | 종목 분석·유튜브 분석·헤드라인 | `429 prepayment credits are depleted` → 분석 0건 | ai.studio/projects — **선불 크레딧 잔액**. 월 지출 한도(₩35,000)와 **다른 값**이다 |
+
+### 겪은 사고와 원인 (같은 실수 반복 금지)
+
+1. **Webshare 월 1GB 를 3일에 소진** — 돈 문제가 아니라 설계 문제였다.
+   `retries_when_blocked` 기본값 **10** × 자막 실패 영상을 processed 마킹 안 함(매 실행 재시도) × **매시간 실행**
+   = 실패 영상 8개에만 하루 640회. → 재시도 2회, 실패 3회 후 영구 스킵(`failed_videos.json`), 일일 상한(`yt_quota.json`).
+2. **Gemini 실패 → 자막 재취득** 2차 낭비. 자막은 받았는데 Gemini 가 실패하면 마킹을 안 해서
+   다음 실행이 같은 자막을 다시 받는다(대역폭 재소모). → Gemini 실패도 카운터에 반영해 3회 후 포기·마킹.
+3. **`daily_quant` 가 매일 2번 실행** — cron-job.org(16:45)와 GitHub 네이티브 schedule(18시경) 둘 다 발동.
+   모멘텀 Gemini·KIS 2배. 네이티브는 '백업' 이라 삭제 대신 `MOM_SKIP_IF_DONE`(대시보드에 오늘자
+   토글이 있으면 Gemini 수집 전 return) → 1차 실패 시에만 2차가 일한다.
+4. **Gemini 병렬 5** 가 분당 한도를 자체 유발 → `YT_WORKERS=2`.
+
+### 규칙
+
+- **무음 실패 금지**: 인프라 장애가 워크플로 success 로 위장되면 안 된다. 처리 대상이 있는데
+  성공 0 이면 `SystemExit(1)`. (youtube_report, daily_recommend 적용)
+- **재시도에 상한을 둘 것**: 실패를 무한 재시도하는 코드는 유료 자원을 태운다. 반드시 카운터 + 포기 조건.
+- **밀린 backlog 를 한 번에 처리하지 말 것**: `YT_DAYS_BACK=1`(어제+오늘), `YT_MAX_PER_DAY=20`.
+- **대시보드 상태 경고**: `portfolio.py:health_warnings()` 가 유튜브·모멘텀 정지를 감지해
+  통합 대시보드 최상단에 🚨 콜아웃으로 띄운다. 사용자가 매일 보는 화면이라 여기가 가장 빨리 발견된다.
+  **파이프라인을 추가하면 이 함수에 점검 항목도 추가할 것.**
+
+### 비용 조절 노브 (환경변수)
+
+`WEBSHARE_RETRIES`(2) · `YT_MAX_FAIL`(3) · `YT_MAX_PER_DAY`(20) · `YT_DAYS_BACK`(1) · `YT_WORKERS`(2)
+· `YT_ANALYSIS_DAYS`(7, daily_recommend 입력 기간 — 실측 216,218자. 3 으로 낮추면 약 60% 절감)
+· `MOM_SKIP_IF_DONE`(1) · `SKIP_NOTION_REPORT`(폐지한 리포트용) · `MOM_TARGET`(dashboard)
+
+### 폐지된 리포트 (재도입 금지 — 사용자가 안 봄)
+
+US 추천종목(워크플로 schedule 제거) · KOSPI 수급 · KOSPI Quality · 교집합 (노션 업로드만 차단,
+**CSV 생성은 유지해야 함** — `latest_kospi_supply.csv`=모멘텀 유니버스, `latest_kospi_quality.csv`=모멘텀
+부채순위·보유종목 리포트 섹터/PER 순위). 코스닥 리포트도 폐지 상태 유지.

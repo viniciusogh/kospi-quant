@@ -283,6 +283,39 @@ def signal_overlap(codes):
     return hit
 
 
+def health_warnings():
+    """파이프라인 정지를 대시보드에 노출한다.
+
+    2026-08-12~17 에 유튜브 분석이 5일간 0건이었는데 워크플로가 success 로 떠서 아무도 몰랐다.
+    실패를 종료코드로 드러내는 것과 별개로, **사용자가 매일 보는 화면**에 띄워야 실제로 발견된다.
+    """
+    warn = []
+    today = datetime.now(KST).date()
+
+    # 유튜브 분석본이 최근에 쌓이고 있나 (프록시·Gemini 어느 쪽이 막혀도 여기서 드러난다)
+    try:
+        d = json.load(open(os.path.join(_DIR, "latest_youtube_analysis.json")))
+        last = max(d.keys()) if d else None
+        if last:
+            gap = (today - datetime.strptime(last, "%Y-%m-%d").date()).days
+            if gap >= 2:
+                warn.append(f"유튜브 분석이 {gap}일째 멈춤 (마지막 {last}) — 프록시 대역폭·Gemini 크레딧 확인")
+    except Exception:
+        pass
+
+    # 모멘텀 리포트가 최신 거래일 기준인가
+    try:
+        import pandas as pd
+        h = pd.read_csv(os.path.join(_DIR, "momentum_history.csv"), encoding="utf-8-sig")
+        last = str(h["date"].max())
+        gap = (today - datetime.strptime(last, "%Y-%m-%d").date()).days
+        if gap >= 4:          # 주말·연휴를 감안한 여유
+            warn.append(f"모멘텀 리포트가 {gap}일째 갱신 안 됨 (마지막 {last}) — daily_quant 실행 확인")
+    except Exception:
+        pass
+    return warn
+
+
 def _rt(text, bold=False, color=None):
     a = {"bold": bold}
     if color:
@@ -311,9 +344,15 @@ def _cell_rows(data):
 
 def _blocks(data):
     t = data["total"]
+    out = []
+    for w in health_warnings():
+        out.append({"object": "block", "type": "callout", "callout": {
+            "icon": {"type": "emoji", "emoji": "🚨"}, "color": "red_background",
+            "rich_text": [{"type": "text", "text": {"content": "점검 필요 — " + w},
+                           "annotations": {"bold": True}}]}})
     col = "red_background" if t["pl"] > 0 else ("blue_background" if t["pl"] < 0 else "gray_background")
     held = [r for r in data["positions"] if r["signal"]]
-    out = [{"object": "block", "type": "callout", "callout": {
+    out += [{"object": "block", "type": "callout", "callout": {
         "icon": {"type": "emoji", "emoji": "💰"}, "color": col,
         "rich_text": [
             {"type": "text", "text": {"content": f"총평가 {t['eval']:,.0f}원\n"}, "annotations": {"bold": True}},
