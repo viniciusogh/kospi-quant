@@ -238,6 +238,45 @@ def clear_reports():
     return pid
 
 
+def _slot_slot(tail, div, slot, keep_title=None):
+    """슬롯 삽입 위치와 기존 토글을 찾는다.
+    keep_title 이 주어지고 제목까지 같으면 그 토글을 지우지 않고 반환(이어붙이기용).
+    반환 (after_block_id, 재사용할_토글_id 또는 None)."""
+    after, reuse = div, None
+    for b in tail:
+        if b["type"] != "toggle":
+            continue
+        t = "".join(x.get("plain_text", "") for x in b["toggle"]["rich_text"])
+        sv = _slot_of(t)
+        if sv == slot:
+            if keep_title is not None and t == keep_title:
+                reuse = b["id"]          # 같은 날 같은 리포트 → 재사용
+            else:
+                _delete([b["id"]])       # 이전 실행분·날짜 바뀜 → 교체
+            continue
+        if sv < slot:
+            after = b["id"]
+    return after, reuse
+
+
+def get_or_create_report(toggle_title, color="gray_background"):
+    """리포트 토글을 '있으면 재사용, 없으면 생성'. 유튜브처럼 하루 동안 이어붙이는 경우에 쓴다.
+    같은 슬롯에 제목이 다른(=어제자) 토글이 있으면 지우고 새로 만든다."""
+    pid, _ = _skeleton()
+    _, _, div, _, tail = _layout(pid)
+    if div is None:
+        print("  ⚠️ 대시보드 뼈대를 찾지 못함 — 중단")
+        return None
+    after, reuse = _slot_slot(tail, div, _slot_of(toggle_title), keep_title=toggle_title)
+    if reuse:
+        return reuse
+    r = _append(pid, [{"object": "block", "type": "toggle", "toggle": {
+        "rich_text": [{"type": "text", "text": {"content": toggle_title},
+                       "annotations": {"bold": True}}],
+        "color": color, "children": []}}], after=after)
+    return r[0]["id"] if r else None
+
+
 def add_report(toggle_title, header_blocks, items=None, color="gray_background"):
     """리포트 토글 upsert. 같은 슬롯이 이미 있으면 지우고 같은 자리에 다시 넣는다.
 
@@ -249,19 +288,7 @@ def add_report(toggle_title, header_blocks, items=None, color="gray_background")
     if div is None:
         print("  ⚠️ 대시보드 뼈대를 찾지 못함 — 중단")
         return None
-    slot = _slot_of(toggle_title)
-
-    after = div                            # 내 슬롯보다 앞선 리포트 뒤에 삽입
-    for b in tail:
-        if b["type"] != "toggle":
-            continue
-        t = "".join(x.get("plain_text", "") for x in b["toggle"]["rich_text"])
-        s = _slot_of(t)
-        if s == slot:                      # 같은 슬롯 = 이전 실행분 → 제거하고 그 자리 차지
-            _delete([b["id"]])
-            continue
-        if s < slot:
-            after = b["id"]
+    after, _ = _slot_slot(tail, div, _slot_of(toggle_title))   # 같은 슬롯 기존분은 교체
 
     r = _append(pid, [{"object": "block", "type": "toggle", "toggle": {
         "rich_text": [{"type": "text", "text": {"content": toggle_title},

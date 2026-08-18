@@ -507,12 +507,37 @@ def _get_or_create_date_page(today: str) -> str | None:
 
 
 
+def _dashboard_youtube_root(today: str) -> str | None:
+    """통합 대시보드의 유튜브 토글(슬롯4) id. 채널 토글들이 이 안에 들어간다.
+    사용자는 통합 포트폴리오 페이지만 보므로 날짜별 유튜브 페이지는 만들지 않는다(중복 방지)."""
+    try:
+        import dashboard as D
+    except Exception as e:
+        log(f"❌ dashboard 모듈 로드 실패: {e}")
+        return None
+    title = f"📺 {today} 유튜브 분석"
+    tid = D.get_or_create_report(title)
+    if not tid:
+        return None
+    pages = _load_pages()
+    entry = _get_entry(pages, today)
+    if not isinstance(entry, dict) or entry.get("page_id") != tid:
+        # 토글이 새로 만들어졌거나 대상이 바뀜 → 채널 캐시 초기화(옛 토글 id 재사용 방지)
+        pages[today] = {"page_id": tid, "channels": {}}
+        _save_daily_pages(pages)
+        log(f"  📺 대시보드 유튜브 토글 준비: {tid}")
+    return tid
+
+
 def get_or_create_daily_page(today: str) -> str | None:
     """
     오늘 날짜의 통합 유튜브 분석 페이지 ID 반환 (채널 무관, 1개/일).
     날짜 페이지 ({today}) 안에 자식으로 만듦. 다른 추천 페이지들과 같은 위치.
     제목: 📺 {today} 유튜브 분석
     """
+    if os.environ.get("YT_TARGET", "dashboard") == "dashboard":
+        return _dashboard_youtube_root(today)      # 통합 대시보드 토글로 (기본)
+
     pages = _load_pages()
     entry = _get_entry(pages, today)
 
