@@ -63,14 +63,19 @@ def _title_of(page):
 
 
 def _find_by_title(parent):
-    """부모 페이지의 자식 중 제목이 일치하는 child_page 를 찾는다 (상태파일 대체)."""
+    """부모 페이지의 자식 중 제목이 일치하는 child_page 를 찾는다 (상태파일 대체).
+    반환 (page_id, 조회성공여부). 조회 자체가 실패했는데 '없음'으로 오판하면
+    대시보드 페이지가 중복 생성되므로 성공여부를 분리해서 돌려준다."""
     try:
-        for b in children(parent):
-            if b.get("type") == "child_page" and b["child_page"].get("title") == TITLE:
-                return b["id"]
+        kids = children(parent)
     except Exception:
-        pass
-    return None
+        return None, False
+    if not kids:                      # 부모 페이지에 자식이 0개일 수는 없다(Report DB 등 존재) → 조회 실패로 본다
+        return None, False
+    for b in kids:
+        if b.get("type") == "child_page" and b["child_page"].get("title") == TITLE:
+            return b["id"], True
+    return None, True
 
 
 def page_id():
@@ -95,11 +100,13 @@ def page_id():
                 return pid
         print("  ⚠️ 기억한 대시보드 페이지가 내 것이 아니거나 사라짐 → 새로 만듦")
     parent = os.environ.get("NOTION_PARENT_PAGE_ID", "3324a00632f880fbb014d766d87a1079")
-    found = _find_by_title(parent)          # 상태파일 없는 환경(GitHub Actions)에서도 같은 페이지를 찾는다
+    found, ok = _find_by_title(parent)       # 상태파일 없는 환경(GitHub Actions)에서도 같은 페이지를 찾는다
     if found:
         st["page_id"] = found
         _save(st)
         return found
+    if not ok:                               # 조회 실패 → 새로 만들지 않는다(중복 페이지 방지)
+        raise RuntimeError("노션 부모 페이지 조회 실패 — 대시보드 페이지 생성을 보류합니다")
     r = requests.post(f"{API}/pages", headers=_h(), timeout=30, json={
         "parent": {"page_id": parent},
         "properties": {"title": {"title": [{"text": {"content": TITLE}}]}},

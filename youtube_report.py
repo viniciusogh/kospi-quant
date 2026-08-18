@@ -47,6 +47,8 @@ NOTION_DATE_ROOT = os.environ.get("NOTION_PARENT_PAGE_ID", "3324a00632f880fbb014
 
 PROCESSED_FILE       = os.path.join(_BASE_DIR, "processed_videos.json")
 FAILED_FILE          = os.path.join(_BASE_DIR, "failed_videos.json")
+QUOTA_FILE           = os.path.join(_BASE_DIR, "yt_quota.json")
+MAX_ATTEMPTS_PER_DAY = int(os.environ.get("YT_MAX_PER_DAY", "40"))  # 프록시 월 1GB 보호
 MAX_FAIL_BEFORE_SKIP = int(os.environ.get("YT_MAX_FAIL", "3"))   # 이 횟수 실패하면 영구 스킵
 NOTION_DAILY_PAGES   = os.path.join(_BASE_DIR, "notion_daily_pages.json")
 ANALYSIS_CACHE       = os.path.join(_BASE_DIR, "latest_youtube_analysis.json")  # daily_recommend.py 가 사용
@@ -67,6 +69,27 @@ KST = timezone(timedelta(hours=9))
 # ==========================
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+
+def _quota(today: str) -> int:
+    """오늘 자막 시도 횟수. 프록시 월 대역폭(1GB≈8,000요청)을 하루에 태우지 못하게 하는 상한."""
+    if os.path.exists(QUOTA_FILE):
+        try:
+            with open(QUOTA_FILE) as f:
+                d = json.load(f)
+            if d.get("date") == today:
+                return int(d.get("attempts", 0))
+        except Exception:
+            pass
+    return 0
+
+
+def _quota_add(today: str, n: int):
+    # open(...,"w") 가 파일을 먼저 비우므로 누적값을 반드시 열기 전에 읽어야 한다
+    # (안 그러면 _quota() 가 빈 파일을 읽어 0 을 돌려주고 카운트가 리셋된다)
+    total = _quota(today) + n
+    with open(QUOTA_FILE, "w") as f:
+        json.dump({"date": today, "attempts": total}, f)
+
 
 def load_failed() -> dict:
     """영상별 자막 실패 횟수. 자막 없는 영상을 매시간 무한 재시도하며 프록시 대역폭을 태우는 것 방지."""
@@ -678,6 +701,16 @@ def _process_channel(channel: dict, today: str, page_id: str):
     pool = today_new if os.environ.get("YT_TODAY_ONLY") == "1" else (today_new + other_new)
     cap = int(os.environ.get("YT_MAX_VIDEOS") or MAX_VIDEOS_PER_RUN)
     target      = list(reversed(pool[:cap]))
+
+    used = _quota(today)
+    left = MAX_ATTEMPTS_PER_DAY - used
+    if left <= 0:
+        log(f"⏸️ 오늘 자막 시도 한도 도달 ({used}/{MAX_ATTEMPTS_PER_DAY}) — 프록시 대역폭 보호. 종료.")
+        return
+    if len(target) > left:
+        log(f"⏸️ 일일 한도로 {len(target)}개 → {left}개만 처리 ({used}/{MAX_ATTEMPTS_PER_DAY} 사용)")
+        target = target[:left]
+    _quota_add(today, len(target))
 
     if not target:
         log("✅ 처리할 새 영상 없음. 종료.")

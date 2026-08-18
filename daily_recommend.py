@@ -71,8 +71,11 @@ def load_youtube_analysis_from_cache() -> str:
         return ""
 
     today = datetime.now(KST)
-    # 최근 7일 분석본 (오늘 포함) 사용 - 사용자 요청
-    dates = [(today - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)]
+    # 최근 N일 분석본 (오늘 포함) 사용 - 사용자 요청. 기본 7일.
+    # 이 입력이 Gemini 호출 크기를 결정한다 — 실측 8/10 에 216,218자였고 그날 429(쿼터초과) 발생.
+    # 비용을 줄이려면 YT_ANALYSIS_DAYS=3 처럼 낮추면 된다(리포트 근거 기간이 줄어드는 트레이드오프).
+    days = int(os.environ.get("YT_ANALYSIS_DAYS", "7"))
+    dates = [(today - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(days)]
 
     out = []
     for date in dates:

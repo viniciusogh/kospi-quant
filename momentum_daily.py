@@ -315,6 +315,25 @@ def main():
     if trend:
         log(f"KOSPI 추세: {trend['emoji']} {trend['text']}")
     # 게이트 발동: MOM_GATE 이고 비강세(추세이탈)면 현금 모드 — 추천 비우고 enrichment 생략
+    # 중복 실행 방지: daily_quant 는 cron-job.org(주)와 GitHub schedule(백업) 이 매일 둘 다 발동해
+    # 같은 리포트를 2번 만들고 있었다(모멘텀 Gemini·KIS 호출 2배). 대시보드에 이미 오늘자
+    # 토글이 있으면 Gemini 수집 전에 빠진다 — 1차가 실패했을 때만 2차가 실제로 일하므로
+    # 백업 성격은 그대로 유지된다.
+    if MOM_TARGET == "dashboard" and os.environ.get("MOM_SKIP_IF_DONE", "1") == "1":
+        try:
+            import dashboard as _D
+            _title = f"🚀 {today_str} KOSPI 30일 모멘텀 추천{MOM_LABEL}"
+            _, _, _div, _, _tail = _D._layout(_D.page_id())
+            for _b in _tail:
+                if _b["type"] != "toggle":
+                    continue
+                _t = "".join(x.get("plain_text", "") for x in _b["toggle"]["rich_text"])
+                if _t == _title:
+                    log(f"⏭️ 오늘자 리포트가 이미 대시보드에 있음 → 건너뜀 (강제: MOM_SKIP_IF_DONE=0)")
+                    return
+        except Exception as e:
+            log(f"  중복 확인 실패(계속 진행): {str(e)[:70]}")
+
     cash_mode = MOM_GATE and trend is not None and not trend.get("uptrend", True)
     flows, roes, incomes, ebitdas = {}, {}, {}, {}
     if not cash_mode:
