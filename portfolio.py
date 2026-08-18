@@ -5,7 +5,7 @@
 실행: python portfolio.py   (.env 에 APP_KEY/APP_SECRET/KIS_CANO 필요)
 """
 import os, csv, json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import requests
 from momentum_backtest import token, _get, BASE, APP_KEY, APP_SECRET, KST
@@ -283,6 +283,48 @@ def signal_overlap(codes):
     return hit
 
 
+def recent_changes(code, tok, n=5):
+    """최근 n거래일 전일대비 등락률 [(YYYYMMDD, 등락)] — 종가 기준, 최신순.
+    KIS 일봉 1콜. 보유종목 추이를 표에 붙이기 위한 용도."""
+    today = datetime.now(KST)
+    j = _get(f"{BASE}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
+             _hdr(tok, "FHKST03010100", trade=False),
+             {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code,
+              "FID_INPUT_DATE_1": (today - timedelta(days=45)).strftime("%Y%m%d"),
+              "FID_INPUT_DATE_2": today.strftime("%Y%m%d"),
+              "FID_PERIOD_DIV_CODE": "D", "FID_ORG_ADJ_PRC": "0"})
+    if not j or j.get("rt_cd") != "0":
+        return []
+    rows = sorted((r["stck_bsop_date"], float(r["stck_clpr"]))
+                  for r in (j.get("output2") or [])
+                  if r.get("stck_clpr") and r["stck_clpr"] != "0")
+    out = []
+    for i in range(len(rows) - 1, 0, -1):
+        prev = rows[i - 1][1]
+        if prev:
+            out.append((rows[i][0], rows[i][1] / prev - 1))
+        if len(out) >= n:
+            break
+    return out
+
+
+def _hist_cell(hist):
+    """최근 5일 셀: '8/18(화) -2.3%' 를 줄바꿈으로. 상승 빨강·하락 파랑(국내 관습)."""
+    if not hist:
+        return [{"type": "text", "text": {"content": "—"}, "annotations": {"color": "gray"}}]
+    wd = "월화수목금토일"
+    rich = []
+    for i, (d, chg) in enumerate(hist):
+        dt = datetime.strptime(d, "%Y%m%d")
+        col = "red" if chg > 0 else ("blue" if chg < 0 else "gray")
+        rich.append({"type": "text",
+                     "text": {"content": f"{'' if i == 0 else chr(10)}{dt.month}/{dt.day}({wd[dt.weekday()]}) "},
+                     "annotations": {"color": "gray"}})
+        rich.append({"type": "text", "text": {"content": f"{chg*100:+.1f}%"},
+                     "annotations": {"color": col}})
+    return rich
+
+
 def health_warnings():
     """파이프라인 정지를 대시보드에 노출한다.
 
@@ -327,7 +369,7 @@ def _cell_rows(data):
     """표 행: 종목(증권사) / 수량 / 평단→현재가 / 평가금액 / 수익률. 등락색은 한국식(상승 빨강)."""
     head = [{"object": "block", "type": "table_row", "table_row": {"cells": [
         _rt("종목", True), _rt("수량", True), _rt("평단 → 현재가", True),
-        _rt("평가금액", True), _rt("수익률", True)]}}]
+        _rt("평가금액", True), _rt("수익률", True), _rt("최근 5일 (전일대비)", True)]}}]
     rows = []
     for r in data["positions"]:
         col = "red" if r["ret"] > 0 else ("blue" if r["ret"] < 0 else "gray")
@@ -338,7 +380,8 @@ def _cell_rows(data):
             name, _rt(f"{r['qty']:,.0f}"),
             _rt(f"{r['avg']:,.0f} → {r['price']:,.0f}"),
             _rt(f"{r['eval']:,.0f}"),
-            _rt(f"{r['ret']*100:+.1f}%", True, col)]}})
+            _rt(f"{r['ret']*100:+.1f}%", True, col),
+            _hist_cell(r.get("hist"))]}})
     return head + rows
 
 
@@ -364,7 +407,7 @@ def _blocks(data):
         out.append({"object": "block", "type": "paragraph",
                     "paragraph": {"rich_text": _rt("증권사별: " + "  ·  ".join(parts), color="gray")}})
     out.append({"object": "block", "type": "table", "table": {
-        "table_width": 5, "has_column_header": True, "has_row_header": False,
+        "table_width": 6, "has_column_header": True, "has_row_header": False,
         "children": _cell_rows(data)}})
     sig = (f"⭐ 오늘 모멘텀 리포트 추천과 겹치는 보유: "
            + ", ".join(f"{r['name']}({'/'.join(r['signal'])})" for r in held)) if held else \
@@ -396,7 +439,10 @@ def main():
     if not rows:
         print("보유 종목 없음 (KIS_CANO 미설정 + holdings_manual.csv 없음)")
         return
-    fill_price(token(), rows)          # 시세는 기존 리포트용 키로 (매매키에 시세권한 없을 수 있음)
+    tok_px = token()                   # 시세는 기존 리포트용 키로 (매매키에 시세권한 없을 수 있음)
+    fill_price(tok_px, rows)
+    for r in rows:                     # 최근 5일 전일대비 (종목당 KIS 1콜)
+        r["hist"] = recent_changes(r["code"], tok_px)
 
     hit = signal_overlap({r["code"] for r in rows})
     for r in rows:
