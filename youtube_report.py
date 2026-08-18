@@ -48,7 +48,8 @@ NOTION_DATE_ROOT = os.environ.get("NOTION_PARENT_PAGE_ID", "3324a00632f880fbb014
 PROCESSED_FILE       = os.path.join(_BASE_DIR, "processed_videos.json")
 FAILED_FILE          = os.path.join(_BASE_DIR, "failed_videos.json")
 QUOTA_FILE           = os.path.join(_BASE_DIR, "yt_quota.json")
-MAX_ATTEMPTS_PER_DAY = int(os.environ.get("YT_MAX_PER_DAY", "40"))  # 프록시 월 1GB 보호
+# 프록시 월 1GB 와 Gemini 일일 쿼터를 함께 보호. 40 은 Gemini 429 를 유발했으므로 20 으로.
+MAX_ATTEMPTS_PER_DAY = int(os.environ.get("YT_MAX_PER_DAY", "20"))
 MAX_FAIL_BEFORE_SKIP = int(os.environ.get("YT_MAX_FAIL", "3"))   # 이 횟수 실패하면 영구 스킵
 NOTION_DAILY_PAGES   = os.path.join(_BASE_DIR, "notion_daily_pages.json")
 ANALYSIS_CACHE       = os.path.join(_BASE_DIR, "latest_youtube_analysis.json")  # daily_recommend.py 가 사용
@@ -727,7 +728,8 @@ def _process_channel(channel: dict, today: str, page_id: str):
         return {"video": v, "transcript_len": len(t), "analysis": a, "ok": True}
 
     results = []
-    with ThreadPoolExecutor(max_workers=5) as ex:
+    # 병렬 5 는 Gemini 분당 한도를 즉시 넘겨 429 를 유발한다(2026-08-18 전건 실패).
+    with ThreadPoolExecutor(max_workers=int(os.environ.get("YT_WORKERS", "2"))) as ex:
         futures = {ex.submit(_process_video, v): v for v in target}
         for fut in as_completed(futures):
             v = futures[fut]
@@ -760,14 +762,27 @@ def _process_channel(channel: dict, today: str, page_id: str):
         # Gemini 분석 실패(429 등) 영상은 마킹·업로드 안 함 → 다음 run 에서 재시도.
         # (예전엔 무조건 마킹해서 결제 소진 시간대 영상이 영구 skip 됐음)
         if not r["analysis"]:
-            log(f"    ⏭️ Gemini 분석 실패 → 마킹 안 함, 다음 run 재시도: {r['video']['title'][:40]}")
+            # 자막은 받았는데 Gemini 가 실패한 경우. 마킹을 안 하면 다음 실행에서 자막을
+            # 다시 받아 프록시 대역폭을 재소모한다(2026-08-18: 35건 자막·분석 0건 사례).
+            # 실패 카운터에 반영해 MAX_FAIL_BEFORE_SKIP 회 넘으면 포기한다.
+            vid = r["video"]["id"]
+            failed[vid] = failed.get(vid, 0) + 1
+            if failed[vid] >= MAX_FAIL_BEFORE_SKIP:
+                log(f"    ⏭️ Gemini {failed[vid]}회 실패 → 포기(자막 재취득 방지): {r['video']['title'][:34]}")
+                processed_now.append(vid)
+            else:
+                log(f"    ⏭️ Gemini 실패({failed[vid]}/{MAX_FAIL_BEFORE_SKIP}회) → 다음 run 재시도: {r['video']['title'][:34]}")
             continue
         all_blocks.extend(build_video_blocks(r["video"], r["analysis"], r["transcript_len"]))
         processed_now.append(r["video"]["id"])
         _save_analysis_cache(today, channel, r["video"], r["analysis"])
 
     if not all_blocks:
-        log("⚠️ 업로드할 내용 없음. 종료.")
+        if processed_now:            # Gemini 포기분 — 마킹해서 자막 재취득을 끊는다
+            processed.update(processed_now)
+            save_processed(processed)
+        save_failed(failed)
+        log(f"⚠️ 업로드할 내용 없음 (Gemini 포기 {len(processed_now)}건 마킹). 종료.")
         return
 
     # 업데이트 시간 헤딩 추가 (어느 시간 모드에서 추가된 영상인지 표시)
@@ -788,6 +803,7 @@ def _process_channel(channel: dict, today: str, page_id: str):
     if toggle_id and append_to_block(toggle_id, all_blocks, today):
         processed.update(processed_now)
         save_processed(processed)
+        save_failed(failed)          # 포기 처리분·재시도 카운트 반영
         log(f"🎉 완료! {len(processed_now)}개 영상 분석 이어붙이기 완료")
 
 if __name__ == "__main__":
