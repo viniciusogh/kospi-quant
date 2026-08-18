@@ -48,6 +48,7 @@ jobs:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
           NOTION_DAILY_DB_ID: ${{ secrets.NOTION_DAILY_DB_ID }}
+          YT_TODAY_ONLY: "1"        # 오늘 게시분만 — 밀린 backlog 를 한꺼번에 돌려 토큰·대역폭 태우는 것 방지
           WEBSHARE_USER: ${{ secrets.WEBSHARE_USER }}
           WEBSHARE_PASS: ${{ secrets.WEBSHARE_PASS }}
         run: python youtube_report.py
