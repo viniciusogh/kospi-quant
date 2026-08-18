@@ -578,8 +578,15 @@ def get_or_create_channel_toggle(today: str, channel: dict) -> str | None:
     pages = _load_pages()
     entry = _get_entry(pages, today)
     if entry is None:
-        log(f"❌ 통합 페이지 entry 없음 — get_or_create_daily_page 먼저 호출되어야 함")
-        return None
+        # 지연 생성: 올릴 내용이 확정된 뒤에만 부모를 만든다. 미리 만들면 새 영상이 없는 날
+        # (주말·휴일)에 빈 토글이 전날 분석을 덮어쓴다.
+        if not get_or_create_daily_page(today):
+            log("❌ 유튜브 부모(대시보드 토글) 확보 실패")
+            return None
+        pages = _load_pages()
+        entry = _get_entry(pages, today)
+        if entry is None:
+            return None
 
     slug = channel["slug"]
     if slug in entry.get("channels", {}):
@@ -671,11 +678,8 @@ def _main():
     today = datetime.now(KST).strftime("%Y-%m-%d")
     log(f"▶ 다채널 분석 시작 (KST 기준: {today}, {len(CHANNELS)}개 채널)")
 
-    # 통합 페이지 한 번만 만들거나 가져옴 (채널 무관)
-    page_id = get_or_create_daily_page(today)
-    if not page_id:
-        log("❌ 통합 페이지 가져오기 실패. 종료.")
-        return
+    # 부모(대시보드 유튜브 토글)는 올릴 내용이 확정된 뒤 get_or_create_channel_toggle 에서
+    # 지연 생성한다. 여기서 미리 만들면 새 영상이 없는 날 빈 토글이 전날 분석을 덮어쓴다.
 
     for channel in CHANNELS:
         log(f"")

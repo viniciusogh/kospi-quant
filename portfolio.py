@@ -334,25 +334,33 @@ def health_warnings():
     warn = []
     today = datetime.now(KST).date()
 
+    def busgap(last_str):
+        """마지막 갱신일 이후 지난 **영업일** 수. 주말·연휴에 오탐이 뜨지 않게 달력일이 아니라
+        영업일로 센다(numpy busday_count 는 토·일 제외. 공휴일은 임계값 3으로 흡수)."""
+        try:
+            import numpy as np
+            return int(np.busday_count(last_str, today.strftime("%Y-%m-%d")))
+        except Exception:
+            return 0
+
     # 유튜브 분석본이 최근에 쌓이고 있나 (프록시·Gemini 어느 쪽이 막혀도 여기서 드러난다)
     try:
         d = json.load(open(os.path.join(_DIR, "latest_youtube_analysis.json")))
         last = max(d.keys()) if d else None
-        if last:
-            gap = (today - datetime.strptime(last, "%Y-%m-%d").date()).days
-            if gap >= 2:
-                warn.append(f"유튜브 분석이 {gap}일째 멈춤 (마지막 {last}) — 프록시 대역폭·Gemini 크레딧 확인")
+        if last and busgap(last) >= 3:
+            warn.append(f"유튜브 분석이 영업일 {busgap(last)}일째 멈춤 (마지막 {last}) "
+                        f"— 프록시 대역폭·Gemini 크레딧 확인")
     except Exception:
         pass
 
-    # 모멘텀 리포트가 최신 거래일 기준인가
+    # 모멘텀 리포트가 최신 거래일 기준인가 (daily_quant 는 평일만 실행)
     try:
         import pandas as pd
         h = pd.read_csv(os.path.join(_DIR, "momentum_history.csv"), encoding="utf-8-sig")
         last = str(h["date"].max())
-        gap = (today - datetime.strptime(last, "%Y-%m-%d").date()).days
-        if gap >= 4:          # 주말·연휴를 감안한 여유
-            warn.append(f"모멘텀 리포트가 {gap}일째 갱신 안 됨 (마지막 {last}) — daily_quant 실행 확인")
+        if busgap(last) >= 3:
+            warn.append(f"모멘텀 리포트가 영업일 {busgap(last)}일째 갱신 안 됨 (마지막 {last}) "
+                        f"— daily_quant 실행 확인")
     except Exception:
         pass
     return warn
