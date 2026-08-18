@@ -46,6 +46,8 @@ NOTION_API_KEY        = os.environ["NOTION_API_KEY"]
 NOTION_DATE_ROOT = os.environ.get("NOTION_PARENT_PAGE_ID", "3324a00632f880fbb014d766d87a1079")  # Claude 페이지. 그 안에 날짜 페이지 자식
 
 PROCESSED_FILE       = os.path.join(_BASE_DIR, "processed_videos.json")
+FAILED_FILE          = os.path.join(_BASE_DIR, "failed_videos.json")
+MAX_FAIL_BEFORE_SKIP = int(os.environ.get("YT_MAX_FAIL", "3"))   # 이 횟수 실패하면 영구 스킵
 NOTION_DAILY_PAGES   = os.path.join(_BASE_DIR, "notion_daily_pages.json")
 ANALYSIS_CACHE       = os.path.join(_BASE_DIR, "latest_youtube_analysis.json")  # daily_recommend.py 가 사용
 COOKIES_FILE         = os.path.join(_BASE_DIR, "youtube_cookies.txt")
@@ -65,6 +67,22 @@ KST = timezone(timedelta(hours=9))
 # ==========================
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+
+def load_failed() -> dict:
+    """영상별 자막 실패 횟수. 자막 없는 영상을 매시간 무한 재시도하며 프록시 대역폭을 태우는 것 방지."""
+    if os.path.exists(FAILED_FILE):
+        try:
+            with open(FAILED_FILE) as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_failed(d: dict):
+    with open(FAILED_FILE, "w") as f:
+        json.dump(d, f, indent=2)
+
 
 def load_processed() -> set:
     if os.path.exists(PROCESSED_FILE):
@@ -177,6 +195,9 @@ def get_transcript(video_id: str) -> str | None:
             proxy_config = WebshareProxyConfig(
                 proxy_username=os.environ["WEBSHARE_USER"],
                 proxy_password=os.environ["WEBSHARE_PASS"],
+                # 기본값 10 은 대역폭을 태운다. 실패 영상 8개 × 10회 × 시간당 = 하루 640회.
+                # 2026-08-14~17 에 월 1GB 를 3일 만에 소진한 주범 (2026-08-18 조정).
+                retries_when_blocked=int(os.environ.get("WEBSHARE_RETRIES", "2")),
             )
         try:
             api = YouTubeTranscriptApi(http_client=session, proxy_config=proxy_config)
@@ -636,6 +657,18 @@ def _process_channel(channel: dict, today: str, page_id: str):
         save_processed(processed)
         log(f"⏩ {len(old_skipped)}개 오래된 영상 자동 스킵 (쿠터 절약)")
 
+    # 자막이 계속 안 잡히는 영상(자막 자체가 없거나 지역제한)을 매시간 재시도하며 프록시
+    # 대역폭을 태우던 문제 → MAX_FAIL_BEFORE_SKIP 회 실패하면 processed 에 넣어 영구 제외.
+    failed = load_failed()
+    give_up = [vid for vid, n in failed.items() if n >= MAX_FAIL_BEFORE_SKIP]
+    if give_up:
+        log(f"⏭️ 반복 실패 {len(give_up)}개 영구 스킵 ({MAX_FAIL_BEFORE_SKIP}회 이상 자막 실패)")
+        processed.update(give_up)
+        save_processed(processed)
+        for vid in give_up:
+            failed.pop(vid, None)
+        save_failed(failed)
+
     new_videos = [v for v in videos if v["id"] not in processed]
     today_new   = [v for v in new_videos if v["published"] == today]
     other_new   = [v for v in new_videos if v["published"] != today]
@@ -668,8 +701,10 @@ def _process_channel(channel: dict, today: str, page_id: str):
             try:
                 r = fut.result()
                 if not r["ok"]:
-                    log(f"    ⚠️ 자막 없음: {v['title'][:50]}")
+                    failed[v["id"]] = failed.get(v["id"], 0) + 1
+                    log(f"    ⚠️ 자막 없음({failed[v['id']]}/{MAX_FAIL_BEFORE_SKIP}회): {v['title'][:44]}")
                 else:
+                    failed.pop(v["id"], None)      # 성공하면 카운터 리셋
                     results.append(r)
                     log(f"    ✅ {v['title'][:50]} (자막 {r['transcript_len']:,}자, Gemini {'✅' if r['analysis'] else '❌'})")
             except Exception as e:
@@ -678,6 +713,7 @@ def _process_channel(channel: dict, today: str, page_id: str):
     # target 순서로 재정렬 (Notion 에 시간순으로 쌓이도록)
     # 무음 실패 방지: 처리 대상이 있었는데 하나도 못 받았으면 인프라 문제(프록시 만료·쿠키·차단)다.
     # 2026-08-12~17 Webshare 402 로 자막이 5일간 0개였는데 워크플로가 success 로 떠서 아무도 몰랐다.
+    save_failed(failed)          # 종료 경로와 무관하게 카운터는 남겨야 누적된다
     if target and not results:
         log(f"❌ 처리 대상 {len(target)}개 전부 자막 실패 — 프록시/쿠키/차단 확인 필요 (종료코드 1)")
         raise SystemExit(1)
