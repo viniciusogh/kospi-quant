@@ -18,7 +18,7 @@ import requests
 _DIR = os.path.dirname(os.path.abspath(__file__))
 STATE = os.path.join(_DIR, ".notion_dashboard.json")
 TITLE = "💼 통합 포트폴리오"
-ANCHOR_TEXT = "💼 통합 포트폴리오"
+ANCHOR_TEXT = "💰 보유 현황"      # 페이지 제목과 중복되지 않도록. 삽입 기준점 겸 머리말
 NV = "2022-06-28"          # 블록/DB 조작은 이 버전 고정 (파일업로드용 최신 버전은 DB쿼리를 깨뜨림)
 API = "https://api.notion.com/v1"
 
