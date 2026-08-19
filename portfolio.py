@@ -284,8 +284,10 @@ def signal_overlap(codes):
 
 
 def recent_changes(code, tok, n=5):
-    """최근 n거래일 전일대비 등락률 [(YYYYMMDD, 등락)] — 종가 기준, 최신순.
-    KIS 일봉 1콜. 보유종목 추이를 표에 붙이기 위한 용도."""
+    """(최근 n거래일 전일대비 [(YYYYMMDD, 등락)], 마지막거래일, 마지막정규장종가).
+    KIS 일봉 1콜. 추이 표시 + **현재가 기준 통일**에 함께 쓴다 —
+    토스 lastPrice 는 시간외 체결가(실측 19:59 타임스탬프)라 모멘텀 리포트의 정규장 종가와
+    어긋났다(코스맥스 241,000 vs 246,000). 수익률은 공식 종가 기준으로 맞춘다."""
     today = datetime.now(KST)
     j = _get(f"{BASE}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
              _hdr(tok, "FHKST03010100", trade=False),
@@ -294,7 +296,7 @@ def recent_changes(code, tok, n=5):
               "FID_INPUT_DATE_2": today.strftime("%Y%m%d"),
               "FID_PERIOD_DIV_CODE": "D", "FID_ORG_ADJ_PRC": "0"})
     if not j or j.get("rt_cd") != "0":
-        return []
+        return [], "", 0.0
     rows = sorted((r["stck_bsop_date"], float(r["stck_clpr"]))
                   for r in (j.get("output2") or [])
                   if r.get("stck_clpr") and r["stck_clpr"] != "0")
@@ -305,7 +307,8 @@ def recent_changes(code, tok, n=5):
             out.append((rows[i][0], rows[i][1] / prev - 1))
         if len(out) >= n:
             break
-    return out
+    last_d, last_c = rows[-1] if rows else ("", 0.0)
+    return out, last_d, last_c
 
 
 def _hist_cell(hist):
@@ -409,7 +412,11 @@ def _blocks(data):
             {"type": "text", "text": {"content": f"총평가 {t['eval']:,.0f}원\n"}, "annotations": {"bold": True}},
             {"type": "text", "text": {"content":
                 f"매입 {t['cost']:,.0f}원  ·  손익 {t['pl']:+,.0f}원 ({t['ret']*100:+.2f}%)\n"}},
-            {"type": "text", "text": {"content": f"{data['asof']} KST 기준"}, "annotations": {"color": "gray"}}]}}]
+            {"type": "text", "text": {"content":
+                f"{data['asof']} KST 갱신 · 가격은 "
+                + (f"{data.get('px_date','')[:4]}-{data.get('px_date','')[4:6]}-{data.get('px_date','')[6:]} 정규장 종가 기준"
+                   if data.get("px_date") else "정규장 종가 기준")},
+             "annotations": {"color": "gray"}}]}}]
     if len(data["by_broker"]) > 1:
         parts = [f"{b} {v['eval']:,.0f}원({v['n']})" for b, v in data["by_broker"].items()]
         out.append({"object": "block", "type": "paragraph",
@@ -449,8 +456,13 @@ def main():
         return
     tok_px = token()                   # 시세는 기존 리포트용 키로 (매매키에 시세권한 없을 수 있음)
     fill_price(tok_px, rows)
-    for r in rows:                     # 최근 5일 전일대비 (종목당 KIS 1콜)
-        r["hist"] = recent_changes(r["code"], tok_px)
+    px_date = ""
+    for r in rows:                     # 최근 5일 전일대비 + 현재가 통일 (종목당 KIS 1콜)
+        r["hist"], d, close = recent_changes(r["code"], tok_px)
+        if close > 0:
+            r["price"] = close         # 시간외가 아닌 정규장 종가로 (리포트와 기준 통일)
+            px_date = max(px_date, d)
+    data_px_date = px_date
 
     hit = signal_overlap({r["code"] for r in rows})
     for r in rows:
@@ -469,6 +481,7 @@ def main():
         b["eval"] += r["eval"]; b["cost"] += r["cost"]; b["n"] += 1
 
     data = {"asof": datetime.now(KST).strftime("%Y-%m-%d %H:%M"),
+            "px_date": data_px_date,
             "total": {"eval": tot_eval, "cost": tot_cost, "pl": tot_eval - tot_cost,
                       "ret": (tot_eval / tot_cost - 1) if tot_cost else 0.0},
             "cash": summary, "by_broker": by_broker, "positions": rows}
