@@ -25,6 +25,23 @@ TOP_PER_SECTOR = int(os.environ.get("SECTOR_TOP_N", "3"))
 MIN_STOCKS = 2          # 섹터당 이 미만이면 표본 부족으로 제외
 
 
+# KIS 업종분류(bstp_kor_isnm, 29종)는 순환매를 못 잡는다. 실측 예:
+#   화장품 7종목이 "화학" 안에 석유화학·타이어와 섞여 평균돼 강세가 지워진다.
+#   조선은 운송장비·부품 / 금융(HD한국조선해양) / 기계·장비 로 흩어진다.
+#   방산은 운송장비·부품 / 금속(LIG넥스원) / 전기·전자(한화시스템) 로 흩어진다.
+# → 테마 단위로 재분류한다. 종목코드 대신 **종목명**으로 적고 실행 시 유니버스에서 해석해,
+#   이름이 안 맞으면 조용히 오분류되지 않고 경고로 드러나게 한다. 새 테마는 여기에 추가.
+THEMES = {
+    "화장품": ["코스맥스", "한국콜마", "LG생활건강", "아모레퍼시픽", "아모레퍼시픽홀딩스",
+              "에이피알", "달바글로벌", "애경산업", "한국화장품"],
+    "타이어": ["한국타이어앤테크놀로지", "금호타이어", "넥센타이어"],
+    "조선":   ["HD현대중공업", "한화오션", "삼성중공업", "HD한국조선해양", "HD현대미포", "STX엔진"],
+    "방산":   ["한화에어로스페이스", "한국항공우주", "LIG넥스원", "현대로템", "한화시스템", "풍산"],
+    "원전":   ["두산에너빌리티", "한전기술", "한전KPS"],
+}
+_NAME2THEME = {n: t for t, lst in THEMES.items() for n in lst}
+
+
 def _excluded(name, sector):
     s, n = str(sector), str(name)
     return ("ETF" in s or "ETN" in s or "스팩" in n or bool(re.search(r"우[BC]?$", n)))
@@ -36,8 +53,20 @@ def universe():
     d = d[~d.apply(lambda r: _excluded(r["종목명"], r["섹터"]), axis=1)].copy()
     d["시가총액"] = pd.to_numeric(d["시가총액"], errors="coerce")
     d["순매수"] = pd.to_numeric(d.get("외국인+기관_순매수대금(백만원)"), errors="coerce").fillna(0)
-    d = d.dropna(subset=["시가총액", "섹터"])
-    return d.nlargest(UNIVERSE_N, "시가총액").reset_index(drop=True)
+    d = d.dropna(subset=["시가총액"])
+    # 유니버스 = 시총 상위 N ∪ 테마 구성종목 (소형 테마주도 빠지지 않게)
+    top = d.nlargest(UNIVERSE_N, "시가총액")
+    theme_rows = d[d["종목명"].isin(_NAME2THEME)]
+    uni = pd.concat([top, theme_rows]).drop_duplicates(subset=["code"]).copy()
+    # 테마 오버라이드: 업종분류를 테마로 덮어쓴다
+    uni["섹터"] = uni.apply(
+        lambda r: _NAME2THEME.get(r["종목명"], r["섹터"]), axis=1)
+    uni = uni.dropna(subset=["섹터"])
+    resolved = set(uni[uni["종목명"].isin(_NAME2THEME)]["종목명"])
+    missing = [n for n in _NAME2THEME if n not in resolved]
+    if missing:
+        M.log(f"  ⚠️ 테마 종목명 미해석 {len(missing)}개(유니버스에 없음): {', '.join(missing[:6])}")
+    return uni.reset_index(drop=True)
 
 
 def metrics(df, tok):
@@ -118,7 +147,7 @@ def blocks(agg, tops, asof):
             {"type": "text", "text": {"content": f"🧊 5일 약세: {cold}\n"}},
             {"type": "text", "text": {"content": f"💰 순매수 유입 상위: {' · '.join(flow)}\n"}},
             {"type": "text", "text": {"content":
-                f"기준: {asof} 정규장 종가 · 시총 상위 {UNIVERSE_N} 개별주 · 섹터 등가중 "
+                f"기준: {asof} 정규장 종가 · 시총 상위 {UNIVERSE_N} + 테마종목 · 섹터/테마 등가중 "
                 f"(시총가중은 소수 대형주에 지배돼 체감과 어긋남) · ETF/ETN/우선주 제외"},
              "annotations": {"color": "gray"}}]}}]
     table = {"object": "block", "type": "table", "table": {
