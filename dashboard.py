@@ -19,7 +19,8 @@ _DIR = os.path.dirname(os.path.abspath(__file__))
 STATE = os.path.join(_DIR, ".notion_dashboard.json")
 TITLE = "💼 통합 포트폴리오"
 ANCHOR_TEXT = "💰 보유 현황"      # 페이지 제목과 중복되지 않도록. 삽입 기준점 겸 머리말
-NV = "2022-06-28"          # 블록/DB 조작은 이 버전 고정 (파일업로드용 최신 버전은 DB쿼리를 깨뜨림)
+NV = "2022-06-28"          # 블록/DB 조작
+NV_UPLOAD = "2026-03-11"   # 파일 업로드 API 최소 버전. 이 버전으로 DB 날짜필터를 쓰면 빈결과가 되므로 업로드에만 사용          # 블록/DB 조작은 이 버전 고정 (파일업로드용 최신 버전은 DB쿼리를 깨뜨림)
 API = "https://api.notion.com/v1"
 
 
@@ -307,6 +308,43 @@ def add_report(toggle_title, header_blocks, items=None, color="gray_background")
         if extra:
             _append(res[0]["id"], extra)
     return tid
+
+
+def upload_image(png_bytes, filename="chart.png"):
+    """노션 파일 업로드 → file_upload id. 업로드 API 는 최신 버전을 요구하므로 이 호출만 NV_UPLOAD.
+    (그 버전으로 /databases/{id}/query 를 쓰면 날짜필터가 빈결과가 된다 — index_ticker 때 확인된 함정)"""
+    h = {"Authorization": f"Bearer {os.environ['NOTION_API_KEY']}",
+         "Content-Type": "application/json", "Notion-Version": NV_UPLOAD}
+    r = requests.post(f"{API}/file_uploads", headers=h, timeout=30,
+                      json={"filename": filename, "content_type": "image/png"})
+    if r.status_code not in (200, 201):
+        print(f"  ⚠️ 파일업로드 생성 실패 {r.status_code}: {r.text[:150]}")
+        return None
+    fid = r.json()["id"]
+    h2 = {"Authorization": f"Bearer {os.environ['NOTION_API_KEY']}", "Notion-Version": NV_UPLOAD}
+    r2 = requests.post(f"{API}/file_uploads/{fid}/send", headers=h2, timeout=120,
+                       files={"file": (filename, png_bytes, "image/png")})
+    if r2.status_code not in (200, 201):
+        print(f"  ⚠️ 파일 전송 실패 {r2.status_code}: {r2.text[:150]}")
+        return None
+    return fid
+
+
+def append_image(block_id, png_bytes, filename="chart.png"):
+    """이미지 블록을 붙인다. file_upload 타입은 업로드 버전 헤더가 필요하다."""
+    fid = upload_image(png_bytes, filename)
+    if not fid:
+        return False
+    h = {"Authorization": f"Bearer {os.environ['NOTION_API_KEY']}",
+         "Content-Type": "application/json", "Notion-Version": NV_UPLOAD}
+    r = requests.patch(f"{API}/blocks/{block_id}/children", headers=h, timeout=60,
+                       json={"children": [{"object": "block", "type": "image",
+                                           "image": {"type": "file_upload",
+                                                     "file_upload": {"id": fid}}}]})
+    if r.status_code != 200:
+        print(f"  ⚠️ 이미지 블록 추가 실패 {r.status_code}: {r.text[:150]}")
+        return False
+    return True
 
 
 def append_blocks(block_id, blocks, chunk=40):

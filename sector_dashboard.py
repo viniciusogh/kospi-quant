@@ -173,6 +173,26 @@ def main():
     if not tid:
         M.log("❌ 대시보드 토글 생성 실패")
         return
+
+    # 트리맵 이미지 (한눈에 보는 용도) → 표보다 위에
+    try:
+        import sys
+        sys.path.insert(0, os.path.join(_DIR, "viz"))
+        import treemap as T
+        cap_by = m.groupby("섹터")["시가총액"].sum()
+        groups = [(r["섹터"], r["d5"] * 100, float(cap_by[r["섹터"]]),
+                   [(x["종목명"], x["d5"] * 100, float(x["시가총액"]))
+                    for _, x in m[m["섹터"] == r["섹터"]].nlargest(6, "시가총액").iterrows()])
+                  for _, r in agg.iterrows()]
+        groups.sort(key=lambda g: -g[2])
+        png = os.path.join(_DIR, "latest_sector_treemap.png")
+        T.render(groups, asof, png)
+        with open(png, "rb") as f:
+            ok = D.append_image(tid, f.read(), "sector_treemap.png")
+        M.log("  🗺 트리맵 업로드 " + ("완료" if ok else "실패(표는 정상)"))
+    except Exception as e:
+        M.log(f"  ⚠️ 트리맵 생략: {str(e)[:90]}")
+
     D.append_blocks(tid, [table], chunk=1)
     M.log(f"✅ 대시보드에 섹터 장세 추가: {D.url()}")
     print(agg.assign(**{c: (agg[c] * 100).round(1) for c in ["오늘", "d5", "d20"]})
