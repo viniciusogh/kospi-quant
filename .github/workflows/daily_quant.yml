@@ -56,6 +56,15 @@ jobs:
           SKIP_NOTION_REPORT: "1"   # 노션 리포트 폐지(사용자 미열람) — CSV 는 모멘텀이 사용하므로 계속 생성
         run: python 수급.py
 
+      - name: Run sector rotation dashboard (수급.py 산출 latest_kospi_supply.csv 사용)
+        env:
+          APP_KEY: ${{ secrets.APP_KEY }}
+          APP_SECRET: ${{ secrets.APP_SECRET }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
+        run: python sector_dashboard.py
+        continue-on-error: true   # 섹터 대시보드 실패해도 모멘텀·커밋은 진행
+
       - name: Run KOSPI Quality analysis (별도 모델, fin_ratio_cache 공유)
         env:
           APP_KEY: ${{ secrets.APP_KEY }}
