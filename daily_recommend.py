@@ -315,16 +315,27 @@ def push_to_notion(text: str) -> str | None:
         log("❌ 날짜 페이지 가져오기 실패. 최종 추천 페이지 생성 중단.")
         return None
 
-    body = {
-        "parent":     {"page_id": date_page_id},
-        "properties": {"title": {"title": [{"text": {"content": title}}]}},
-    }
-    r = requests.post("https://api.notion.com/v1/pages", headers=_nh(), json=body, timeout=30)
-    if r.status_code != 200:
-        log(f"❌ 페이지 생성 실패 ({r.status_code}): {r.text[:200]}")
-        return None
-    page_id  = r.json()["id"]
-    page_url = r.json().get("url", "")
+    # 사용자는 통합 대시보드만 보므로 날짜별 페이지를 만들지 않는다(중복 방지).
+    # date_page_id 는 아래 'DB 행 제목(헤드라인) 갱신' 용도로 계속 필요하다.
+    dash = os.environ.get("REC_TARGET", "dashboard") == "dashboard"
+    if dash:
+        import dashboard as D
+        page_id = D.add_report(title, [])      # 슬롯2 토글 확보(같은 날 재실행이면 교체)
+        if not page_id:
+            log("❌ 대시보드 토글 생성 실패")
+            return None
+        page_url = D.url()
+    else:
+        body = {
+            "parent":     {"page_id": date_page_id},
+            "properties": {"title": {"title": [{"text": {"content": title}}]}},
+        }
+        r = requests.post("https://api.notion.com/v1/pages", headers=_nh(), json=body, timeout=30)
+        if r.status_code != 200:
+            log(f"❌ 페이지 생성 실패 ({r.status_code}): {r.text[:200]}")
+            return None
+        page_id  = r.json()["id"]
+        page_url = r.json().get("url", "")
 
     # markdown → 노션 블록 변환 (heading/bullet/bold/표 처리)
     blocks = []

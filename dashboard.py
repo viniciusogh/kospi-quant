@@ -191,7 +191,9 @@ def _append(bid, blocks, after=None, tries=3):
 
 # 리포트 슬롯 — 페이지에 늘 이 순서로 놓인다. 상태파일 없이 제목으로 판별하므로
 # GitHub Actions(상태파일 없음)와 로컬이 같은 페이지를 일관되게 갱신할 수 있다.
-SLOT_RULES = [(1, "내 보유종목"), (3, "추세게이트"), (2, "모멘텀 추천"), (4, "유튜브")]
+# 검사 순서 주의: "추세게이트" 를 "모멘텀 추천" 보다 먼저 봐야 부분일치 충돌이 없다.
+SLOT_RULES = [(1, "내 보유종목"), (2, "핵심 요약"),
+              (4, "추세게이트"), (3, "모멘텀 추천"), (5, "유튜브")]
 
 
 def _slot_of(title):
@@ -305,6 +307,17 @@ def add_report(toggle_title, header_blocks, items=None, color="gray_background")
         if extra:
             _append(res[0]["id"], extra)
     return tid
+
+
+def append_blocks(block_id, blocks, chunk=40):
+    """토글 안에 블록을 나눠 넣는다. 요청당 100블록 한도와 중첩 제약을 피하기 위한 공개 헬퍼."""
+    ok = 0
+    for i in range(0, len(blocks), chunk):
+        r = _append(block_id, blocks[i:i + chunk])
+        if not r:
+            break
+        ok += len(blocks[i:i + chunk])
+    return ok
 
 
 def url():
