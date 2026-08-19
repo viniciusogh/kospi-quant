@@ -172,6 +172,16 @@ def _holding_toggle(row, pos, a, fl, roe):
 
 
 def main():
+    # 휴장일엔 시세가 안 바뀌므로 Gemini 호출을 아낀다 (portfolio.py 와 같은 판정 재사용)
+    if os.environ.get("SKIP_MARKET_CHECK") != "1":
+        try:
+            import portfolio as _P
+            if not _P.market_open_today():
+                M.log("휴장일 — 보유종목 리포트 생략 (강제: SKIP_MARKET_CHECK=1)")
+                return
+        except Exception as e:
+            M.log(f"  장운영 확인 실패(계속 진행): {str(e)[:60]}")
+
     if not os.path.exists(PORTFOLIO):
         M.log("portfolio.json 없음 — portfolio.py 를 먼저 실행하세요")
         return

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>LANG</key>
+		<string>ko_KR.UTF-8</string>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>Label</key>
+	<string>com.vinicius.holdings-report</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/vinicius/Projects/kospi-quant/run_holdings_report.sh</string>
+	</array>
+	<key>StandardErrorPath</key>
+	<string>/Users/vinicius/Projects/kospi-quant/holdings_launchd.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/vinicius/Projects/kospi-quant/holdings_launchd.log</string>
+	<key>StartCalendarInterval</key>
+	<array>
+		<dict>
+			<key>Hour</key>
+			<integer>16</integer>
+			<key>Minute</key>
+			<integer>10</integer>
+		</dict>
+	</array>
+</dict>
+</plist>
