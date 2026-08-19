@@ -180,10 +180,8 @@ def main():
         sys.path.insert(0, os.path.join(_DIR, "viz"))
         import treemap as T
         cap_by = m.groupby("섹터")["시가총액"].sum()
-        groups = [(r["섹터"], r["d5"] * 100, float(cap_by[r["섹터"]]),
-                   [(x["종목명"], x["d5"] * 100, float(x["시가총액"]))
-                    for _, x in m[m["섹터"] == r["섹터"]].nlargest(6, "시가총액").iterrows()])
-                  for _, r in agg.iterrows()]
+        groups = [(r["섹터"], r["d5"] * 100, float(cap_by[r["섹터"]]), r["오늘"] * 100)
+                  for _, r in agg.iterrows()]      # 섹터 단위만 (개별 종목 없음)
         groups.sort(key=lambda g: -g[2])
         png = os.path.join(_DIR, "latest_sector_treemap.png")
         T.render(groups, asof, png)

@@ -1,23 +1,26 @@
-"""섹터/테마 트리맵 PNG 생성 (크기=시총, 색=5일 수익률).
+"""섹터/테마 트리맵 PNG (finviz 풍 다크 테마). 크기=시총, 색=수익률.
 
-색 규칙: 다이버징(상승/하락 = 극성) → 두 색상 + 중립 회색 중간점, **팔당 동일 단계**.
-- 파랑 램프는 기준 팔레트 값을 그대로 사용, 빨강 팔은 같은 OKLab 명도에 빨강 색상만 입혀
-  양쪽 팔의 명도를 일치시킨다(다이버징 검증 기준은 명도 단조성이다).
-- 국내 관습에 맞춰 **상승=빨강 / 하락=파랑** (기존 리포트 표기와 통일).
-- 라벨 색은 눈대중하지 않고 타일과의 대비를 계산해 흰색/검정 중 고른다.
+색 규칙: 다이버징(극성) → 두 색상 + 중립 회색 중간점, **팔당 동일 단계**.
+- finviz 관습을 따라 **상승 초록 / 하락 빨강** (국내 리포트 표기와 반대임을 문서 표기로 보완).
+- 두 팔의 OKLab L·C 를 일치시켜 같은 크기의 변화가 같은 강도로 보이게 한다.
+- 라벨은 흰색 고정이므로 모든 단계에서 흰색 대비 4.5 이상을 계산해 확인한다.
 """
 import numpy as np
 
-# 기준 팔레트: 파랑 시퀀셜 램프 (명도 단조 감소) — 이 값들의 OKLab L 을 빨강 팔에 미러링
-BLUE_STEPS = ["#9ec5f4", "#5598e7", "#256abf", "#104281"]   # 200 / 350 / 500 / 650
-RED_ANCHOR = "#e34948"                                       # 기준 팔레트 categorical red
-NEUTRAL    = "#f0efec"                                       # 기준 팔레트 다이버징 중간점(light)
-SURFACE    = "#fcfcfb"                                       # 기준 팔레트 light chart surface
-INK        = "#1a1a19"
+# finviz 풍 다크 팔레트 (앵커에서 램프를 계산해 만든다 — 눈대중 금지)
+SURFACE     = "#2b2f3b"     # 배경
+NEUTRAL     = "#464a58"     # 다이버징 중립 중간점 (0% 근처)
+GREEN_ANCHOR = "#35a34e"    # 상승 팔 색상
+RED_ANCHOR   = "#b04a4a"    # 하락 팔 색상
+INK          = "#ffffff"    # 라벨 (다크 타일이므로 흰색 고정)
+SUBINK       = "#9aa0ae"    # 보조 텍스트
 
-# 팔 경계 (5일 수익률 %) — 팔당 4단계, 좌우 대칭
+# 팔당 4단계 명도 (다크 배경에서 흰 라벨 대비를 확보하는 범위)
+# 초록은 같은 OKLab L 에서도 휘도가 높아 흰 라벨 대비가 빨강보다 낮다.
+# 상한 0.55 는 **초록**이 흰 라벨 대비 4.5 를 넘기는 경계(실측). 양팔 L 은 동일하게 유지.
+ARM_L = [0.395, 0.447, 0.499, 0.551]
 BANDS = [0.75, 2.0, 4.0, 7.0]
-SECTOR_AREA_EXP = 0.5      # 섹터 면적 = 시총^0.5 (대형주 지배 완화, 순서는 보존)
+SECTOR_AREA_EXP = 0.5      # 섹터 면적 = 시총^0.5 (대형주 지배 완화, 순서 보존)
 
 
 def _srgb_to_lin(c):
@@ -50,35 +53,34 @@ def oklab_to_hex(lab):
     return "#%02x%02x%02x" % tuple(int(round(v)) for v in np.clip(rgb, 0, 255))
 
 
-def _red_arm():
-    """빨강 팔 = 파랑 팔의 **L·C 를 그대로** 쓰고 색상(hue)만 빨강 앵커 것으로.
-    다이버징은 '팔당 동일 단계' 가 규칙이므로 명도·채도를 맞춘다.
-    채도를 최대화하면 색역 경계에서 8비트 반올림 때문에 L 이 밀린다(실측 ΔL 0.15) →
-    파랑과 같은 채도에서 시작해 왕복 L 오차가 허용치 안에 들 때까지만 낮춘다."""
-    ra = hex_to_oklab(RED_ANCHOR)
-    hue = np.arctan2(ra[2], ra[1])
+def _arm(anchor_hex):
+    """앵커 색상(hue)에 ARM_L 명도를 입힌 4단계. 채도는 색역 안에서 최대,
+    단 왕복 후 L 오차가 커지면(8비트 반올림) 채도를 낮춰 L 을 보존한다."""
+    a = hex_to_oklab(anchor_hex)
+    hue = np.arctan2(a[2], a[1])
+    c0 = np.hypot(a[1], a[2])
     out = []
-    for b in BLUE_STEPS:
-        lab = hex_to_oklab(b)
-        L, C = lab[0], np.hypot(lab[1], lab[2])
-        for _ in range(60):
+    for L in ARM_L:
+        C = c0            # 앵커 채도 그대로 (1.25배는 형광색으로 떠서 폐기)
+        for _ in range(80):
             h = oklab_to_hex(np.array([L, C * np.cos(hue), C * np.sin(hue)]))
-            if abs(hex_to_oklab(h)[0] - L) < 0.004:      # 왕복 후에도 L 유지되면 채택
+            if abs(hex_to_oklab(h)[0] - L) < 0.004:
                 break
             C *= 0.95
         out.append(h)
     return out
 
 
-RED_STEPS = _red_arm()
+UP_STEPS   = _arm(GREEN_ANCHOR)     # 약 → 강 (명도 상승)
+DOWN_STEPS = _arm(RED_ANCHOR)
 
 
 def color_for(pct):
-    """5일 수익률(%) → 타일 색. 0 근처는 중립 회색."""
+    """수익률(%) → 타일 색. 0 근처는 중립 회색. 상승 초록 / 하락 빨강(finviz 관습)."""
     v = abs(pct)
     if v < BANDS[0]:
         return NEUTRAL
-    arm = RED_STEPS if pct > 0 else BLUE_STEPS
+    arm = UP_STEPS if pct > 0 else DOWN_STEPS
     for i, b in enumerate(BANDS[1:], 1):
         if v < b:
             return arm[i - 1]
@@ -98,8 +100,8 @@ def contrast(a, b):
 
 
 def ink_on(bg):
-    """라벨 색: 대비를 계산해 흰색/먹색 중 더 잘 보이는 쪽."""
-    return "#ffffff" if contrast("#ffffff", bg) >= contrast(INK, bg) else INK
+    """다크 테마이므로 라벨은 흰색 고정. 대비는 검증에서 확인한다."""
+    return INK
 
 
 def squarify(vals, x, y, w, h):
@@ -155,8 +157,12 @@ def _font():
     return None
 
 
-def render(groups, asof, out_path, w=1600, h=1000):
-    """groups: [(섹터명, 섹터5일%, 시총합, [(종목명, 5일%, 시총)…])] — 시총합 내림차순."""
+def render(sectors, asof, out_path, w=1600, h=980):
+    """sectors: [(섹터명, 5일%, 시총합, 오늘%)] — 섹터 단위 타일만 그린다(개별 종목 없음).
+
+    finviz 관습: 다크 배경 · 상승 초록 / 하락 빨강 · 타일 안에 이름과 % 를 크게.
+    크기는 시총^0.5 (그대로 쓰면 삼성전자·SK하이닉스가 화면 60%를 먹어 테마가 안 보인다).
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -168,65 +174,57 @@ def render(groups, asof, out_path, w=1600, h=1000):
     plt.rcParams["axes.unicode_minus"] = False
 
     fig = plt.figure(figsize=(w / 100, h / 100), dpi=100, facecolor=SURFACE)
-    ax = fig.add_axes([0.008, 0.008, 0.984, 0.90])
+    ax = fig.add_axes([0.006, 0.006, 0.988, 0.885])
     ax.set_xlim(0, 100); ax.set_ylim(0, 100); ax.axis("off")
     ax.set_facecolor(SURFACE)
 
-    fig.text(0.008, 0.965, f"섹터·테마 장세  {asof}", fontsize=19, fontweight="bold", color=INK)
-    fig.text(0.008, 0.933,
-             "타일 크기 = 시가총액(√ 압축 — 대형주 지배 완화)   ·   색 = 5일 수익률"
-             "(상승 빨강 / 하락 파랑)   ·   섹터/테마 등가중",
-             fontsize=11, color="#6b6b68")
+    fig.text(0.006, 0.955, f"섹터·테마 장세  {asof}", fontsize=20, fontweight="bold", color=INK)
+    fig.text(0.006, 0.918,
+             "타일 크기 = 시가총액(√ 압축)   ·   색 = 5일 수익률(상승 초록 / 하락 빨강)   ·   섹터/테마 등가중",
+             fontsize=11, color=SUBINK)
 
-    # 범례 (다이버징: 두 팔 + 중립 중간점)
-    lx, ly, bw = 0.62, 0.936, 0.026
-    order = [(-BANDS[3], BLUE_STEPS[3]), (-BANDS[2], BLUE_STEPS[2]), (-BANDS[1], BLUE_STEPS[1]),
-             (-BANDS[0], BLUE_STEPS[0]), (0, NEUTRAL),
-             (BANDS[0], RED_STEPS[0]), (BANDS[1], RED_STEPS[1]),
-             (BANDS[2], RED_STEPS[2]), (BANDS[3], RED_STEPS[3])]
+    # 범례: 두 팔 + 중립 중간점
+    lx, ly, bw = 0.655, 0.922, 0.0255
+    order = [(-BANDS[3], DOWN_STEPS[3]), (-BANDS[2], DOWN_STEPS[2]), (-BANDS[1], DOWN_STEPS[1]),
+             (-BANDS[0], DOWN_STEPS[0]), (0, NEUTRAL),
+             (BANDS[0], UP_STEPS[0]), (BANDS[1], UP_STEPS[1]),
+             (BANDS[2], UP_STEPS[2]), (BANDS[3], UP_STEPS[3])]
     for i, (_, c) in enumerate(order):
-        fig.patches.append(plt.Rectangle((lx + i * bw, ly), bw - 0.003, 0.022,
+        fig.patches.append(plt.Rectangle((lx + i * bw, ly), bw - 0.003, 0.023,
                                         facecolor=c, edgecolor=SURFACE, lw=1.2,
                                         transform=fig.transFigure, figure=fig))
-    fig.text(lx - 0.008, ly + 0.006, "-7%", fontsize=9, color="#6b6b68", ha="right")
-    fig.text(lx + 9 * bw + 0.004, ly + 0.006, "+7%", fontsize=9, color="#6b6b68")
+    fig.text(lx - 0.008, ly + 0.007, "-7%", fontsize=9.5, color=SUBINK, ha="right")
+    fig.text(lx + 9 * bw + 0.004, ly + 0.007, "+7%", fontsize=9.5, color=SUBINK)
 
-    # 시총을 그대로 쓰면 삼성전자·SK하이닉스가 화면 60%를 먹어 테마가 안 보인다(실측).
-    # 순환매 파악이 목적이므로 제곱근으로 압축한다 — 순서는 보존, 격차만 줄인다.
-    caps = [float(g[2]) ** SECTOR_AREA_EXP for g in groups]
+    caps = [float(c) ** SECTOR_AREA_EXP for (_, _, c, _) in sectors]
     rects = squarify(caps, 0, 0, 100, 100)
-    GAP = 0.45                                  # 타일 사이 표면 간격 (마크 규격)
-    for (sec, s5, cap, stocks), (x, y, rw, rh) in zip(groups, rects):
-        x, y, rw, rh = x + GAP, y + GAP, max(rw - 2 * GAP, 0.1), max(rh - 2 * GAP, 0.1)
-        hdr = min(3.2, rh * 0.30)               # 섹터 머리말 띠
-        # 종목 sub-tile
-        sub = squarify([s[2] for s in stocks], x, y, rw, max(rh - hdr, 0.1)) if stocks else []
-        for (nm, p5, _), (sx, sy, sw, sh) in zip(stocks, sub):
-            c = color_for(p5)
-            ax.add_patch(Rectangle((sx, sy), max(sw - GAP, 0.05), max(sh - GAP, 0.05),
-                                   facecolor=c, edgecolor=SURFACE, lw=0.8))
-            if sw > 6.0 and sh > 3.4:           # 글자가 들어갈 만큼 넓을 때만 라벨
-                ink = ink_on(c)
-                fs = 10.5 if sw > 11 else 8.5
-                ax.text(sx + sw / 2, sy + sh / 2 + sh * 0.10, nm[:9], ha="center", va="center",
-                        fontsize=fs, color=ink, fontweight="bold")
-                ax.text(sx + sw / 2, sy + sh / 2 - sh * 0.22, f"{p5:+.1f}%", ha="center",
-                        va="center", fontsize=fs - 1.5, color=ink)
-        # 섹터 머리말
-        ax.add_patch(Rectangle((x, y + rh - hdr), rw, hdr, facecolor="#e8e7e4",
-                               edgecolor=SURFACE, lw=0.8))
-        if rw > 3.2:
-            nm_fs = 11 if rw > 12 else (9.5 if rw > 7 else 8)
-            # 이름과 % 가 겹치지 않을 만큼 넓을 때만 % 를 오른쪽에 (실측: 좁은 타일에서 붙어버림)
-            room = rw > (len(sec) * (nm_fs * 0.075) + 4.2)
-            ax.text(x + 0.45, y + rh - hdr / 2, sec, ha="left", va="center",
-                    fontsize=nm_fs, color=INK, fontweight="bold")
-            if room:
-                ax.text(x + rw - 0.45, y + rh - hdr / 2, f"{s5:+.1f}%", ha="right", va="center",
-                        fontsize=nm_fs - 1,
-                        color="#b13f3c" if s5 > 0 else ("#256abf" if s5 < 0 else "#6b6b68"),
-                        fontweight="bold")
+    GAP = 0.42                                   # 타일 사이 표면 간격
+    for (name, p5, _cap, today), (x, y, rw, rh) in zip(sectors, rects):
+        tw, th = max(rw - GAP, 0.1), max(rh - GAP, 0.1)
+        col = color_for(p5)
+        ax.add_patch(Rectangle((x, y), tw, th, facecolor=col, edgecolor=SURFACE, lw=1.0))
+        cx, cy = x + tw / 2, y + th / 2
+        # 타일 크기에 맞춰 글자 크기 결정 (작으면 이름만, 더 작으면 생략)
+        area = tw * th
+        nm_fs = 20 if area > 200 else (15 if area > 90 else (11.5 if area > 38 else 9))
+        if tw < 4.2 or th < 2.6:
+            continue
+        show_pct = th > 4.6 and tw > 6
+        # 간격을 타일 높이 비례로만 두면 큰 타일에서 글자가 위아래로 흩어진다(실측: 전기·전자).
+        # 비례값에 절대 상한을 씌워 텍스트 덩어리를 중앙에 모은다.
+        d1 = min(th * 0.11, 1.9)
+        d2 = min(th * 0.17, 2.9)
+        # 최소 간격을 두지 않으면 낮은 타일에서 % 와 '오늘' 줄이 겹친다(실측: 리츠·인프라투용)
+        d3 = d2 + max(1.6, min(th * 0.13, 2.2))
+        ax.text(cx, cy + (d1 if show_pct else 0), name, ha="center", va="center",
+                fontsize=nm_fs, color=INK, fontweight="bold")
+        if show_pct:
+            ax.text(cx, cy - d2, f"{p5:+.1f}%", ha="center", va="center",
+                    fontsize=nm_fs * 0.82, color=INK)
+            if th > 10.5 and tw > 9:      # 세 줄이 안 겹치는 최소 높이
+                ax.text(cx, cy - d3, f"오늘 {today:+.1f}%", ha="center", va="center",
+                        fontsize=max(nm_fs * 0.5, 8), color="#dfe3ea")
 
-    fig.savefig(out_path, facecolor=SURFACE, bbox_inches=None)
+    fig.savefig(out_path, facecolor=SURFACE)
     plt.close(fig)
     return out_path
