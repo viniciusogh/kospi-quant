@@ -19,7 +19,8 @@ SUBINK       = "#9aa0ae"    # 보조 텍스트
 # 초록은 같은 OKLab L 에서도 휘도가 높아 흰 라벨 대비가 빨강보다 낮다.
 # 상한 0.55 는 **초록**이 흰 라벨 대비 4.5 를 넘기는 경계(실측). 양팔 L 은 동일하게 유지.
 ARM_L = [0.395, 0.447, 0.499, 0.551]
-BANDS = [0.75, 2.0, 4.0, 7.0]
+# 당일 등락 기준 구간. 5일 기준(±7%)을 쓰면 당일 변동(보통 ±2%)이 전부 회색으로 뭉친다.
+BANDS = [0.3, 1.0, 2.0, 3.5]
 SECTOR_AREA_EXP = 0.5      # 섹터 면적 = 시총^0.5 (대형주 지배 완화, 순서 보존)
 
 
@@ -158,7 +159,10 @@ def _font():
 
 
 def render(sectors, asof, out_path, w=1600, h=980):
-    """sectors: [(섹터명, 5일%, 시총합, 오늘%)] — 섹터 단위 타일만 그린다(개별 종목 없음).
+    """sectors: [(섹터명, 오늘%, 시총합)] — 섹터 단위 타일만 그린다(개별 종목 없음).
+
+    표시는 **오늘 기준으로 통일**한다. 예전엔 큰 숫자가 5일 수익률, 작은 줄이 "오늘 ..." 이라
+    큰 숫자를 오늘로 오해하기 쉬웠다(사용자 지적). 기간별 비교는 아래 표가 담당한다.
 
     finviz 관습: 다크 배경 · 상승 초록 / 하락 빨강 · 타일 안에 이름과 % 를 크게.
     크기는 시총^0.5 (그대로 쓰면 삼성전자·SK하이닉스가 화면 60%를 먹어 테마가 안 보인다).
@@ -180,7 +184,8 @@ def render(sectors, asof, out_path, w=1600, h=980):
 
     fig.text(0.006, 0.955, f"섹터·테마 장세  {asof}", fontsize=20, fontweight="bold", color=INK)
     fig.text(0.006, 0.918,
-             "타일 크기 = 시가총액(√ 압축)   ·   색 = 5일 수익률(상승 초록 / 하락 빨강)   ·   섹터/테마 등가중",
+             "타일 크기 = 시가총액(√ 압축)   ·   색·숫자 = 당일 등락률(상승 초록 / 하락 빨강)"
+             "   ·   섹터/테마 등가중   ·   기간별 비교는 아래 표",
              fontsize=11, color=SUBINK)
 
     # 범례: 두 팔 + 중립 중간점
@@ -193,15 +198,15 @@ def render(sectors, asof, out_path, w=1600, h=980):
         fig.patches.append(plt.Rectangle((lx + i * bw, ly), bw - 0.003, 0.023,
                                         facecolor=c, edgecolor=SURFACE, lw=1.2,
                                         transform=fig.transFigure, figure=fig))
-    fig.text(lx - 0.008, ly + 0.007, "-7%", fontsize=9.5, color=SUBINK, ha="right")
-    fig.text(lx + 9 * bw + 0.004, ly + 0.007, "+7%", fontsize=9.5, color=SUBINK)
+    fig.text(lx - 0.008, ly + 0.007, f"-{BANDS[-1]:.1f}%", fontsize=9.5, color=SUBINK, ha="right")
+    fig.text(lx + 9 * bw + 0.004, ly + 0.007, f"+{BANDS[-1]:.1f}%", fontsize=9.5, color=SUBINK)
 
-    caps = [float(c) ** SECTOR_AREA_EXP for (_, _, c, _) in sectors]
+    caps = [float(c) ** SECTOR_AREA_EXP for (_, _, c) in sectors]
     rects = squarify(caps, 0, 0, 100, 100)
     GAP = 0.42                                   # 타일 사이 표면 간격
-    for (name, p5, _cap, today), (x, y, rw, rh) in zip(sectors, rects):
+    for (name, chg, _cap), (x, y, rw, rh) in zip(sectors, rects):
         tw, th = max(rw - GAP, 0.1), max(rh - GAP, 0.1)
-        col = color_for(p5)
+        col = color_for(chg)
         ax.add_patch(Rectangle((x, y), tw, th, facecolor=col, edgecolor=SURFACE, lw=1.0))
         cx, cy = x + tw / 2, y + th / 2
         # 타일 크기에 맞춰 글자 크기 결정 (작으면 이름만, 더 작으면 생략)
@@ -212,18 +217,12 @@ def render(sectors, asof, out_path, w=1600, h=980):
         show_pct = th > 4.6 and tw > 6
         # 간격을 타일 높이 비례로만 두면 큰 타일에서 글자가 위아래로 흩어진다(실측: 전기·전자).
         # 비례값에 절대 상한을 씌워 텍스트 덩어리를 중앙에 모은다.
-        d1 = min(th * 0.11, 1.9)
-        d2 = min(th * 0.17, 2.9)
-        # 최소 간격을 두지 않으면 낮은 타일에서 % 와 '오늘' 줄이 겹친다(실측: 리츠·인프라투용)
-        d3 = d2 + max(1.6, min(th * 0.13, 2.2))
+        d1 = min(th * 0.13, 2.1)
         ax.text(cx, cy + (d1 if show_pct else 0), name, ha="center", va="center",
                 fontsize=nm_fs, color=INK, fontweight="bold")
         if show_pct:
-            ax.text(cx, cy - d2, f"{p5:+.1f}%", ha="center", va="center",
-                    fontsize=nm_fs * 0.82, color=INK)
-            if th > 10.5 and tw > 9:      # 세 줄이 안 겹치는 최소 높이
-                ax.text(cx, cy - d3, f"오늘 {today:+.1f}%", ha="center", va="center",
-                        fontsize=max(nm_fs * 0.5, 8), color="#dfe3ea")
+            ax.text(cx, cy - min(th * 0.19, 3.0), f"{chg:+.1f}%", ha="center", va="center",
+                    fontsize=nm_fs * 0.88, color=INK)
 
     fig.savefig(out_path, facecolor=SURFACE)
     plt.close(fig)

@@ -164,7 +164,8 @@ def aggregate(m):
     g = m.groupby("섹터")
     agg = g.agg(오늘=("오늘", "mean"), d5=("d5", "mean"), d20=("d20", "mean"),
                 순매수=("순매수", "sum"), n=("code", "count")).reset_index()
-    agg = agg[agg["n"] >= MIN_STOCKS].sort_values("d5", ascending=False)
+    # 정렬도 '오늘' 기준으로 통일 (트리맵과 어긋나면 같은 화면에서 순서가 달라 보인다)
+    agg = agg[agg["n"] >= MIN_STOCKS].sort_values("오늘", ascending=False)
     tops = {}
     for sec, sub in g:
         t = sub.nlargest(TOP_PER_SECTOR, "시가총액")
@@ -203,20 +204,22 @@ def blocks(agg, tops, asof):
         rows.append({"object": "block", "type": "table_row", "table_row": {"cells": [
             [{"type": "text", "text": {"content": f"{r['섹터']} ({int(r['n'])})"},
               "annotations": {"bold": True}}],
-            [_pct(r["오늘"])], [_pct(r["d5"], bold=True)], [_pct(r["d20"])],
+            [_pct(r["오늘"], bold=True)], [_pct(r["d5"])], [_pct(r["d20"])],
             [{"type": "text", "text": {"content": _flow(r["순매수"])},
               "annotations": {"color": "red" if r["순매수"] > 0 else "blue"}}],
             cell or [{"type": "text", "text": {"content": "—"}}]]}})
 
     hot = " · ".join(agg.head(3)["섹터"].tolist())
     cold = " · ".join(agg.tail(3)["섹터"].tolist()[::-1])
+    hot5 = " · ".join(agg.nlargest(3, "d5")["섹터"].tolist())
     flow = agg.nlargest(3, "순매수")["섹터"].tolist()
     header = [{"object": "block", "type": "callout", "callout": {
         "icon": {"type": "emoji", "emoji": "🔄"}, "color": "gray_background",
         "rich_text": [
-            {"type": "text", "text": {"content": f"🔥 5일 강세: {hot}\n"},
+            {"type": "text", "text": {"content": f"🔥 오늘 강세: {hot}\n"},
              "annotations": {"bold": True}},
-            {"type": "text", "text": {"content": f"🧊 5일 약세: {cold}\n"}},
+            {"type": "text", "text": {"content": f"🧊 오늘 약세: {cold}\n"}},
+            {"type": "text", "text": {"content": f"🔄 5일 기준 강세(순환매): {hot5}\n"}},
             {"type": "text", "text": {"content": f"💰 순매수 유입 상위: {' · '.join(flow)}\n"}},
             {"type": "text", "text": {"content":
                 f"기준: {asof} 정규장 종가 · 시총 상위 {UNIVERSE_N} + 테마종목 · 섹터/테마 등가중 "
@@ -266,8 +269,8 @@ def main():
         sys.path.insert(0, os.path.join(_DIR, "viz"))
         import treemap as T
         cap_by = m.groupby("섹터")["시가총액"].sum()
-        groups = [(r["섹터"], r["d5"] * 100, float(cap_by[r["섹터"]]), r["오늘"] * 100)
-                  for _, r in agg.iterrows()]      # 섹터 단위만 (개별 종목 없음)
+        groups = [(r["섹터"], r["오늘"] * 100, float(cap_by[r["섹터"]]))
+                  for _, r in agg.iterrows()]      # 섹터 단위·오늘 기준
         groups.sort(key=lambda g: -g[2])
         png = os.path.join(_DIR, "latest_sector_treemap.png")
         T.render(groups, asof, png)
