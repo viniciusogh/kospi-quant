@@ -15,12 +15,13 @@ import pandas as pd
 
 import momentum_daily as M
 import dashboard as D
-from momentum_backtest import token, KST
+from momentum_backtest import token, KST, BASE, APP_KEY, APP_SECRET
 from datetime import datetime
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
 UNI = os.path.join(_DIR, "latest_kospi_supply.csv")
 UNIVERSE_N = int(os.environ.get("SECTOR_UNIVERSE", "300"))
+BASELINE = os.path.join(_DIR, ".sector_baseline.json")
 TOP_PER_SECTOR = int(os.environ.get("SECTOR_TOP_N", "3"))
 MIN_STOCKS = 2          # 섹터당 이 미만이면 표본 부족으로 제외
 
@@ -67,6 +68,77 @@ def universe():
     if missing:
         M.log(f"  ⚠️ 테마 종목명 미해석 {len(missing)}개(유니버스에 없음): {', '.join(missing[:6])}")
     return uni.reset_index(drop=True)
+
+
+def build_baseline(df, tok):
+    """오늘 봉을 제외한 종가로 기준가를 만든다 — {code: [전일종가, 5일전, 20일전]}.
+    하루 한 번만 필요하다(장중엔 현재가만 갱신하면 되므로). 일봉 조회는 종목당 1콜.
+    클라우드/로컬이 캐시를 공유하지 않으므로, 낡으면 각자 알아서 다시 만든다."""
+    import json as _j
+    today = datetime.now(KST).strftime("%Y%m%d")
+    out = {}
+    for i, r in df.iterrows():
+        got = M.fetch_recent(r["code"], tok)
+        if got is None:
+            continue
+        c, _v, _per, _pbr, last = got[0], got[1], got[2], got[3], got[4]
+        if str(last) == today:          # 오늘 봉은 제외 (장중엔 미완성, 마감후엔 현재가와 중복)
+            c = c[:-1]
+        if len(c) < 21:
+            continue
+        out[r["code"]] = [float(c[-1]), float(c[-5]), float(c[-20])]
+        if (i + 1) % 100 == 0:
+            M.log(f"  기준가 {i+1}/{len(df)}")
+    _j.dump({"built_for": datetime.now(KST).strftime("%Y-%m-%d"), "base": out},
+            open(BASELINE, "w"))
+    M.log(f"  기준가 캐시 생성 {len(out)}종목")
+    return out
+
+
+def load_baseline(df, tok):
+    """캐시가 오늘자면 재사용, 아니면 새로 만든다."""
+    import json as _j
+    today = datetime.now(KST).strftime("%Y-%m-%d")
+    if os.path.exists(BASELINE):
+        try:
+            d = _j.load(open(BASELINE))
+            if d.get("built_for") == today and d.get("base"):
+                M.log(f"  기준가 캐시 재사용 ({len(d['base'])}종목)")
+                return d["base"]
+        except Exception:
+            pass
+    M.log("  기준가 캐시 없음/낡음 → 생성 (일봉 조회, 첫 실행만 느림)")
+    return build_baseline(df, tok)
+
+
+def metrics_live(df, tok, base):
+    """현재가 1콜/종목으로 오늘·5일·20일 수익률. 기준가는 캐시에서."""
+    url = f"{BASE}/uapi/domestic-stock/v1/quotations/inquire-price"
+    hdr = {"authorization": f"Bearer {tok}", "appkey": APP_KEY, "appsecret": APP_SECRET,
+           "tr_id": "FHKST01010100", "custtype": "P"}
+    rows = []
+    for i, r in df.iterrows():
+        b = base.get(r["code"])
+        if not b:
+            continue
+        j = M._get(url, hdr, {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": r["code"]})
+        o = (j or {}).get("output") or {}
+        try:
+            px = float(o.get("stck_prpr") or 0)
+        except Exception:
+            px = 0
+        if px <= 0:
+            continue
+        prev, b5, b20 = b
+        rows.append({"code": r["code"], "종목명": r["종목명"], "섹터": r["섹터"],
+                     "시가총액": r["시가총액"], "순매수": r["순매수"], "price": px,
+                     "오늘": px / prev - 1 if prev else 0.0,
+                     "d5": px / b5 - 1 if b5 else 0.0,
+                     "d20": px / b20 - 1 if b20 else 0.0,
+                     "asof": datetime.now(KST).strftime("%Y%m%d")})
+        if (i + 1) % 100 == 0:
+            M.log(f"  현재가 {i+1}/{len(df)}")
+    return pd.DataFrame(rows)
 
 
 def metrics(df, tok):
@@ -157,15 +229,29 @@ def blocks(agg, tops, asof):
 
 
 def main():
+    # 15분마다 도는 작업이라 휴일에 헛돌면 낭비가 26배가 된다. 주말은 래퍼가, 대체공휴일까지는
+    # 토스 장운영 API 가 잡는다(2026-08-17 실증). 장 마감 후 정산 1회는 통과시켜야 하므로
+    # '장이 열린 날' 기준으로만 판정하고 시간대는 launchd 스케줄에 맡긴다.
+    if os.environ.get("SKIP_MARKET_CHECK") != "1":
+        try:
+            import portfolio as _P
+            if not _P.market_open_today():
+                M.log("휴장일 — 섹터 장세 갱신 생략 (강제: SKIP_MARKET_CHECK=1)")
+                return
+        except Exception as e:
+            M.log(f"  장운영 확인 실패(계속 진행): {str(e)[:60]}")
+
     tok = token()
     df = universe()
     M.log(f"▶ 섹터 장세: 시총 상위 {len(df)}개 수집 시작")
-    m = metrics(df, tok)
+    base = load_baseline(df, tok)
+    m = metrics_live(df, tok, base)
     if m.empty:
         M.log("❌ 수집 실패 — 중단")
         return
     asof_raw = str(m["asof"].max())
-    asof = f"{asof_raw[:4]}-{asof_raw[4:6]}-{asof_raw[6:]}"
+    asof = (f"{asof_raw[:4]}-{asof_raw[4:6]}-{asof_raw[6:]} "
+            f"{datetime.now(KST).strftime('%H:%M')}")
     agg, tops = aggregate(m)
     M.log(f"  섹터 {len(agg)}개 집계 (종목 {len(m)}개)")
     header, table = blocks(agg, tops, asof)
