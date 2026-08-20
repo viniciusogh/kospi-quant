@@ -347,6 +347,24 @@ def append_image(block_id, png_bytes, filename="chart.png"):
     return True
 
 
+def append_image_after(parent_id, after_id, png_bytes, filename="chart.png"):
+    """이미지를 특정 블록 바로 뒤에 넣는다(맨 위 유지용). 업로드는 NV_UPLOAD 버전 필요."""
+    fid = upload_image(png_bytes, filename)
+    if not fid:
+        return False
+    h = {"Authorization": f"Bearer {os.environ['NOTION_API_KEY']}",
+         "Content-Type": "application/json", "Notion-Version": NV_UPLOAD}
+    r = requests.patch(f"{API}/blocks/{parent_id}/children", headers=h, timeout=60,
+                       json={"after": after_id,
+                             "children": [{"object": "block", "type": "image",
+                                           "image": {"type": "file_upload",
+                                                     "file_upload": {"id": fid}}}]})
+    if r.status_code != 200:
+        print(f"  ⚠️ 이미지 삽입 실패 {r.status_code}: {r.text[:150]}")
+        return False
+    return True
+
+
 def append_blocks(block_id, blocks, chunk=40):
     """토글 안에 블록을 나눠 넣는다. 요청당 100블록 한도와 중첩 제약을 피하기 위한 공개 헬퍼."""
     ok = 0

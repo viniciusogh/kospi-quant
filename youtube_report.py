@@ -507,6 +507,43 @@ def _get_or_create_date_page(today: str) -> str | None:
 
 
 
+def _refresh_keyword_image(root_id: str, today: str):
+    """'많이 나온 단어' 트리맵을 유튜브 토글에 갱신한다(매 실행 교체).
+
+    본문이 길어 한눈에 안 들어온다는 피드백 → 요약 시각화를 함께 보여준다.
+    노션 파일업로드 버전(2026-03-11)은 append 의 `after` 를 거부하므로 위치 지정이 안 된다
+    (실측 400: "body.after should be not present"). 채널 토글은 접혀 있어 2줄뿐이니
+    맨 끝에 붙여도 바로 보인다.
+    """
+    try:
+        import sys as _s
+        _s.path.insert(0, os.path.join(_BASE_DIR, "viz"))
+        import keywords as KW
+        import dashboard as D
+
+        txt, n = KW._load_text(os.path.join(_BASE_DIR, "latest_youtube_analysis.json"), days=2)
+        items = KW.count_keywords(txt, os.path.join(_BASE_DIR, "latest_kospi_supply.csv"), top=40)
+        if len(items) < 5:
+            log("  단어 집계 표본 부족 — 이미지 생략")
+            return
+        for b in D.children(root_id):        # 이전 이미지·머리말 제거
+            if b["type"] == "image":
+                D._delete([b["id"]])
+            elif b["type"] == "paragraph" and "많이 나온 단어" in "".join(
+                    x.get("plain_text", "") for x in b["paragraph"]["rich_text"]):
+                D._delete([b["id"]])
+        D._append(root_id, [{"object": "block", "type": "paragraph", "paragraph": {
+            "rich_text": [{"type": "text", "text": {"content": f"📊 많이 나온 단어 (영상 {n}개 기준)"},
+                           "annotations": {"bold": True, "color": "gray"}}]}}])
+        png = os.path.join(_BASE_DIR, "latest_keywords.png")
+        KW.render(items, today, png, n_videos=n)
+        with open(png, "rb") as f:
+            D.append_image(root_id, f.read(), "keywords.png")
+        log(f"  📊 단어 트리맵 갱신 ({len(items)}단어 / 영상 {n}개)")
+    except Exception as e:
+        log(f"  ⚠️ 단어 트리맵 생략: {str(e)[:90]}")
+
+
 def _dashboard_youtube_root(today: str) -> str | None:
     """통합 대시보드의 유튜브 토글(슬롯4) id. 채널 토글들이 이 안에 들어간다.
     사용자는 통합 포트폴리오 페이지만 보므로 날짜별 유튜브 페이지는 만들지 않는다(중복 방지)."""
@@ -519,6 +556,7 @@ def _dashboard_youtube_root(today: str) -> str | None:
     tid = D.get_or_create_report(title)
     if not tid:
         return None
+    _refresh_keyword_image(tid, today)
     pages = _load_pages()
     entry = _get_entry(pages, today)
     if not isinstance(entry, dict) or entry.get("page_id") != tid:
