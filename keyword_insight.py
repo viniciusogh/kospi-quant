@@ -97,3 +97,50 @@ def extract(txt, n_videos, top=28, log=print):
     json.dump({"key": key, "items": items}, open(CACHE, "w"), ensure_ascii=False)
     log(f"  키워드 인사이트 {len(items)}개 (AI 추출 → 코드 계량)")
     return items
+
+
+# ── 오늘만의 특별한 단어 (평소 대비 급증도) ─────────────────────────────
+HIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "keyword_history.json")
+
+
+def _load_hist():
+    if os.path.exists(HIST):
+        try:
+            return json.load(open(HIST))
+        except Exception:
+            pass
+    return {}
+
+
+def record_day(date, txt, words, chars=None):
+    """그날의 단어별 빈도와 본문 길이를 누적 저장. 정규화(만자당 빈도)를 위해 길이도 남긴다.
+    분석 캐시는 7일만 보관되지만 이 파일은 계속 쌓여 baseline 이 두꺼워진다."""
+    h = _load_hist()
+    cnt = _count_exact(txt, words)
+    h[date] = {"chars": chars if chars is not None else len(txt),
+               "counts": {w: int(c) for w, c in cnt.items() if c > 0}}
+    json.dump(h, open(HIST, "w"), ensure_ascii=False)
+    return h
+
+
+def spike(date, items, min_days=2, log=print):
+    """[(단어, 오늘횟수, 종류, 이유, 배수 or None)] — 평소 대비 급증도.
+
+    절대 빈도만 보면 AI·금리·실적이 매일 1등이라 '오늘만의 단어'가 안 보인다(사용자 지적).
+    만자당 빈도로 정규화해 과거 평균과 비교한다. 과거에 없던 단어는 NEW(배수 None).
+    baseline 이 얇으면(min_days 미만) 판단을 보류하고 None 을 돌려준다.
+    """
+    h = _load_hist()
+    past = {d: v for d, v in h.items() if d < date and v.get("chars")}
+    if len(past) < min_days:
+        log(f"  급증도 보류 — 과거 표본 {len(past)}일 (최소 {min_days}일 필요)")
+        return [(w, c, k, why, None) for w, c, k, why in items]
+    today = h.get(date) or {}
+    tchars = max(today.get("chars", 1), 1)
+    out = []
+    for w, c, k, why in items:
+        t_rate = c / tchars * 10000
+        rates = [v["counts"].get(w, 0) / v["chars"] * 10000 for v in past.values()]
+        base = sum(rates) / len(rates)
+        out.append((w, c, k, why, (t_rate / base) if base > 0.05 else None))
+    return out

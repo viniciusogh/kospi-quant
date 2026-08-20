@@ -533,6 +533,10 @@ def _refresh_keyword_image(root_id: str, today: str):
             t = b["type"]
             if t in ("image", "table"):
                 D._delete([b["id"]])
+            elif t == "callout" and any(x in "".join(y.get("plain_text", "")
+                                                    for y in b["callout"]["rich_text"])
+                                       for x in ("오늘 급증", "처음 등장")):
+                D._delete([b["id"]])
             elif t == "paragraph" and "많이 나온 단어" in "".join(
                     x.get("plain_text", "") for x in b["paragraph"]["rich_text"]):
                 D._delete([b["id"]])
@@ -544,19 +548,50 @@ def _refresh_keyword_image(root_id: str, today: str):
         with open(png, "rb") as f:
             D.append_image(root_id, f.read(), "keywords.png")
 
-        # 왜 언급되는지 — 원문 앞부분 발췌가 아니라 전체 맥락에서 뽑은 이유
+        # 오늘만의 특별한 단어 — 절대 빈도만 보면 AI·금리가 매일 1등이라 변화가 안 보인다.
+        # 만자당 빈도로 정규화해 과거 평균과 비교(급증도). 표는 급증 순으로 정렬한다.
+        KI.record_day(today, txt, [w for w, _, _, _ in items])
+        sp = KI.spike(today, items, log=log)
+
         def _c(t, bold=False, color=None):
             a = {"bold": bold}
             if color:
                 a["color"] = color
             return [{"type": "text", "text": {"content": str(t)}, "annotations": a}]
+
+        def _lift(v):
+            if v is None:
+                return _c("NEW", True, "purple")
+            if v >= 2.0:
+                return _c(f"🔥 {v:.1f}배", True, "red")
+            if v >= 1.3:
+                return _c(f"↗ {v:.1f}배", color="orange")
+            if v <= 0.7:
+                return _c(f"↘ {v:.1f}배", color="blue")
+            return _c(f"{v:.1f}배", color="gray")
+
+        sp.sort(key=lambda x: (-(x[4] if x[4] is not None else 99), -x[1]))
+        surge = [f"{w} {v:.1f}배" for w, c, k, wh, v in sp if v and v >= 2.0][:5]
+        newly = [w for w, c, k, wh, v in sp if v is None][:5]
+        note = []
+        if surge:
+            note.append("🔥 오늘 급증: " + " · ".join(surge))
+        if newly:
+            note.append("🆕 처음 등장: " + " · ".join(newly))
+        if note:
+            D._append(root_id, [{"object": "block", "type": "callout", "callout": {
+                "icon": {"type": "emoji", "emoji": "✨"}, "color": "gray_background",
+                "rich_text": [{"type": "text", "text": {"content": "\n".join(note)},
+                               "annotations": {"bold": True}}]}}])
+
         rows = [{"object": "block", "type": "table_row", "table_row": {"cells": [
-            _c("단어", True), _c("횟수", True), _c("종류", True), _c("왜 계속 언급되나", True)]}}]
-        for w, c, kind, why in items:
+            _c("단어", True), _c("횟수", True), _c("평소 대비", True), _c("종류", True),
+            _c("왜 계속 언급되나", True)]}}]
+        for w, c, kind, why, v in sp:
             rows.append({"object": "block", "type": "table_row", "table_row": {"cells": [
-                _c(w, True), _c(f"{c}회"), _c(kind, color="gray"), _c(why)]}})
+                _c(w, True), _c(f"{c}회"), _lift(v), _c(kind, color="gray"), _c(why)]}})
         D._append(root_id, [{"object": "block", "type": "table", "table": {
-            "table_width": 4, "has_column_header": True, "has_row_header": False,
+            "table_width": 5, "has_column_header": True, "has_row_header": False,
             "children": rows}}])
         log(f"  📊 단어 트리맵+이유표 갱신 ({len(items)}단어 / 영상 {n}개)")
     except Exception as e:
