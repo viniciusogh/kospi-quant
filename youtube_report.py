@@ -521,15 +521,19 @@ def _refresh_keyword_image(root_id: str, today: str):
         import keywords as KW
         import dashboard as D
 
+        import keyword_insight as KI
         txt, n = KW._load_text(os.path.join(_BASE_DIR, "latest_youtube_analysis.json"), days=2)
-        items = KW.count_keywords(txt, os.path.join(_BASE_DIR, "latest_kospi_supply.csv"), top=40)
+        # 사전 대신 AI 추출 → 신조어("호르무즈 해협"·"전력기기"·"주주환원")도 잡힌다.
+        # 횟수는 코드가 센다(LLM 이 세면 틀린다).
+        items = KI.extract(txt, n, top=28, log=log)
         if len(items) < 5:
-            log("  단어 집계 표본 부족 — 이미지 생략")
+            log("  단어 집계 표본 부족 — 생략")
             return
-        for b in D.children(root_id):        # 이전 이미지·머리말 제거
-            if b["type"] == "image":
+        for b in D.children(root_id):        # 이전 이미지·머리말·표 제거 (매 실행 교체)
+            t = b["type"]
+            if t in ("image", "table"):
                 D._delete([b["id"]])
-            elif b["type"] == "paragraph" and "많이 나온 단어" in "".join(
+            elif t == "paragraph" and "많이 나온 단어" in "".join(
                     x.get("plain_text", "") for x in b["paragraph"]["rich_text"]):
                 D._delete([b["id"]])
         D._append(root_id, [{"object": "block", "type": "paragraph", "paragraph": {
@@ -539,7 +543,22 @@ def _refresh_keyword_image(root_id: str, today: str):
         KW.render(items, today, png, n_videos=n)
         with open(png, "rb") as f:
             D.append_image(root_id, f.read(), "keywords.png")
-        log(f"  📊 단어 트리맵 갱신 ({len(items)}단어 / 영상 {n}개)")
+
+        # 왜 언급되는지 — 원문 앞부분 발췌가 아니라 전체 맥락에서 뽑은 이유
+        def _c(t, bold=False, color=None):
+            a = {"bold": bold}
+            if color:
+                a["color"] = color
+            return [{"type": "text", "text": {"content": str(t)}, "annotations": a}]
+        rows = [{"object": "block", "type": "table_row", "table_row": {"cells": [
+            _c("단어", True), _c("횟수", True), _c("종류", True), _c("왜 계속 언급되나", True)]}}]
+        for w, c, kind, why in items:
+            rows.append({"object": "block", "type": "table_row", "table_row": {"cells": [
+                _c(w, True), _c(f"{c}회"), _c(kind, color="gray"), _c(why)]}})
+        D._append(root_id, [{"object": "block", "type": "table", "table": {
+            "table_width": 4, "has_column_header": True, "has_row_header": False,
+            "children": rows}}])
+        log(f"  📊 단어 트리맵+이유표 갱신 ({len(items)}단어 / 영상 {n}개)")
     except Exception as e:
         log(f"  ⚠️ 단어 트리맵 생략: {str(e)[:90]}")
 

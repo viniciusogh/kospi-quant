@@ -15,7 +15,16 @@ import pandas as pd
 
 from treemap import (squarify, contrast, hex_to_oklab, SURFACE, SUBINK, _font)  # noqa: F401
 
-CAT_COLORS = {"종목": "#3987e5", "테마·섹터": "#d95926", "매크로": "#199e70"}
+# 빈도는 magnitude(크기) → **단일 색조 시퀀셜**이 규칙이다. 처음엔 카테고리 3색을 썼는데
+# 색이 산만하고("짜침") 색에 빈도를 다시 싣지 않는다는 원칙에도 안 맞았다.
+# 기준 팔레트 파랑 램프에서 5단계(어두움→밝음 = 적음→많음). 다크 표면과 톤이 이어진다.
+FREQ_STEPS = ["#184f95", "#256abf", "#3987e5", "#6da7ec", "#9ec5f4"]
+
+
+def freq_color(rank_ratio):
+    """0(적음)~1(많음) → 램프 단계."""
+    i = min(int(rank_ratio * len(FREQ_STEPS)), len(FREQ_STEPS) - 1)
+    return FREQ_STEPS[i]
 
 MACRO = ["금리", "환율", "인플레이션", "관세", "유가", "FOMC", "연준", "CPI", "실적", "수급",
          "외국인", "기관", "개미", "달러", "국채", "경기침체", "버블", "순환매", "주도주",
@@ -83,8 +92,8 @@ def count_keywords(txt, universe_csv, top=40):
     return [(w, c, cat[w]) for w, c in cnt.most_common(top) if c >= 2]
 
 
-def render(items, asof, out_path, n_videos=0, w=1400, h=760):
-    """items: [(단어, 횟수, 카테고리)] — 크기=횟수, 색=카테고리."""
+def render(items, asof, out_path, n_videos=0, w=1400, h=720):
+    """items: [(단어, 횟수, 종류, 이유)] — 크기·색 모두 언급 횟수(단일 색조 시퀀셜)."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -96,37 +105,40 @@ def render(items, asof, out_path, n_videos=0, w=1400, h=760):
     plt.rcParams["axes.unicode_minus"] = False
 
     fig = plt.figure(figsize=(w / 100, h / 100), dpi=100, facecolor=SURFACE)
-    ax = fig.add_axes([0.008, 0.008, 0.984, 0.855])
+    ax = fig.add_axes([0.008, 0.008, 0.984, 0.845])
     ax.set_xlim(0, 100); ax.set_ylim(0, 100); ax.axis("off")
 
-    fig.text(0.008, 0.945, f"많이 나온 단어  {asof}", fontsize=19, fontweight="bold", color="#ffffff")
-    fig.text(0.008, 0.902,
-             f"크기 = 언급 횟수   ·   색 = 종류   ·   영상 {n_videos}개 분석 기준"
-             f"   ·   사전에 있는 단어만 집계(조사·불용어 제외)",
+    fig.text(0.008, 0.938, f"많이 나온 단어  {asof}", fontsize=19, fontweight="bold", color="#ffffff")
+    fig.text(0.008, 0.893,
+             f"크기·색 = 언급 횟수   ·   영상 {n_videos}개 분석   ·   아래 표에 각 단어가 왜 나오는지",
              fontsize=10.5, color=SUBINK)
-    # 범례 (색이 2종 이상이므로 필수)
-    lx = 0.62
-    for i, (name, col) in enumerate(CAT_COLORS.items()):
-        fig.patches.append(plt.Rectangle((lx + i * 0.13, 0.938), 0.018, 0.022, facecolor=col,
+    # 시퀀셜 범례 (적음 → 많음)
+    lx, bw = 0.70, 0.032
+    for i, c in enumerate(FREQ_STEPS):
+        fig.patches.append(plt.Rectangle((lx + i * bw, 0.930), bw - 0.004, 0.024, facecolor=c,
                                         transform=fig.transFigure, figure=fig))
-        fig.text(lx + i * 0.13 + 0.023, 0.945, name, fontsize=11, color="#dfe3ea")
+    fig.text(lx - 0.010, 0.937, "적음", fontsize=9.5, color=SUBINK, ha="right")
+    fig.text(lx + len(FREQ_STEPS) * bw + 0.002, 0.937, "많음", fontsize=9.5, color=SUBINK)
 
-    rects = squarify([c for _, c, _ in items], 0, 0, 100, 100)
-    GAP = 0.4
-    for (word, c, cate), (x, y, rw, rh) in zip(items, rects):
-        col = CAT_COLORS.get(cate, "#3987e5")
+    counts = [c for _, c, _, _ in items]
+    mx = max(counts) if counts else 1
+    rects = squarify(counts, 0, 0, 100, 100)
+    GAP = 0.42
+    for (word, c, _kind, _why), (x, y, rw, rh) in zip(items, rects):
+        # 순위가 아니라 '값' 으로 색을 정한다(제곱근 스케일 — 1위가 압도적이라 선형이면 다 어두워진다)
+        col = freq_color((c / mx) ** 0.5)
         tw, th = max(rw - GAP, 0.1), max(rh - GAP, 0.1)
-        ax.add_patch(Rectangle((x, y), tw, th, facecolor=col, edgecolor=SURFACE, lw=1.0))
+        ax.add_patch(Rectangle((x, y), tw, th, facecolor=col, edgecolor=SURFACE, lw=1.1))
         if tw < 4 or th < 3:
             continue
         ink = "#ffffff" if contrast("#ffffff", col) >= contrast("#111111", col) else "#111111"
         area = tw * th
-        fs = 21 if area > 260 else (16 if area > 130 else (12 if area > 55 else 9.5))
-        ax.text(x + tw / 2, y + th / 2 + min(th * 0.12, 1.8), word, ha="center", va="center",
+        fs = 22 if area > 260 else (16 if area > 130 else (12 if area > 55 else 9.5))
+        ax.text(x + tw / 2, y + th / 2 + min(th * 0.12, 1.7), word, ha="center", va="center",
                 fontsize=fs, color=ink, fontweight="bold")
         if th > 5.5 and tw > 6:
-            ax.text(x + tw / 2, y + th / 2 - min(th * 0.20, 2.6), f"{c}회", ha="center",
-                    va="center", fontsize=fs * 0.62, color=ink)
+            ax.text(x + tw / 2, y + th / 2 - min(th * 0.20, 2.5), f"{c}회", ha="center",
+                    va="center", fontsize=fs * 0.6, color=ink)
 
     fig.savefig(out_path, facecolor=SURFACE)
     plt.close(fig)
