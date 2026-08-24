@@ -4,7 +4,7 @@ momentum_daily 의 8섹션 Gemini 분석·수급막대·분기표를 그대로 �
 모멘텀 리포트는 '모멘텀 점수·신고가'를, 여기서는 **보유 관점(수량·평단→현재가·수익률·평가금액)** 을 보여준다.
 
 토큰: momentum_analysis.json 캐시를 공유하므로 오늘 모멘텀 추천에 든 보유종목은 재분석하지 않는다.
-(오늘 날짜 캐시면 Gemini 호출 0회. 그 외는 momentum 과 같은 규칙 — 7일내 재등장은 가벼운 업데이트만.)
+(오늘 날짜 캐시면 Gemini 호출 0회. 그 외는 momentum 과 같은 규칙 — 5일내 재등장은 가벼운 업데이트만(ANALYSIS_TTL_DAYS).)
 
 실행: python holdings_report.py   (.env 필요. portfolio.py 가 만든 portfolio.json 을 읽음)
 """
@@ -182,7 +182,7 @@ def _holding_toggle(row, pos, a, fl, roe):
 
 def _bullets(a, key3, key_prose):
     """카드용 3줄. 신규 분석엔 '촉매3/리스크3' 압축 필드가 있고, 아직 캐시에 없으면
-    원문 프로즈를 문장 단위로 잘라 앞 3개를 쓴다(캐시가 7일 내 갱신되면 압축 필드로 바뀜)."""
+    원문 프로즈를 문장 단위로 잘라 앞 3개를 쓴다(캐시가 TTL 내 갱신되면 압축 필드로 바뀜)."""
     v = (a.get(key3) or "").strip()
     if v:
         return [x.strip(" ·") for x in v.split("·") if len(x.strip(" ·")) > 3][:3]

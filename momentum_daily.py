@@ -531,8 +531,13 @@ def load_debt_ranks():
     return out
 
 
+# 프로즈 전체 재분석 주기(일). 만료가 실제로 작동하게 고친 뒤(2026-08-25) 사용자가 5일로 결정 —
+# 종목당 주 1.4회 전체분석. 비용이 부담되면 늘리면 된다.
+ANALYSIS_TTL_DAYS = int(os.environ.get("ANALYSIS_TTL_DAYS", "5"))
+
+
 def gemini_analyze(top10, flows, roes, cache, ebitdas=None, dranks=None):
-    """캐시 인식: 재등장(7일내) 종목은 어제 8섹션 재사용 + 오늘 업데이트만 호출. 신규/묵은건 전체분석.
+    """캐시 인식: 재등장(TTL 내) 종목은 어제 8섹션 재사용 + 오늘 업데이트만 호출. 신규/묵은건 전체분석.
 
     신선도는 'date'(=마지막 실행일) 가 아니라 **'full'(=마지막 전체분석일)** 로 판정한다.
     date 는 매 실행마다 오늘로 갱신되므로 그걸로 재면 days<=7 이 영원히 참이 되어
@@ -549,7 +554,7 @@ def gemini_analyze(top10, flows, roes, cache, ebitdas=None, dranks=None):
         base = (cached or {}).get("full") or (cached or {}).get("date")   # full 없는 옛 캐시는 date 로 1회 판정
         if cached and base:
             try:
-                fresh = (today - datetime.strptime(base, "%Y-%m-%d").replace(tzinfo=KST)).days <= 7
+                fresh = (today - datetime.strptime(base, "%Y-%m-%d").replace(tzinfo=KST)).days <= ANALYSIS_TTL_DAYS
             except Exception:
                 fresh = False
         if not cached or not cached.get("촉매3"):
