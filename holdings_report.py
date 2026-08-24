@@ -132,10 +132,9 @@ def _holding_toggle(row, pos, a, fl, roe):
 
     title = [
         {"type": "text", "text": {"content": f"📌 {row['종목명']} "}, "annotations": {"bold": True}},
-        {"type": "text", "text": {"content": f"{ret*100:+.1f}% "},
+        {"type": "text", "text": {"content": f"{ret*100:+.1f}%"},
          "annotations": {"bold": True, "color": col}},
-        gray(f"({row['code']}) · {pos['broker']}  |  {pos['qty']:,.0f}주 · "
-             f"{pos['avg']:,.0f} → {pos['price']:,.0f}원 · 평가 {pos['eval']:,.0f}원")]
+        gray(f"  ·  {secname}")]        # 수량·평단·평가금액은 위 인포그래픽에 있다(중복 제거)
 
     kids = []
     sig = ", ".join(pos.get("signal") or [])
@@ -171,6 +170,24 @@ def _holding_toggle(row, pos, a, fl, roe):
             "toggle": {"rich_text": title, "color": "default", "children": kids}}
 
 
+def _infographic(data):
+    """보유 현황 인포그래픽 → image 블록. 표는 모바일에서 열이 잘려 이미지로 간다(사용자 요청).
+    업로드는 신버전 API, 삽입은 구버전(after 지원) — dashboard 가 처리."""
+    try:
+        import sys
+        sys.path.insert(0, os.path.join(_DIR, "viz"))
+        import holdings as HV
+        png = os.path.join(_DIR, "latest_holdings.png")
+        HV.render(data, png)
+        with open(png, "rb") as f:
+            fid = D.upload_image(f.read(), "holdings.png")
+        return ({"object": "block", "type": "image",
+                 "image": {"type": "file_upload", "file_upload": {"id": fid}}} if fid else None)
+    except Exception as e:
+        M.log(f"  ⚠️ 인포그래픽 생략: {str(e)[:80]}")
+        return None
+
+
 def main():
     # 휴장일엔 시세가 안 바뀌므로 Gemini 호출을 아낀다 (portfolio.py 와 같은 판정 재사용)
     if os.environ.get("SKIP_MARKET_CHECK") != "1":
@@ -199,17 +216,14 @@ def main():
         return
     analysis, flows, roes, incomes = _analyze(rows, tok)
 
-    t = data["total"]
-    col = "red_background" if t["pl"] > 0 else ("blue_background" if t["pl"] < 0 else "gray_background")
-    header = [{"object": "block", "type": "callout", "callout": {
-        "icon": {"type": "emoji", "emoji": "💰"}, "color": col,
-        "rich_text": [
-            {"type": "text", "text": {"content": f"보유 {len(rows)}종목 · 총평가 {t['eval']:,.0f}원 · "
-                                                 f"손익 {t['pl']:+,.0f}원 ({t['ret']*100:+.2f}%)\n"},
-             "annotations": {"bold": True}},
-            {"type": "text", "text": {"content": f"기준 {data.get('asof','')} · 분석은 AI 검색 추정으로 "
-                                                 f"확정 사실이 아님 · 투자판단 보조용"},
-             "annotations": {"color": "gray"}}]}}]
+    header = []
+    img = _infographic(data)
+    if img:
+        header.append(img)
+    header.append({"object": "block", "type": "paragraph", "paragraph": {"rich_text": [
+        {"type": "text", "text": {"content": "종목을 펼치면 AI 심층분석 · 분기실적 · 수급이 나옵니다. "
+                                             "분석은 AI 검색 추정으로 확정 사실이 아님 · 투자판단 보조용"},
+         "annotations": {"color": "gray", "italic": True}}]}})
 
     items = []
     for row, pos in sorted(rows, key=lambda x: -x[1]["eval"]):

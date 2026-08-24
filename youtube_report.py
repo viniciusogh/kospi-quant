@@ -641,7 +641,7 @@ def _dashboard_youtube_root(today: str) -> str | None:
     tid = D.get_or_create_report(title)
     if not tid:
         return None
-    _refresh_keyword_image(tid, today)
+    # 키워드 집계는 '오늘의 핵심 요약'(daily_recommend)으로 통합 — 같은 소스이므로 한 곳에
     pages = _load_pages()
     entry = _get_entry(pages, today)
     if not isinstance(entry, dict) or entry.get("page_id") != tid:

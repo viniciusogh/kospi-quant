@@ -207,28 +207,17 @@ def blocks(agg, tops, asof):
                 f"{asof} 정규장 종가 · 시총 상위 {UNIVERSE_N}+테마 · 섹터 등가중"},
              "annotations": {"color": "gray"}}]}}]
 
-    def line(r, mark):
+    # 목록은 섹터당 숫자 6개 × 13섹터 = 숫자 벽이라 안 읽힌다(사용자 지적).
+    # 강세 6 · 약세 4 만, 섹터당 4개 값으로 줄여 이미지 한 장으로 renders.
+    def row(r):
         sec = r["섹터"]
-        stocks = " · ".join(f"{nm} {ch*100:+.1f}%" for nm, ch in (tops.get(sec) or [])[:3])
-        col = "red" if r["오늘"] > 0 else ("blue" if r["오늘"] < 0 else "gray")
-        return {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {
-            "rich_text": [
-                {"type": "text", "text": {"content": f"{mark} {sec}({int(r['n'])}) "},
-                 "annotations": {"bold": True}},
-                {"type": "text", "text": {"content": f"{r['오늘']*100:+.1f}%"},
-                 "annotations": {"bold": True, "color": col}},
-                {"type": "text", "text": {"content":
-                    f"  5일 {r['d5']*100:+.1f}% · 20일 {r['d20']*100:+.1f}% · 순매수 {_flow(r['순매수'])}"},
-                 "annotations": {"color": "gray"}},
-                {"type": "text", "text": {"content": f"\n{stocks}" if stocks else ""},
-                 "annotations": {"color": "gray"}}]}}
+        t = (tops.get(sec) or [])
+        # 오르는 섹터는 끌어올린 종목, 빠지는 섹터는 끌어내린 종목을 보여야 이유가 보인다
+        lead = (max(t, key=lambda x: x[1]) if r["오늘"] > 0 else min(t, key=lambda x: x[1])) if t else ("", 0.0)
+        return (sec, r["오늘"], r["d20"], lead[0], lead[1])
 
-    rows = [line(r, "🔥") for _, r in agg.head(8).iterrows()]
-    rows += [line(r, "🧊") for _, r in agg.tail(5).iloc[::-1].iterrows()]
-    rows.append({"object": "block", "type": "paragraph", "paragraph": {
-        "rich_text": [{"type": "text",
-                       "text": {"content": f"… 전체 {len(agg)}개 섹터는 위 트리맵 참고"},
-                       "annotations": {"color": "gray", "italic": True}}]}})
+    rows = [row(r) for _, r in agg.head(6).iterrows()]
+    rows += [row(r) for _, r in agg.tail(4).iloc[::-1].iterrows()]
     return header, rows
 
 
@@ -283,11 +272,21 @@ def main():
         T.render(groups, asof, png, strip=strip)
         with open(png, "rb") as f:
             ok = D.append_image(tid, f.read(), "sector_treemap.png")
-        M.log("  🗺 트리맵 업로드 " + ("완료" if ok else "실패(표는 정상)"))
-    except Exception as e:
-        M.log(f"  ⚠️ 트리맵 생략: {str(e)[:90]}")
+        M.log("  🗺 트리맵 업로드 " + ("완료" if ok else "실패"))
 
-    D.append_blocks(tid, rows, chunk=20)
+        tpng = os.path.join(_DIR, "latest_sector_table.png")
+        T.render_table(rows, asof, tpng)
+        with open(tpng, "rb") as f:
+            D.append_image(tid, f.read(), "sector_table.png")
+        M.log(f"  📋 섹터 추세표 업로드 ({len(rows)}개)")
+    except Exception as e:
+        M.log(f"  ⚠️ 이미지 생략: {str(e)[:90]}")
+        rows = []
+
+    D.append_blocks(tid, [{"object": "block", "type": "paragraph", "paragraph": {
+        "rich_text": [{"type": "text",
+                       "text": {"content": f"… 전체 {len(agg)}개 섹터는 위 트리맵 참고"},
+                       "annotations": {"color": "gray", "italic": True}}]}}])
     M.log(f"✅ 대시보드에 섹터 장세 추가: {D.url()}")
     print(agg.assign(**{c: (agg[c] * 100).round(1) for c in ["오늘", "d5", "d20"]})
           .to_string(index=False))

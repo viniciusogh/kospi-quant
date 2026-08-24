@@ -361,6 +361,27 @@ def _rt(text, bold=False, color=None):
 
 
 
+def _cell_rows(data):
+    """표 4열 — 6열은 모바일에서 잘렸다(사용자 지적). 수량은 종목 칸에 접고,
+    최근 5일 추이는 보유종목 심층분석 인포그래픽으로 옮겼다."""
+    head = [{"object": "block", "type": "table_row", "table_row": {"cells": [
+        _rt("종목", True), _rt("평단 → 현재가", True), _rt("평가금액", True), _rt("수익률", True)]}}]
+    rows = []
+    for r in data["positions"]:
+        col = "red" if r["ret"] > 0 else ("blue" if r["ret"] < 0 else "gray")
+        star = " ⭐" if r["signal"] else ""
+        name = [{"type": "text", "text": {"content": f"{r['name']}{star}"}, "annotations": {"bold": True}},
+                {"type": "text", "text": {"content": f"\n{r['qty']:,.0f}주 · {r['broker']}"},
+                 "annotations": {"color": "gray"}}]
+        rows.append({"object": "block", "type": "table_row", "table_row": {"cells": [
+            name,
+            _rt(f"{r['avg']:,.0f} → {r['price']:,.0f}"),
+            _rt(f"{r['eval']:,.0f}원"),
+            _rt(f"{r['ret']*100:+.1f}%", True, col) + [{"type": "text",
+                "text": {"content": f"\n{r['pl']:+,.0f}원"}, "annotations": {"color": col}}]]}})
+    return head + rows
+
+
 def _blocks(data):
     t = data["total"]
     out = []
@@ -386,11 +407,9 @@ def _blocks(data):
         parts = [f"{b} {v['eval']:,.0f}원({v['n']})" for b, v in data["by_broker"].items()]
         out.append({"object": "block", "type": "paragraph",
                     "paragraph": {"rich_text": _rt("증권사별: " + "  ·  ".join(parts), color="gray")}})
-    # 표는 모바일에서 6열이 잘리고 여백이 뜬다(사용자 지적) → 인포그래픽 이미지로 대체.
-    # 구버전 API(2022-06-28)도 file_upload 이미지 블록과 after 삽입을 받는다(실측 확인).
-    img = _holdings_image(data)
-    if img:
-        out.append(img)
+    out.append({"object": "block", "type": "table", "table": {
+        "table_width": 4, "has_column_header": True, "has_row_header": False,
+        "children": _cell_rows(data)}})
     sig = (f"⭐ 오늘 모멘텀 리포트 추천과 겹치는 보유: "
            + ", ".join(f"{r['name']}({'/'.join(r['signal'])})" for r in held)) if held else \
           "⭐ 오늘 리포트 추천과 겹치는 보유 종목 없음"
@@ -398,26 +417,6 @@ def _blocks(data):
         "icon": {"type": "emoji", "emoji": "🎯"}, "color": "gray_background",
         "rich_text": _rt(sig)}})
     return out
-
-
-def _holdings_image(data):
-    """보유 현황 인포그래픽 PNG 를 만들어 업로드하고 image 블록을 돌려준다."""
-    try:
-        import sys
-        sys.path.insert(0, os.path.join(_DIR, "viz"))
-        import holdings as HV
-        import dashboard as D
-        png = os.path.join(_DIR, "latest_holdings.png")
-        HV.render(data, png)
-        with open(png, "rb") as f:
-            fid = D.upload_image(f.read(), "holdings.png")
-        if not fid:
-            return None
-        return {"object": "block", "type": "image",
-                "image": {"type": "file_upload", "file_upload": {"id": fid}}}
-    except Exception as e:
-        print(f"  ⚠️ 보유 이미지 생략: {str(e)[:80]}")
-        return None
 
 
 def upload_notion(data):

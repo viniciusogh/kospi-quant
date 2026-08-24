@@ -197,17 +197,6 @@ SUMMARY: <오늘 보고서를 관통하는 한 줄 (40자 이내, 예: "AI/반�
 
 # 📊 {today} 오늘의 핵심 요약
 
-## 🏷️ 자주 언급된 종목 TOP 5
-
-화자들이 자주 언급한 종목 5개 (언급 빈도 순). 추천이 아니라 주목도 표시.
-
-| 순위 | 종목명 (코드) | 언급 횟수 | 주요 화자 | 핵심 시각 |
-|---|---|---|---|---|
-| 1 | ... | N회 | 채널 1, 채널 2 | 긍정/부정/중립 + 1줄 |
-| 2 | ... | ... | ... | ... |
-| ... | ... | ... | ... | ... |
-| 5 | ... | ... | ... | ... |
-
 ## 🎤 화자별 핵심 의견
 
 주요 화자 5~8명. 각 화자별 한 마디:
@@ -305,6 +294,74 @@ def _get_or_create_date_page(today: str) -> str | None:
 
 
 
+def _render_keywords(block_id: str, today: str):
+    """유튜브 분석본에서 뽑은 키워드 트리맵·급증 목록을 이 토글 맨 위에 넣는다.
+    핵심 요약과 키워드는 **같은 소스(유튜브 분석본)** 라 한 곳에 모은다(사용자 요청).
+    22:00 실행이라 하루치 영상이 다 모인 뒤 집계된다."""
+    try:
+        import sys
+        sys.path.insert(0, os.path.join(_BASE_DIR, "viz"))
+        import keywords as KW, keyword_insight as KI, dashboard as D
+
+        txt, n = KW._load_text(os.path.join(_BASE_DIR, "latest_youtube_analysis.json"), days=2)
+        items = KI.extract(txt, n, top=25, log=log)
+        if len(items) < 5:
+            return
+        png = os.path.join(_BASE_DIR, "latest_keywords.png")
+        KW.render(items, today, png, n_videos=n)
+        with open(png, "rb") as f:
+            fid = D.upload_image(f.read(), "keywords.png")
+        if fid:
+            D._append(block_id, [{"object": "block", "type": "image",
+                                  "image": {"type": "file_upload", "file_upload": {"id": fid}}}])
+
+        KI.record_day(today, txt, [w for w, _, _, _ in items])
+        sp = KI.spike(today, items, log=log)
+
+        def _c(t, bold=False, color=None):
+            a = {"bold": bold}
+            if color:
+                a["color"] = color
+            return [{"type": "text", "text": {"content": str(t)}, "annotations": a}]
+
+        def _score(x):
+            return x[4] if x[4] is not None else (5.0 + x[1] / 10.0)
+        sp.sort(key=lambda x: (-_score(x), -x[1]))
+
+        surge = [f"{w} {v:.1f}배" for w, c, k, wh, v in sp if v and v >= 2.0][:5]
+        newly = [w for w, c, k, wh, v in sp if v is None][:5]
+        note = []
+        if surge:
+            note.append("🔥 오늘 급증: " + " · ".join(surge))
+        if newly:
+            note.append("🆕 처음 등장: " + " · ".join(newly))
+        if note:
+            D._append(block_id, [{"object": "block", "type": "callout", "callout": {
+                "icon": {"type": "emoji", "emoji": "✨"}, "color": "gray_background",
+                "rich_text": _c("\n".join(note), True)}}])
+
+        blocks = []
+        for w, c, kind, why, v in sp[:int(os.environ.get("KW_SHOW", "15"))]:
+            if v is None:
+                mark, col, lift = "🆕", "purple", "NEW"
+            elif v >= 2.0:
+                mark, col, lift = "🔥", "red", f"{v:.1f}배"
+            elif v >= 1.3:
+                mark, col, lift = "↗", "orange", f"{v:.1f}배"
+            elif v <= 0.7:
+                mark, col, lift = "↘", "blue", f"{v:.1f}배"
+            else:
+                mark, col, lift = "·", "gray", f"{v:.1f}배"
+            blocks.append({"object": "block", "type": "bulleted_list_item",
+                           "bulleted_list_item": {"rich_text":
+                               _c(f"{mark} {w} ", True) + _c(lift, True, col)
+                               + _c(f" · {c}회 — ", color="gray") + _c(why)}})
+        D.append_blocks(block_id, blocks, chunk=20)
+        log(f"  📊 키워드 통합 ({len(items)}단어 / 영상 {n}개)")
+    except Exception as e:
+        log(f"  ⚠️ 키워드 통합 생략: {str(e)[:90]}")
+
+
 def push_to_notion(text: str) -> str | None:
     today = datetime.now(KST).strftime("%Y-%m-%d")
     title = f"📊 {today} 오늘의 핵심 요약"
@@ -322,6 +379,13 @@ def push_to_notion(text: str) -> str | None:
             log("❌ 대시보드 토글 생성 실패")
             return None
         page_url = D.url()
+        m = re.search(r"^SUMMARY:\s*(.+)$", text, re.MULTILINE)
+        if m:
+            D._append(page_id, [{"object": "block", "type": "callout", "callout": {
+                "icon": {"type": "emoji", "emoji": "📌"}, "color": "blue_background",
+                "rich_text": [{"type": "text", "text": {"content": m.group(1).strip()},
+                               "annotations": {"bold": True}}]}}])
+        _render_keywords(page_id, today)      # 트리맵·급증목록을 본문보다 먼저
     else:
         body = {
             "parent":     {"page_id": date_page_id},
@@ -341,8 +405,8 @@ def push_to_notion(text: str) -> str | None:
     while idx < len(src_lines):
         raw = src_lines[idx]
         line = raw.strip()
-        if not line:
-            idx += 1
+        if not line or (dash and (line.startswith("SUMMARY:") or line.startswith("# "))):
+            idx += 1        # 대시보드 모드: h1 은 토글 제목과 중복, SUMMARY 는 위 콜아웃으로 뽑았다
             continue
         # 마크다운 표: | a | b | + 다음 줄 |---|---|
         if line.startswith("|") and line.endswith("|") and idx + 1 < len(src_lines):
