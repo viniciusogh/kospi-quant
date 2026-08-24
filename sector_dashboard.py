@@ -207,17 +207,40 @@ def blocks(agg, tops, asof):
                 f"{asof} 정규장 종가 · 시총 상위 {UNIVERSE_N}+테마 · 섹터 등가중"},
              "annotations": {"color": "gray"}}]}}]
 
-    # 목록은 섹터당 숫자 6개 × 13섹터 = 숫자 벽이라 안 읽힌다(사용자 지적).
-    # 강세 6 · 약세 4 만, 섹터당 4개 값으로 줄여 이미지 한 장으로 renders.
-    def row(r):
-        sec = r["섹터"]
-        t = (tops.get(sec) or [])
-        # 오르는 섹터는 끌어올린 종목, 빠지는 섹터는 끌어내린 종목을 보여야 이유가 보인다
-        lead = (max(t, key=lambda x: x[1]) if r["오늘"] > 0 else min(t, key=lambda x: x[1])) if t else ("", 0.0)
-        return (sec, r["오늘"], r["d20"], lead[0], lead[1])
+    # 표 4열 — 목록은 숫자 벽이라 안 읽혔고(사용자 지적) 6열은 모바일에서 잘린다.
+    # 색은 바로 위 트리맵과 맞춰 상승 초록/하락 빨강(노션 다른 표의 한국식과 반대인 건
+    # 같은 리포트 안에서 이미지와 표가 어긋나는 쪽이 더 헷갈려서다).
+    def _rt(t, bold=False, color=None):
+        a = {"bold": bold}
+        if color:
+            a["color"] = color
+        return [{"type": "text", "text": {"content": str(t)}, "annotations": a}]
 
-    rows = [row(r) for _, r in agg.head(6).iterrows()]
-    rows += [row(r) for _, r in agg.tail(4).iloc[::-1].iterrows()]
+    def verdict(today, d20):
+        if today > 0:
+            return ("추세 지속", "green") if d20 > 0 else ("반등 시작", "green")
+        return ("조정 중", "red") if d20 > 0 else ("약세 지속", "red")
+
+    head = [{"object": "block", "type": "table_row", "table_row": {"cells": [
+        _rt("섹터", True), _rt("오늘", True), _rt("판정 · 20일", True), _rt("주도주", True)]}}]
+    body = []
+    for _, r in list(agg.head(6).iterrows()) + list(agg.tail(4).iloc[::-1].iterrows()):
+        sec, td, d20 = r["섹터"], r["오늘"], r["d20"]
+        t = tops.get(sec) or []
+        # 오르는 섹터는 끌어올린 종목, 빠지는 섹터는 끌어내린 종목이라야 이유가 보인다
+        lead = (max(t, key=lambda x: x[1]) if td > 0 else min(t, key=lambda x: x[1])) if t else None
+        vt, vc = verdict(td, d20)
+        col = "green" if td > 0 else ("red" if td < 0 else "default")
+        body.append({"object": "block", "type": "table_row", "table_row": {"cells": [
+            _rt(sec, True),
+            _rt(f"{td*100:+.1f}%", True, col),
+            _rt(vt, True, vc) + _rt(f"\n20일 {d20*100:+.0f}%", color="gray"),
+            (_rt(lead[0]) + _rt(f"\n{lead[1]*100:+.1f}%",
+                                color="green" if lead[1] > 0 else "red") if lead else _rt("-"))]}})
+
+    rows = [{"object": "block", "type": "table", "table": {
+        "table_width": 4, "has_column_header": True, "has_row_header": False,
+        "children": head + body}}]
     return header, rows
 
 
@@ -273,16 +296,10 @@ def main():
         with open(png, "rb") as f:
             ok = D.append_image(tid, f.read(), "sector_treemap.png")
         M.log("  🗺 트리맵 업로드 " + ("완료" if ok else "실패"))
-
-        tpng = os.path.join(_DIR, "latest_sector_table.png")
-        T.render_table(rows, asof, tpng)
-        with open(tpng, "rb") as f:
-            D.append_image(tid, f.read(), "sector_table.png")
-        M.log(f"  📋 섹터 추세표 업로드 ({len(rows)}개)")
     except Exception as e:
-        M.log(f"  ⚠️ 이미지 생략: {str(e)[:90]}")
-        rows = []
+        M.log(f"  ⚠️ 트리맵 생략: {str(e)[:90]}")
 
+    D.append_blocks(tid, rows, chunk=20)
     D.append_blocks(tid, [{"object": "block", "type": "paragraph", "paragraph": {
         "rich_text": [{"type": "text",
                        "text": {"content": f"… 전체 {len(agg)}개 섹터는 위 트리맵 참고"},
