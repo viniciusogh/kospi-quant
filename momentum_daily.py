@@ -354,8 +354,9 @@ def main():
             cache = {}
     dranks = {} if cash_mode else load_debt_ranks()
     analysis = {} if cash_mode else (gemini_analyze(top10, flows, roes, cache, ebitdas, dranks) if os.environ.get("GEMINI_API_KEY") else {})
-    if analysis:                                  # 캐시 저장 (등장한 종목만 유지 + 오래된건 정리)
-        json.dump({k: v for k, v in cache.items()}, open(CACHE_JSON, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    if analysis:
+        json.dump(prune_cache(cache), open(CACHE_JSON, "w", encoding="utf-8"),
+                  ensure_ascii=False, indent=1)
     if os.environ.get("NOTION_API_KEY"):
         upload_notion(top10, analysis, trend, flows, roes, deltas, newly, dropped, incomes,
                       today_str, cash=cash_mode, ebitdas=ebitdas, dranks=dranks)
@@ -366,9 +367,17 @@ def main():
             print(f"\n{'='*70}\n▶▶ {r['종목명']} ({r['code']}) | 이슈: {a.get('issue','')}")
             if a.get("업데이트"):
                 print(f"\n🆕 오늘 업데이트: {a['업데이트']}")
-            for k in ["요약", "사업실적", "촉매", "수급분석", "밸류", "강세론", "리스크", "관전"]:
+            if a.get("태그"):
+                print(f"\n{a['태그']}")
+            for k in ["한줄", "실적결론", "밸류한줄", "수급분석"]:
                 if a.get(k):
                     print(f"\n【{k}】 {a[k]}")
+            for k in ["실적근거", "촉매", "강세론", "리스크", "관전"]:
+                items = parse_items(a.get(k))
+                if items:
+                    print(f"\n【{k}】")
+                    for it in items:
+                        print("   · " + "  —  ".join(it))
 
 
 def _trim_phrase(t):
@@ -490,15 +499,18 @@ def _gemini_full(c, r, fl, roe, ebitda=None, drank=None):
     d = {k: "" for k in SEC_KEYS}; d["추정"] = ""; cur = None
     for line in resp.text.splitlines():
         s = line.strip()
-        m = re.match(r"^\**\s*(이슈|한줄|태그|실적결론|실적근거|촉매|수급분석|밸류한줄|"
-                     r"강세론|리스크|관전|추정)\s*[:：]\s*(.*)", s)
+        # Gemini 는 라벨을 **촉매**: / ### 촉매: / - 촉매: 등으로 감싸 내놓는다(실측)
+        m = re.match(r"^\s*(?:[#>\-*•·]+\s*)?\*{0,2}\s*"
+                     r"(이슈|한줄|태그|실적결론|실적근거|촉매|수급분석|밸류한줄|"
+                     r"강세론|리스크|관전|추정)\s*\*{0,2}\s*[:：]\s*(.*)", s)
         if m:
             cur = "issue" if m.group(1) == "이슈" else m.group(1); d[cur] = m.group(2).strip()
         elif cur and s:
             d[cur] += ("||" if cur in LIST_KEYS else " ") + s
     d["issue"] = _trim_phrase(d["issue"]) if _is_clean(_trim_phrase(d["issue"])) else ""
     for k in SEC_KEYS[1:] + ["추정"]:
-        d[k] = d[k].strip().strip("'\"")
+        d[k] = d[k].replace("**", "").strip().strip("'\"")     # 볼드 잔재가 그대로 렌더되던 문제
+    d["fmt"] = 2          # 구조화 포맷 스탬프 — 신선도 판정에 쓴다(빈 '한줄' 로 재분석 무한반복 방지)
     return d
 
 
@@ -559,6 +571,20 @@ def load_debt_ranks():
 ANALYSIS_TTL_DAYS = int(os.environ.get("ANALYSIS_TTL_DAYS", "5"))
 
 
+_KEEP = set(SEC_KEYS) | {"추정", "업데이트", "date", "full", "fmt"}
+
+
+def prune_cache(cache, keep_days=60):
+    """옛 줄글 키와 묵은 종목 정리. 주석은 '정리'라 해놓고 실제론 통째로 저장하고 있었다."""
+    cut = (datetime.now(KST) - timedelta(days=keep_days)).strftime("%Y-%m-%d")
+    out = {}
+    for code, a in cache.items():
+        if not isinstance(a, dict) or (a.get("date") or "9999") < cut:
+            continue
+        out[code] = {k: v for k, v in a.items() if k in _KEEP}
+    return out
+
+
 def gemini_analyze(top10, flows, roes, cache, ebitdas=None, dranks=None):
     """캐시 인식: 재등장(TTL 내) 종목은 어제 8섹션 재사용 + 오늘 업데이트만 호출. 신규/묵은건 전체분석.
 
@@ -580,8 +606,9 @@ def gemini_analyze(top10, flows, roes, cache, ebitdas=None, dranks=None):
                 fresh = (today - datetime.strptime(base, "%Y-%m-%d").replace(tzinfo=KST)).days <= ANALYSIS_TTL_DAYS
             except Exception:
                 fresh = False
-        if not cached or not cached.get("한줄"):
-            fresh = False          # 줄글 시절 캐시는 새 구조가 없다 → 재분석해서 채운다
+        if not cached or cached.get("fmt") != 2:
+            fresh = False          # 줄글 시절 캐시(fmt 없음)만 재분석. 파싱이 일부 실패해
+                                   # '한줄' 이 비어도 fmt 는 찍히므로 매 실행 재분석되지 않는다.
         try:
             if fresh:
                 a = {k: cached.get(k, "") for k in SEC_KEYS}        # 어제 8섹션 재사용
@@ -595,7 +622,12 @@ def gemini_analyze(top10, flows, roes, cache, ebitdas=None, dranks=None):
                 log(f"  {r['종목명']}: 전체 분석")
         except Exception as e:
             log(f"  Gemini {code} 실패: {str(e)[:80]}")
-            a = (cached or {k: "" for k in SEC_KEYS}); a.setdefault("업데이트", "")
+            # 옛 줄글 캐시를 새 렌더러에 넣으면 문단 하나가 불릿 1개로 뭉치고 섹션이 사라진다
+            a = dict(cached) if (cached and cached.get("fmt") == 2) else {k: "" for k in SEC_KEYS}
+            a.setdefault("업데이트", ""); a.setdefault("추정", "")
+            if cached and cached.get("fmt") != 2:
+                a["issue"] = cached.get("issue", "")
+                log(f"  ⚠️ {r['종목명']}: 분석 실패 + 캐시가 옛 포맷 → 지표만 표시")
         a["date"] = today.strftime("%Y-%m-%d")
         a.setdefault("full", a["date"])
         out[code] = a; cache[code] = a
@@ -653,7 +685,8 @@ def _metric_line(r, roe, eb, drank):
     if r.get("pbr", 0) and r["pbr"] > 0:
         p.append(f"PBR {r['pbr']:.2f}배")
     if r.get("per", 0) and r["per"] > 0:
-        n = int(r.get("sec_n") or 0)
+        sn = r.get("sec_n")
+        n = int(sn) if (sn is not None and pd.notna(sn)) else 0    # NaN or 0 → NaN(truthy) 함정
         rk = r.get("per_rank")
         p.append(f"PER {r['per']:.0f}배" + (f"({int(rk)}/{n}위)" if n >= 4 and pd.notna(rk) else ""))
     if drank:
@@ -702,7 +735,8 @@ def _sections(a, r=None, roe=None, eb=None, drank=None):
             w = 3 if i < 2 else (2 if i == 2 else 1)      # Gemini 가 중요한 순서로 냈다는 전제
             # 숫자가 있다고 다 날짜가 아니다("12~15% 달성 여부") → 시점 꼴일 때만 📅
             tail = it[1] if len(it) > 1 else ""
-            when = tail if re.search(r"\d{1,2}\s*[/월]\s*\d{0,2}|\d{4}\s*년?|상반기|하반기|[1-4]Q|분기", tail) else ""
+            when = tail if re.search(r"\d{1,2}\s*[/월]\s*\d{0,2}|(19|20)\d{2}\s*년|"
+                                     r"상반기|하반기|[1-4]Q|분기|연말|연초", tail) else ""
             rich = _t("🔥" * w + " ") + _t(it[0], True)
             if when:
                 rich += _t(f"   📅 {when}", True, "orange")
@@ -749,14 +783,6 @@ def _stock_toggle(rank, r, a, fl, roe, dl=None, ebitda=None, drank=None):
     """종목 1개 = 접이식 토글. 제목줄=요약지표, 펼치면 결론(태그·한줄·핵심지표) → 근거(불릿)."""
     icon = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, "📈")
     sec = r["섹터"] if pd.notna(r["섹터"]) else "-"
-    secname = sec if sec != "-" else "업종"
-    n = int(r.get("sec_n", 0))
-    per_s = f"{r['per']:.0f}" if r.get('per', 0) and r['per'] > 0 else "—"
-    pbr_s = f"{r['pbr']:.1f}" if r.get('pbr', 0) and r['pbr'] > 0 else "—"
-    pl = _rel(r.get("per_pct"), n); bl = _rel(r.get("pbr_pct"), n)
-    per_rk = f" ({secname} {int(r['per_rank'])}/{n}위·{pl})" if (pl and not pd.isna(r.get('per_rank'))) else ""
-    pbr_rk = f" ({int(r['pbr_rank'])}/{n}위·{bl})" if (bl and not pd.isna(r.get('pbr_rank'))) else ""
-    roe_s = f" · ROE {roe:.1f}%" if roe is not None else ""
     hi = "60일 신고가" if r.get("hi60", 0) >= 0.999 else f"60일 고점대비 {(r['hi60']-1)*100:.0f}%"
 
     def gray(t): return {"type": "text", "text": {"content": t}, "annotations": {"color": "gray"}}
@@ -790,10 +816,8 @@ def _stock_toggle(rank, r, a, fl, roe, dl=None, ebitda=None, drank=None):
     if sb:
         kids.append(sb)
     # 밸류 + 이슈
-    dline = f"🏢 PER {per_s}{per_rk} · PBR {pbr_s}{pbr_rk}{roe_s}"
-    if a.get("issue"):
-        dline += f"\n📰 이슈 — {a['issue']}"
-    kids.append(_para([gray(dline)]))
+    if a.get("issue"):      # 지표는 아래 '💵 핵심 지표' 콜아웃이 담당 — 이슈만 남긴다
+        kids.append(_para([gray(f"📰 이슈 — {a['issue']}")]))
     kids += _sections(a, r, roe, ebitda, drank)
     return {"object": "block", "type": "toggle", "toggle": {
         "rich_text": title_rich,
