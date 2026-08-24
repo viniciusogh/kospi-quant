@@ -459,19 +459,22 @@ def _gemini_full(c, r, fl, roe, ebitda=None, drank=None):
         "강세론: <상승 지속 시나리오와 근거 3~4문장>\n"
         "리스크: <구체적 하방 리스크와 영향 3~5문장>\n"
         "관전: <향후 트리거·실적발표일·정책·지표 체크포인트 3~5문장>\n"
+        "촉매3: <위 '촉매'·'강세론'의 핵심을 각 24자 이내 3개로 압축, ·로 구분. "
+        "수치·기업명·사건을 넣고 설명체 금지. 예: 도시정비 7조4695억 시공권 확보>\n"
+        "리스크3: <위 '리스크'의 핵심을 각 24자 이내 3개로 압축, ·로 구분. 같은 규칙>\n"
         "추정: <다음 분기 매출·영업이익 증권사 컨센서스 방향을 ▲상향/▼하향/→유지 중 하나로 시작하고 근거 1문장. 컨센서스 못 찾으면 '컨센서스 미확인'>")
     resp = c.models.generate_content(model="gemini-2.5-flash", contents=prompt,
         config={"tools": [{"google_search": {}}], "thinking_config": {"thinking_budget": 0}, "max_output_tokens": 14000})
-    d = {k: "" for k in SEC_KEYS}; d["추정"] = ""; cur = None
+    d = {k: "" for k in SEC_KEYS}; d["추정"] = ""; d["촉매3"] = ""; d["리스크3"] = ""; cur = None
     for line in resp.text.splitlines():
         s = line.strip()
-        m = re.match(r"^\**\s*(이슈|요약|사업실적|촉매|수급분석|밸류|강세론|리스크|관전|추정)\s*[:：]\s*(.*)", s)
+        m = re.match(r"^\**\s*(이슈|요약|사업실적|촉매3|리스크3|촉매|수급분석|밸류|강세론|리스크|관전|추정)\s*[:：]\s*(.*)", s)
         if m:
             cur = "issue" if m.group(1) == "이슈" else m.group(1); d[cur] = m.group(2).strip()
         elif cur and s:
             d[cur] += " " + s
     d["issue"] = _trim_phrase(d["issue"]) if _is_clean(_trim_phrase(d["issue"])) else ""
-    for k in SEC_KEYS[1:] + ["추정"]:
+    for k in SEC_KEYS[1:] + ["추정", "촉매3", "리스크3"]:
         d[k] = d[k].strip().strip("'\"")
     return d
 
@@ -529,7 +532,12 @@ def load_debt_ranks():
 
 
 def gemini_analyze(top10, flows, roes, cache, ebitdas=None, dranks=None):
-    """캐시 인식: 재등장(7일내) 종목은 어제 8섹션 재사용 + 오늘 업데이트만 호출. 신규/묵은건 전체분석."""
+    """캐시 인식: 재등장(7일내) 종목은 어제 8섹션 재사용 + 오늘 업데이트만 호출. 신규/묵은건 전체분석.
+
+    신선도는 'date'(=마지막 실행일) 가 아니라 **'full'(=마지막 전체분석일)** 로 판정한다.
+    date 는 매 실행마다 오늘로 갱신되므로 그걸로 재면 days<=7 이 영원히 참이 되어
+    프로즈가 한 번 쓰이면 절대 재생성되지 않았다 — 수급분석이 13일째 그대로였던 원인(2026-08-25).
+    """
     from google import genai
     ebitdas = ebitdas or {}; dranks = dranks or {}
     c = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
@@ -538,24 +546,32 @@ def gemini_analyze(top10, flows, roes, cache, ebitdas=None, dranks=None):
         code = r["code"]; fl = flows.get(code) or {}; roe = roes.get(code)
         cached = cache.get(code)
         fresh = False
-        if cached and cached.get("date"):
+        base = (cached or {}).get("full") or (cached or {}).get("date")   # full 없는 옛 캐시는 date 로 1회 판정
+        if cached and base:
             try:
-                fresh = (today - datetime.strptime(cached["date"], "%Y-%m-%d").replace(tzinfo=KST)).days <= 7
+                fresh = (today - datetime.strptime(base, "%Y-%m-%d").replace(tzinfo=KST)).days <= 7
             except Exception:
                 fresh = False
+        if not cached or not cached.get("촉매3"):
+            fresh = False      # 카드용 압축 필드가 없는 옛 캐시는 만료로 취급(폴백 문장이 중간에서 잘림)
         try:
             if fresh:
                 a = {k: cached.get(k, "") for k in SEC_KEYS}        # 어제 8섹션 재사용
+                a["full"] = base                                    # 전체분석 시점은 그대로 물려받는다
+                for k in ("촉매3", "리스크3"):
+                    a[k] = cached.get(k, "")
                 u = _gemini_update(c, r["종목명"], code, cached.get("요약", ""))
                 a["업데이트"], a["추정"] = u["업데이트"], u["추정"]
                 log(f"  {r['종목명']}: 캐시 재사용 + 업데이트")
             else:
                 a = _gemini_full(c, r, fl, roe, ebitdas.get(code), dranks.get(code)); a["업데이트"] = ""
+                a["full"] = today.strftime("%Y-%m-%d")
                 log(f"  {r['종목명']}: 전체 분석")
         except Exception as e:
             log(f"  Gemini {code} 실패: {str(e)[:80]}")
             a = (cached or {k: "" for k in SEC_KEYS}); a.setdefault("업데이트", "")
         a["date"] = today.strftime("%Y-%m-%d")
+        a.setdefault("full", a["date"])
         out[code] = a; cache[code] = a
     return out
 
