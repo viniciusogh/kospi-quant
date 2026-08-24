@@ -357,7 +357,8 @@ def main():
     if analysis:                                  # 캐시 저장 (등장한 종목만 유지 + 오래된건 정리)
         json.dump({k: v for k, v in cache.items()}, open(CACHE_JSON, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
     if os.environ.get("NOTION_API_KEY"):
-        upload_notion(top10, analysis, trend, flows, roes, deltas, newly, dropped, incomes, today_str, cash=cash_mode)
+        upload_notion(top10, analysis, trend, flows, roes, deltas, newly, dropped, incomes,
+                      today_str, cash=cash_mode, ebitdas=ebitdas, dranks=dranks)
     else:
         log("NOTION_API_KEY 없음 → Notion 업로드 생략 (로컬). Actions 에선 업로드됨")
         for _, r in top10.iterrows():
@@ -395,7 +396,24 @@ def _is_clean(t):
     return bool(t) and "촉매 미확인" not in t and "특이" not in t
 
 
-SEC_KEYS = ["issue", "요약", "사업실적", "촉매", "수급분석", "밸류", "강세론", "리스크", "관전"]
+# 줄글 8섹션 → 구조화 항목. 리서치 리포트 문체는 한 번에 읽을 때 피로도가 높다(사용자 지적).
+# 결론(한줄·태그·실적결론·밸류한줄)을 먼저 보여주고 근거(촉매·강세론·리스크·관전)는 불릿으로.
+SEC_KEYS = ["issue", "한줄", "태그", "실적결론", "실적근거", "촉매",
+            "수급분석", "밸류한줄", "강세론", "리스크", "관전"]
+LIST_KEYS = {"실적근거", "촉매", "강세론", "리스크", "관전"}      # ' || ' 로 나뉜 항목 목록
+
+
+def parse_items(v):
+    """'제목 :: 설명 || 제목 :: 설명' → [(제목, 설명, 여분…)]. 구분자 없으면 제목만."""
+    out = []
+    for chunk in (v or "").split("||"):
+        parts = [x.strip() for x in chunk.split("::")]
+        if parts and parts[0]:
+            # LLM 이 붙이는 마크다운 불릿·번호 제거 (- * · 1. ①)
+            parts[0] = re.sub(r"^[\-\*·•]+\s*|^\d+[.)]\s*|^[①-⑩]\s*", "", parts[0]).strip()
+            if parts[0]:
+                out.append(tuple(parts))
+    return out
 
 
 def _gemini_full(c, r, fl, roe, ebitda=None, drank=None):
@@ -445,31 +463,39 @@ def _gemini_full(c, r, fl, roe, ebitda=None, drank=None):
         f"데이터: {stat}\n\n"
         "규칙:\n"
         "- 밸류에이션 수치는 위 제공된 PER/PBR/ROE/섹터순위/부채비율/EBITDA만 사용(웹의 다른 수치 절대 인용 금지). 없으면 '미제공'.\n"
-        "- 부채비율은 절대수치로 정상/위험을 단정하지 말 것(예: '100% 넘으면 위험', '금융이면 무조건 정상' 식의 고정 판정 금지). 반드시 제공된 '동일 섹터 내 부채 순위'로 해석하라 — 같은 업종 피어들 사이에서 부채가 높은 편(고부채 그룹)인지 낮은 편(저부채 그룹)인지가 핵심이다. 그 상대 위치가 무엇을 의미하는지(동종 대비 레버리지 부담/여력) 서술하라.\n"
-        "- 문체: 자연스럽게 풀어 쓴 완결 문장. 개조식·전보문·가운뎃점 나열 금지.\n"
-        "- ⚠️ 분기별 ROE/EPS/매출 수치와 수급 금액(억)은 리포트에 표·막대로 따로 보여주므로 prose에 숫자를 나열하지 말 것. 그 수치들의 '의미·방향·해석'만 서술하라.\n"
-        "- 각 섹션 4~7문장, 실제 사실·뉴스·공시·증권사 리포트 근거로. 모르면 '확인 안 됨'.\n"
-        "아래 라벨 형식으로만 출력:\n"
+        "- 부채비율은 절대수치로 정상/위험을 단정하지 말 것. 반드시 제공된 '동일 섹터 내 부채 순위'로 해석하라 — 같은 업종 피어들 사이에서 부채가 높은 편인지 낮은 편인지가 핵심이다.\n"
+        "- ⚠️ **줄글 금지.** 리서치 리포트 문체(서론-전개-결론)로 쓰지 마라. 각 항목은 결론부터, 짧게.\n"
+        "- 실제 사실·뉴스·공시·증권사 리포트 근거로만. 모르면 그 항목을 비워라(추측 금지).\n"
+        "- 분기 ROE/EPS/매출·수급 금액은 리포트에 표·막대로 따로 보여주므로 반복하지 마라.\n\n"
+        "출력 형식 — 아래 라벨만 사용. **목록 항목은 한 줄에 하나씩** 줄바꿈으로 나열하고,\n"
+        "항목 안에서 제목과 설명은 ` :: ` 로 구분한다.\n"
         "이슈: <촉매 키워드 3개 ·로 연결, 40자내>\n"
-        "요약: <핵심 투자포인트 thesis 2~3문장>\n"
-        "사업실적: <사업 개요 + 최근 실적의 의미·방향 해석(숫자 나열 금지) 4~6문장>\n"
-        "촉매: <주가를 끌어올린 요인 — 테마·정책·공시·뉴스를 시간순으로 4~6문장>\n"
-        "수급분석: <외인/기관/개인 흐름의 해석(금액 나열 말고 누가 주도/이탈하며 의미가 뭔지) 2~4문장>\n"
-        "밸류: <재무 건전성·현금흐름 중심으로 서술. ① 부채비율을 '동일 섹터 내 순위'로 해석(동종 N개 중 몇 위, 저/중/고부채 그룹 — 절대수치 판정 말고 피어 상대) ② EBITDA는 '최근 4분기 합산(TTM, 12개월 규모)' 수치임(1개 분기 아님), 영업현금 창출 규모·EV/EBITDA로 현금흐름 대비 밸류. 단 은행·보험·증권은 EBITDA가 비표준이라 제공 안 됨 → 그 경우 EBITDA 언급 말고 ROE·자본적정성으로 대체 평가 ③ ROE로 수익성. PER/PBR은 보조로 한 줄. 동종 대비 적정성까지 4~6문장>\n"
-        "강세론: <상승 지속 시나리오와 근거 3~4문장>\n"
-        "리스크: <구체적 하방 리스크와 영향 3~5문장>\n"
-        "관전: <향후 트리거·실적발표일·정책·지표 체크포인트 3~5문장>\n"
-        "추정: <다음 분기 매출·영업이익 증권사 컨센서스 방향을 ▲상향/▼하향/→유지 중 하나로 시작하고 근거 1문장. 컨센서스 못 찾으면 '컨센서스 미확인'>")
+        "한줄: <투자판단 결론부터 2문장, 90자내. '무엇이 핵심 동력이고 무엇이 리스크인지'>\n"
+        "태그: <🟢(강점)/🔴(약점)/🟡(주의) 중 하나 + 2~6자 라벨, 4개를 ·로 구분. "
+        "예: 🟢 본업 회복 · 🟢 성장동력 · 🔴 높은 부채 · 🟡 밸류 부담>\n"
+        "실적결론: <최근 실적을 8자 이내 대비로. 예: 매출 ↓ / 수익성 ↑>\n"
+        "실적근거: <항목 3~4개. 각 '지표 :: 방향·수치' 16자내. 예: 주택 GPM :: 하반기 12~15% 전망>\n"
+        "촉매: <주가를 끌어올릴 요인 4~5개. 각 '제목(10자내) :: 한 줄 설명(30자내)'. 제목은 명사구>\n"
+        "강세론: <상승 시나리오 3개. 각 '핵심(14자내) :: 근거 한 줄(30자내)'>\n"
+        "리스크: <하방 리스크 3개. 각 '핵심(14자내) :: 영향 한 줄(30자내)'>\n"
+        "관전: <체크포인트 4~5개를 **중요한 순서대로**. 각 줄은 '항목(24자내)'. "
+        "시점이 있으면 '항목 :: 시점' (예: 11/04, 2026 하반기). 없으면 시점 생략>\n"
+        "밸류한줄: <PER·PBR·ROE·부채를 종합한 **판단만** 한 줄, 30자내. "
+        "수치는 바로 위에 이미 표시되므로 절대 반복하지 마라. 예: 수익성 회복 중이나 레버리지·PER 부담>\n"
+        "수급분석: <외인/기관/개인 흐름의 해석 2문장. 금액 나열 말고 누가 주도/이탈하는지>\n"
+        "추정: <다음 분기 컨센서스 방향을 ▲상향/▼하향/→유지 중 하나로 시작하고 근거 1문장. "
+        "못 찾으면 '컨센서스 미확인'>")
     resp = c.models.generate_content(model="gemini-2.5-flash", contents=prompt,
         config={"tools": [{"google_search": {}}], "thinking_config": {"thinking_budget": 0}, "max_output_tokens": 14000})
     d = {k: "" for k in SEC_KEYS}; d["추정"] = ""; cur = None
     for line in resp.text.splitlines():
         s = line.strip()
-        m = re.match(r"^\**\s*(이슈|요약|사업실적|촉매|수급분석|밸류|강세론|리스크|관전|추정)\s*[:：]\s*(.*)", s)
+        m = re.match(r"^\**\s*(이슈|한줄|태그|실적결론|실적근거|촉매|수급분석|밸류한줄|"
+                     r"강세론|리스크|관전|추정)\s*[:：]\s*(.*)", s)
         if m:
             cur = "issue" if m.group(1) == "이슈" else m.group(1); d[cur] = m.group(2).strip()
         elif cur and s:
-            d[cur] += " " + s
+            d[cur] += ("||" if cur in LIST_KEYS else " ") + s
     d["issue"] = _trim_phrase(d["issue"]) if _is_clean(_trim_phrase(d["issue"])) else ""
     for k in SEC_KEYS[1:] + ["추정"]:
         d[k] = d[k].strip().strip("'\"")
@@ -554,11 +580,13 @@ def gemini_analyze(top10, flows, roes, cache, ebitdas=None, dranks=None):
                 fresh = (today - datetime.strptime(base, "%Y-%m-%d").replace(tzinfo=KST)).days <= ANALYSIS_TTL_DAYS
             except Exception:
                 fresh = False
+        if not cached or not cached.get("한줄"):
+            fresh = False          # 줄글 시절 캐시는 새 구조가 없다 → 재분석해서 채운다
         try:
             if fresh:
                 a = {k: cached.get(k, "") for k in SEC_KEYS}        # 어제 8섹션 재사용
                 a["full"] = base                                    # 전체분석 시점은 그대로 물려받는다
-                u = _gemini_update(c, r["종목명"], code, cached.get("요약", ""))
+                u = _gemini_update(c, r["종목명"], code, cached.get("한줄", ""))
                 a["업데이트"], a["추정"] = u["업데이트"], u["추정"]
                 log(f"  {r['종목명']}: 캐시 재사용 + 업데이트")
             else:
@@ -606,9 +634,85 @@ def _rel(pct, n):
     return "저평가" if pct <= 0.33 else ("고평가" if pct >= 0.67 else "평균")
 
 
-SECTIONS = [("💡 요약", "요약"), ("📊 사업·실적", "사업실적"), ("⚡ 상승 촉매", "촉매"),
-            ("🔁 수급 분석", "수급분석"), ("💵 밸류에이션", "밸류"), ("📈 강세론", "강세론"),
-            ("⚠️ 리스크", "리스크"), ("👀 관전 포인트", "관전")]
+def _t(txt, bold=False, color=None):
+    a = {"bold": bold}
+    if color:
+        a["color"] = color
+    return [{"type": "text", "text": {"content": str(txt)}, "annotations": a}]
+
+
+def _bullet(rich):
+    return {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": rich}}
+
+
+def _metric_line(r, roe, eb, drank):
+    """핵심 지표 한 줄 — 숫자는 전부 우리가 가진 값이라 AI 를 거치지 않는다(환각 차단)."""
+    p = []
+    if roe is not None:
+        p.append(f"ROE {roe:.1f}%")
+    if r.get("pbr", 0) and r["pbr"] > 0:
+        p.append(f"PBR {r['pbr']:.2f}배")
+    if r.get("per", 0) and r["per"] > 0:
+        n = int(r.get("sec_n") or 0)
+        rk = r.get("per_rank")
+        p.append(f"PER {r['per']:.0f}배" + (f"({int(rk)}/{n}위)" if n >= 4 and pd.notna(rk) else ""))
+    if drank:
+        p.append(f"부채 {drank['debt']:.0f}%({drank['rank']}/{drank['n']}위·{drank['band']})")
+    if (eb or {}).get("ev_ebitda") is not None:
+        p.append(f"EV/EBITDA {eb['ev_ebitda']:.1f}배")
+    return " · ".join(p)
+
+
+def _sections(a, r=None, roe=None, eb=None, drank=None):
+    """결론 → 근거 순서로 블록을 쌓는다. 없는 항목은 통째로 건너뛴다."""
+    out = []
+    metric = _metric_line(r, roe, eb, drank) if r is not None else ""
+    if metric or a.get("밸류한줄"):
+        rich = _t("💵 핵심 지표\n", True)
+        if metric:
+            rich += _t(metric + ("\n" if a.get("밸류한줄") else ""))
+        if a.get("밸류한줄"):
+            rich += _t("→ " + a["밸류한줄"], True, "blue")
+        out.append({"object": "block", "type": "callout", "callout": {
+            "icon": {"type": "emoji", "emoji": "💵"}, "color": "gray_background", "rich_text": rich}})
+
+    if a.get("실적결론") or a.get("실적근거"):
+        out.append(_para(_t("📊 사업·실적  ", True) + _t(a.get("실적결론", ""), True, "orange")))
+        for it in parse_items(a.get("실적근거")):
+            out.append(_bullet(_t(it[0] + ("  " if len(it) > 1 else ""), False, "gray")
+                               + (_t(it[1]) if len(it) > 1 else [])))
+
+    if a.get("촉매"):
+        out.append(_para(_t("⚡ 상승 촉매", True)))
+        for i, it in enumerate(parse_items(a["촉매"])[:5]):
+            out.append(_bullet(_t("①②③④⑤"[i] + " " + it[0], True)
+                               + (_t("  " + it[1], False, "gray") if len(it) > 1 else [])))
+
+    for key, head, mark, col in (("강세론", "📈 강세론", "🟢", "green"),
+                                 ("리스크", "⚠️ 리스크", "🔴", "red")):
+        if a.get(key):
+            out.append(_para(_t(head, True)))
+            for it in parse_items(a[key])[:4]:
+                out.append(_bullet(_t(f"{mark} {it[0]}", True, col)
+                                   + (_t("  " + it[1], False, "gray") if len(it) > 1 else [])))
+
+    if a.get("관전"):
+        out.append(_para(_t("👀 관전 포인트", True)))
+        for i, it in enumerate(parse_items(a["관전"])[:5]):
+            w = 3 if i < 2 else (2 if i == 2 else 1)      # Gemini 가 중요한 순서로 냈다는 전제
+            # 숫자가 있다고 다 날짜가 아니다("12~15% 달성 여부") → 시점 꼴일 때만 📅
+            tail = it[1] if len(it) > 1 else ""
+            when = tail if re.search(r"\d{1,2}\s*[/월]\s*\d{0,2}|\d{4}\s*년?|상반기|하반기|[1-4]Q|분기", tail) else ""
+            rich = _t("🔥" * w + " ") + _t(it[0], True)
+            if when:
+                rich += _t(f"   📅 {when}", True, "orange")
+            elif tail:
+                rich += _t(f"  {tail}", False, "gray")
+            out.append(_bullet(rich))
+
+    if a.get("수급분석"):
+        out.append(_para(_t("🔁 수급 해석  ", True) + _t(_strip_won(a["수급분석"]), False, "gray")))
+    return out
 
 
 def _para(rich):
@@ -641,8 +745,8 @@ def _strip_won(txt):
     return re.sub(r"\s{2,}", " ", txt).strip()
 
 
-def _stock_toggle(rank, r, a, fl, roe, dl=None):
-    """종목 1개 = 접이식 토글. 제목줄=요약지표, 펼치면 8개 섹션 문단."""
+def _stock_toggle(rank, r, a, fl, roe, dl=None, ebitda=None, drank=None):
+    """종목 1개 = 접이식 토글. 제목줄=요약지표, 펼치면 결론(태그·한줄·핵심지표) → 근거(불릿)."""
     icon = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, "📈")
     sec = r["섹터"] if pd.notna(r["섹터"]) else "-"
     secname = sec if sec != "-" else "업종"
@@ -664,6 +768,11 @@ def _stock_toggle(rank, r, a, fl, roe, dl=None):
         gray(f"({r['code']}) · {sec}  |  모멘텀 {r['score']:.1f} · 20일 {r['ret20']*100:+.1f}% · {hi} · {int(r['price']):,}원")]
 
     kids = []
+    # 결론 먼저 — 태그 한 줄과 투자판단 한 줄이 3초 안에 방향을 잡아준다(줄글 피로도 대응)
+    if a.get("태그"):
+        kids.append(_para(_t("   ".join(x.strip() for x in a["태그"].split("·") if x.strip()), True)))
+    if a.get("한줄"):
+        kids.append(_para(_t(a["한줄"])))
     # 전일 대비 변화 (별도 강조 줄)
     if dl:
         dl = {**dl, "_rank": rank, "_score": r["score"]}
@@ -685,15 +794,7 @@ def _stock_toggle(rank, r, a, fl, roe, dl=None):
     if a.get("issue"):
         dline += f"\n📰 이슈 — {a['issue']}"
     kids.append(_para([gray(dline)]))
-    # 8개 섹션
-    for label, key in SECTIONS:
-        v = (a.get(key) or "").strip()
-        if key == "수급분석":
-            v = _strip_won(v)   # 캐시 재사용분도 렌더 시점에 금액 제거
-        if v:
-            kids.append(_para([
-                {"type": "text", "text": {"content": f"{label}\n"}, "annotations": {"bold": True}},
-                {"type": "text", "text": {"content": v[:1900]}}]))
+    kids += _sections(a, r, roe, ebitda, drank)
     return {"object": "block", "type": "toggle", "toggle": {
         "rich_text": title_rich,
         "color": "blue_background" if rank <= 3 else "default",
@@ -730,9 +831,10 @@ def _quarter_table(income):
         "table_width": 3, "has_column_header": True, "has_row_header": False, "children": rows}}
 
 
-def upload_notion(top, analysis=None, trend=None, flows=None, roes=None, deltas=None, newly=None, dropped=None, incomes=None, asof=None, cash=False):
+def upload_notion(top, analysis=None, trend=None, flows=None, roes=None, deltas=None, newly=None, dropped=None, incomes=None, asof=None, cash=False, ebitdas=None, dranks=None):
     """Notion 업로드: 헤더 생성 → 종목별 토글 append → 토글 안에 분기표·추정 append."""
-    analysis = analysis or {}; flows = flows or {}; roes = roes or {}; deltas = deltas or {}; incomes = incomes or {}
+    analysis = analysis or {}; flows = flows or {}; roes = roes or {}; deltas = deltas or {}
+    incomes = incomes or {}; ebitdas = ebitdas or {}; dranks = dranks or {}
     import 수급 as sg
     headers = {"Authorization": f"Bearer {os.environ['NOTION_API_KEY']}",
                "Content-Type": "application/json", "Notion-Version": "2022-06-28"}
@@ -786,7 +888,8 @@ def upload_notion(top, analysis=None, trend=None, flows=None, roes=None, deltas=
     def _item(rank, r):
         """종목 1개의 (토글, 2차블록) — 페이지 모드·대시보드 모드 공통. 2차블록은 table 등 3단계 불가분."""
         tog = _stock_toggle(rank, r, analysis.get(r["code"], {}), flows.get(r["code"]) or {},
-                            roes.get(r["code"]), deltas.get(r["code"]))
+                            roes.get(r["code"]), deltas.get(r["code"]),
+                            ebitdas.get(r["code"]), dranks.get(r["code"]))
         a = analysis.get(r["code"], {})
         extra = []
         qt = _quarter_table(incomes.get(r["code"]))

@@ -87,7 +87,7 @@ def _analyze(rows, tok):
     reuse, need = {}, []          # 휴장일엔 캐시 date(=마지막 거래일)가 오늘과 다르지만 최신이다.
     for row, _ in rows:
         c = cache.get(row["code"])
-        if c and c.get("date") == asof and c.get("요약"):
+        if c and c.get("date") == asof and c.get("한줄"):
             reuse[row["code"]] = c
         else:
             need.append(row)
@@ -95,6 +95,7 @@ def _analyze(rows, tok):
         M.log(f"  캐시 그대로 재사용({asof} 기준) {len(reuse)}종목 — Gemini 호출 0")
 
     flows, roes, ebitdas, incomes = {}, {}, {}, {}
+    dranks = M.load_debt_ranks()
     for row, _ in rows:                      # 수급 막대·분기표는 재사용분도 필요
         code = row["code"]
         flows[code] = M.investor_flows(code, tok) or {}
@@ -106,26 +107,18 @@ def _analyze(rows, tok):
     if need:
         M.log(f"  Gemini 분석 필요 {len(need)}종목")
         df = pd.DataFrame(need)
-        got = M.gemini_analyze(df, flows, roes, cache, ebitdas, M.load_debt_ranks())
+        got = M.gemini_analyze(df, flows, roes, cache, ebitdas, dranks)
         out.update(got)
         json.dump(cache, open(CACHE, "w"), ensure_ascii=False)
-    return out, flows, roes, incomes
+    return out, flows, roes, incomes, ebitdas, dranks
 
 
-def _holding_toggle(row, pos, a, fl, roe):
-    """보유 1종목 토글. 제목줄 = 수익률·평단→현재가·수량·평가금액 (모멘텀 지표 대신 보유 관점)."""
+def _holding_toggle(row, pos, a, fl, roe, eb=None, drank=None):
+    """보유 1종목 토글. 결론(태그·한줄·핵심지표) 먼저, 근거(촉매·강세·리스크·관전)는 불릿.
+    줄글 8섹션은 한 번에 읽을 때 피로도가 높아 구조화했다(사용자 요청 2026-08-25)."""
     ret = pos["ret"]
     col = "red" if ret > 0 else ("blue" if ret < 0 else "gray")
-    n = int(row.get("sec_n", 0))
-    per_s = f"{row['per']:.0f}" if row.get("per", 0) and row["per"] > 0 else "—"
-    pbr_s = f"{row['pbr']:.1f}" if row.get("pbr", 0) and row["pbr"] > 0 else "—"
-    pl, bl = M._rel(row.get("per_pct"), n), M._rel(row.get("pbr_pct"), n)
     secname = row["섹터"] if row["섹터"] != "-" else "업종"
-    per_rk = (f" ({secname} {int(row['per_rank'])}/{n}위·{pl})"
-              if pl and pd.notna(row.get("per_rank")) else "")
-    pbr_rk = (f" ({int(row['pbr_rank'])}/{n}위·{bl})"
-              if bl and pd.notna(row.get("pbr_rank")) else "")
-    roe_s = f" · ROE {roe:.1f}%" if roe is not None else ""
 
     def gray(t):
         return {"type": "text", "text": {"content": t}, "annotations": {"color": "gray"}}
@@ -137,6 +130,10 @@ def _holding_toggle(row, pos, a, fl, roe):
         gray(f"  ·  {secname}")]        # 수량·평단·평가금액은 위 인포그래픽에 있다(중복 제거)
 
     kids = []
+    if a.get("태그"):
+        kids.append(M._para(M._t("   ".join(x.strip() for x in a["태그"].split("·") if x.strip()), True)))
+    if a.get("한줄"):
+        kids.append(M._para(M._t(a["한줄"])))
     sig = ", ".join(pos.get("signal") or [])
     head = (f"💰 손익 {pos['pl']:+,.0f}원 · 매입 {pos['cost']:,.0f}원"
             + (f"\n⭐ 오늘 모멘텀 추천: {sig}" if sig else ""))
@@ -154,18 +151,9 @@ def _holding_toggle(row, pos, a, fl, roe):
     sb = M._supply_bars(fl)
     if sb:
         kids.append(sb)
-    dline = f"🏢 PER {per_s}{per_rk} · PBR {pbr_s}{pbr_rk}{roe_s}"
     if a.get("issue"):
-        dline += f"\n📰 이슈 — {a['issue']}"
-    kids.append(M._para([gray(dline)]))
-    for label, key in M.SECTIONS:
-        v = (a.get(key) or "").strip()
-        if key == "수급분석":
-            v = M._strip_won(v)
-        if v:
-            kids.append(M._para([
-                {"type": "text", "text": {"content": f"{label}\n"}, "annotations": {"bold": True}},
-                {"type": "text", "text": {"content": v[:1900]}}]))
+        kids.append(M._para([gray(f"📰 이슈 — {a['issue']}")]))
+    kids += M._sections(a, row, roe, eb, drank)
     return {"object": "block", "type": "toggle",
             "toggle": {"rich_text": title, "color": "default", "children": kids}}
 
@@ -214,7 +202,7 @@ def main():
     if not rows:
         M.log("시세 조회 가능한 보유종목이 없음 — 중단")
         return
-    analysis, flows, roes, incomes = _analyze(rows, tok)
+    analysis, flows, roes, incomes, ebitdas, dranks = _analyze(rows, tok)
 
     header = []
     img = _infographic(data)
@@ -228,7 +216,8 @@ def main():
     items = []
     for row, pos in sorted(rows, key=lambda x: -x[1]["eval"]):
         code = row["code"]
-        tog = _holding_toggle(row, pos, analysis.get(code, {}), flows.get(code) or {}, roes.get(code))
+        tog = _holding_toggle(row, pos, analysis.get(code, {}), flows.get(code) or {},
+                              roes.get(code), ebitdas.get(code), dranks.get(code))
         extra = []
         qt = M._quarter_table(incomes.get(code))
         if qt:
