@@ -309,15 +309,12 @@ def push_to_notion(text: str) -> str | None:
     today = datetime.now(KST).strftime("%Y-%m-%d")
     title = f"📊 {today} 오늘의 핵심 요약"
 
-    # 다른 추천 페이지들과 같이 "YYYY-MM-DD" 날짜 페이지 안에 넣기
-    date_page_id = _get_or_create_date_page(today)
-    if not date_page_id:
-        log("❌ 날짜 페이지 가져오기 실패. 최종 추천 페이지 생성 중단.")
-        return None
 
     # 사용자는 통합 대시보드만 보므로 날짜별 페이지를 만들지 않는다(중복 방지).
-    # date_page_id 는 아래 'DB 행 제목(헤드라인) 갱신' 용도로 계속 필요하다.
+    # 날짜 행(Report DB)도 더는 만들지 않는다 — 내용이 전부 대시보드로 가서 제목만 달린
+    # 빈 껍데기 행이 매일 쌓였다(사용자 지적). 기존 행은 건드리지 않는다(DB 행 삭제·아카이브 금지).
     dash = os.environ.get("REC_TARGET", "dashboard") == "dashboard"
+    date_page_id = None if dash else _get_or_create_date_page(today)
     if dash:
         import dashboard as D
         page_id = D.add_report(title, [])      # 슬롯2 토글 확보(같은 날 재실행이면 교체)
@@ -422,6 +419,8 @@ def push_to_notion(text: str) -> str | None:
     # 응답에서 SUMMARY 추출 후 database row 의 '이름' (title) UPDATE
     m = re.search(r"^SUMMARY:\s*(.+)$", text, re.MULTILINE)
     summary = m.group(1).strip()[:80] if m else f"{today} 분석 완료"
+    if not date_page_id:            # 대시보드 모드 — 갱신할 행 자체가 없다
+        return page_url
     try:
         requests.patch(
             f"https://api.notion.com/v1/pages/{date_page_id}",

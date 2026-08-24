@@ -537,6 +537,11 @@ def _refresh_keyword_image(root_id: str, today: str):
                                                     for y in b["callout"]["rich_text"])
                                        for x in ("오늘 급증", "처음 등장")):
                 D._delete([b["id"]])
+            elif t == "bulleted_list_item":
+                D._delete([b["id"]])
+            elif t == "paragraph" and "트리맵 참고" in "".join(
+                    x.get("plain_text", "") for x in b["paragraph"]["rich_text"]):
+                D._delete([b["id"]])
             elif t == "paragraph" and "많이 나온 단어" in "".join(
                     x.get("plain_text", "") for x in b["paragraph"]["rich_text"]):
                 D._delete([b["id"]])
@@ -570,7 +575,11 @@ def _refresh_keyword_image(root_id: str, today: str):
                 return _c(f"↘ {v:.1f}배", color="blue")
             return _c(f"{v:.1f}배", color="gray")
 
-        sp.sort(key=lambda x: (-(x[4] if x[4] is not None else 99), -x[1]))
+        # 정렬 점수: 급증도. NEW 는 배수가 없으므로 언급량으로 가중해 섞는다 —
+        # 2회짜리 NEW 가 11.8배 급증한 단어보다 위로 오면 안 된다.
+        def _score(x):
+            return x[4] if x[4] is not None else (5.0 + x[1] / 10.0)
+        sp.sort(key=lambda x: (-_score(x), -x[1]))
         surge = [f"{w} {v:.1f}배" for w, c, k, wh, v in sp if v and v >= 2.0][:5]
         newly = [w for w, c, k, wh, v in sp if v is None][:5]
         note = []
@@ -584,15 +593,37 @@ def _refresh_keyword_image(root_id: str, today: str):
                 "rich_text": [{"type": "text", "text": {"content": "\n".join(note)},
                                "annotations": {"bold": True}}]}}])
 
-        rows = [{"object": "block", "type": "table_row", "table_row": {"cells": [
-            _c("단어", True), _c("횟수", True), _c("평소 대비", True), _c("종류", True),
-            _c("왜 계속 언급되나", True)]}}]
-        for w, c, kind, why, v in sp:
-            rows.append({"object": "block", "type": "table_row", "table_row": {"cells": [
-                _c(w, True), _c(f"{c}회"), _lift(v), _c(kind, color="gray"), _c(why)]}})
-        D._append(root_id, [{"object": "block", "type": "table", "table": {
-            "table_width": 5, "has_column_header": True, "has_row_header": False,
-            "children": rows}}])
+        # 모바일에서 5열 표는 행마다 6줄로 늘어나 25행이면 150줄이 된다(사용자 지적).
+        # 한 줄짜리 목록으로 바꾸고 상위 N개만 — 여백 낭비 없이 같은 정보를 담는다.
+        TOP_SHOW = int(os.environ.get("KW_SHOW", "15"))
+        blocks = []
+        for w, c, kind, why, v in sp[:TOP_SHOW]:
+            if v is None:
+                mark, col = "🆕", "purple"
+            elif v >= 2.0:
+                mark, col = "🔥", "red"
+            elif v >= 1.3:
+                mark, col = "↗", "orange"
+            elif v <= 0.7:
+                mark, col = "↘", "blue"
+            else:
+                mark, col = "·", "gray"
+            lift = "NEW" if v is None else f"{v:.1f}배"
+            blocks.append({"object": "block", "type": "bulleted_list_item",
+                           "bulleted_list_item": {"rich_text": [
+                               {"type": "text", "text": {"content": f"{mark} {w} "},
+                                "annotations": {"bold": True}},
+                               {"type": "text", "text": {"content": f"{lift}"},
+                                "annotations": {"bold": True, "color": col}},
+                               {"type": "text", "text": {"content": f" · {c}회 — "},
+                                "annotations": {"color": "gray"}},
+                               {"type": "text", "text": {"content": why}}]}})
+        if len(sp) > TOP_SHOW:
+            blocks.append({"object": "block", "type": "paragraph", "paragraph": {
+                "rich_text": [{"type": "text",
+                               "text": {"content": f"… 외 {len(sp)-TOP_SHOW}개는 트리맵 참고"},
+                               "annotations": {"color": "gray", "italic": True}}]}})
+        D.append_blocks(root_id, blocks, chunk=20)
         log(f"  📊 단어 트리맵+이유표 갱신 ({len(items)}단어 / 영상 {n}개)")
     except Exception as e:
         log(f"  ⚠️ 단어 트리맵 생략: {str(e)[:90]}")

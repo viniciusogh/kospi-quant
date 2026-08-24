@@ -53,7 +53,10 @@ def extract(txt, n_videos, top=28, log=print):
 
 ## 이유 규칙
 - 앞부분을 요약하지 말고 **전체를 읽고 "왜 이 단어가 계속 나오는지"** 를 쓴다.
-- 한 줄(60자 이내). 인과가 보이게. 예: "HBM 공급 부족이 2028년까지 이어진다는 전망 때문"
+- **40자 이내**. 모바일에서 한 줄로 읽혀야 한다. 인과만 남기고 군더더기는 버려라.
+  좋은 예: "빌 게이츠 방한, SK와 SMR 동맹"  /  "2028년까지 공급 부족 전망"
+  나쁜 예: "~하기 때문에 시장의 관심이 집중되고 있기 때문" (늘어짐·중복)
+- "때문", "이기 때문", "하고 있다" 같은 꼬리말을 붙이지 마라.
 - 본문에 없는 내용을 만들지 마라.
 
 ## 출력 (정확히 이 형식, 헤더·설명 없이 {top}줄)
@@ -73,8 +76,13 @@ def extract(txt, n_videos, top=28, log=print):
         log(f"  ⚠️ 키워드 인사이트 실패: {str(e)[:90]}")
         return []
 
+    # 모델이 코드펜스·서문·표 헤더를 붙이는 경우가 있어 방어적으로 벗긴다(실측)
+    raw = re.sub(r"^```[a-zA-Z]*\s*$", "", raw, flags=re.M)
     rows = []
     for line in raw.splitlines():
+        line = line.strip().strip("|")          # 마크다운 표로 올 때 양끝 파이프
+        if set(line) <= set("-| :"):            # 표 구분선
+            continue
         parts = [p.strip() for p in line.split("|")]
         if len(parts) < 3 or not parts[0] or parts[0] == "키워드":
             continue
