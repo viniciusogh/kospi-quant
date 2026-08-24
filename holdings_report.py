@@ -4,7 +4,7 @@ momentum_daily 의 8섹션 Gemini 분석·수급막대·분기표를 그대로 �
 모멘텀 리포트는 '모멘텀 점수·신고가'를, 여기서는 **보유 관점(수량·평단→현재가·수익률·평가금액)** 을 보여준다.
 
 토큰: momentum_analysis.json 캐시를 공유하므로 오늘 모멘텀 추천에 든 보유종목은 재분석하지 않는다.
-(오늘 날짜 캐시면 Gemini 호출 0회. 그 외는 momentum 과 같은 규칙 — 5일내 재등장은 가벼운 업데이트만(ANALYSIS_TTL_DAYS).)
+(오늘 날짜 캐시면 Gemini 호출 0회. 그 외는 momentum 과 같은 규칙 — TTL 내 재등장은 가벼운 업데이트만.)
 
 실행: python holdings_report.py   (.env 필요. portfolio.py 가 만든 portfolio.json 을 읽음)
 """
@@ -39,13 +39,6 @@ def _sector_table():
     d["per_rank"] = g["_per"].rank()
     d["pbr_rank"] = g["_pbr"].rank()
     d["sec_n"] = g["_per"].transform("count")
-    d["pbr_n"] = g["_pbr"].transform("count")
-    d["_debt"] = pd.to_numeric(d.get("부채비율(%)"), errors="coerce")
-    d["_roe"] = pd.to_numeric(d.get("ROE(%)"), errors="coerce")
-    d["debt_rank"] = g["_debt"].rank()                    # 1위 = 부채 최저
-    d["debt_n"] = g["_debt"].transform("count")
-    d["roe_rank"] = g["_roe"].rank(ascending=False)       # 1위 = ROE 최고
-    d["roe_n"] = g["_roe"].transform("count")
     return d.set_index("code")
 
 
@@ -67,9 +60,6 @@ def _rows(positions, tok):
                "per_rank": qq["per_rank"] if qq is not None else np.nan,
                "pbr_rank": qq["pbr_rank"] if qq is not None else np.nan,
                "sec_n": int(qq["sec_n"]) if qq is not None and pd.notna(qq["sec_n"]) else 0,
-               "pbr_n": qq["pbr_n"] if qq is not None else np.nan,
-               **({k: qq[k] for k in ("debt_rank", "debt_n", "roe_rank", "roe_n", "_debt", "_roe")}
-                  if qq is not None else {}),
                "score": 0.0}         # 모멘텀 점수는 보유 리포트에서 의미 없음(제목줄에 안 씀)
         out.append((row, p))
     return out
@@ -97,7 +87,7 @@ def _analyze(rows, tok):
     reuse, need = {}, []          # 휴장일엔 캐시 date(=마지막 거래일)가 오늘과 다르지만 최신이다.
     for row, _ in rows:
         c = cache.get(row["code"])
-        if c and c.get("date") == asof and c.get("요약") and c.get("촉매3"):
+        if c and c.get("date") == asof and c.get("요약"):
             reuse[row["code"]] = c
         else:
             need.append(row)
@@ -180,65 +170,6 @@ def _holding_toggle(row, pos, a, fl, roe):
             "toggle": {"rich_text": title, "color": "default", "children": kids}}
 
 
-def _bullets(a, key3, key_prose):
-    """카드용 3줄. 신규 분석엔 '촉매3/리스크3' 압축 필드가 있고, 아직 캐시에 없으면
-    원문 프로즈를 문장 단위로 잘라 앞 3개를 쓴다(캐시가 TTL 내 갱신되면 압축 필드로 바뀜)."""
-    v = (a.get(key3) or "").strip()
-    if v:
-        return [x.strip(" ·") for x in v.split("·") if len(x.strip(" ·")) > 3][:3]
-    import re as _re
-    sents = [x.strip() for x in _re.split(r"(?<=다)\.\s*", a.get(key_prose) or "") if len(x.strip()) > 8]
-    return [x[:26] for x in sents[:3]]
-
-
-def _gauges(row):
-    """섹터 내 순위 게이지 — 왼쪽이 좋음. PER/PBR/부채는 낮을수록, ROE 는 높을수록 1위."""
-    out = []
-    for lab, val, rk, n, labels in (
-            ("PER", row.get("per"), row.get("per_rank"), row.get("sec_n"), ("쌈", "보통", "비쌈")),
-            ("PBR", row.get("pbr"), row.get("pbr_rank"), row.get("pbr_n"), ("쌈", "보통", "비쌈")),
-            ("부채비율", row.get("_debt"), row.get("debt_rank"), row.get("debt_n"), ("저부채", "보통", "고부채")),
-            ("ROE", row.get("_roe"), row.get("roe_rank"), row.get("roe_n"), ("우수", "보통", "낮음"))):
-        if val is None or pd.isna(val) or pd.isna(rk) or not n or n < 4:
-            continue
-        rk, n = int(rk), int(n)
-        note = labels[0] if (rk - 0.5) / n < 1 / 3 else (labels[1] if (rk - 0.5) / n < 2 / 3 else labels[2])
-        fmt = f"{val:,.0f}%" if lab == "부채비율" else (f"{val:.1f}%" if lab == "ROE"
-              else (f"{val:.2f}배" if lab == "PBR" else f"{val:.1f}배"))
-        out.append((lab, fmt, rk, n, note))
-    return out
-
-
-def _card(row, pos, a, fl):
-    """종목 카드 PNG → image 블록. 실패하면 None (토글 원문은 그대로 살아있다)."""
-    try:
-        import sys
-        sys.path.insert(0, os.path.join(_DIR, "viz"))
-        import stock_card as SC
-        one = (a.get("issue") or "").strip() or (a.get("요약") or "").split(".")[0]
-        d = {"name": row["종목명"], "code": row["code"], "ret": pos["ret"],
-             "chg": row.get("chg", 0) or 0,
-             "sector": row["섹터"] if row["섹터"] != "-" else "업종", "sec_n": int(row.get("sec_n") or 0),
-             "qty": pos["qty"], "avg": pos["avg"], "price": pos["price"],
-             "eval": pos["eval"], "pl": pos["pl"], "oneline": one,
-             "gauges": _gauges(row),
-             "flow": [("외국인", fl.get("frgn5", 0)), ("기관", fl.get("orgn5", 0)),
-                      ("개인", fl.get("prsn5", 0))] if fl else [],
-             "bull": _bullets(a, "촉매3", "촉매"), "bear": _bullets(a, "리스크3", "리스크"),
-             "target": ("컨센서스 " + (a.get("추정") or "").lstrip("→▲▼ ").strip()
-                        if a.get("추정") else "")}
-        png = os.path.join(_DIR, f"card_{row['code']}.png")
-        SC.render(d, png)
-        with open(png, "rb") as f:
-            fid = D.upload_image(f.read(), f"card_{row['code']}.png")
-        os.remove(png)
-        return ({"object": "block", "type": "image",
-                 "image": {"type": "file_upload", "file_upload": {"id": fid}}} if fid else None)
-    except Exception as e:
-        M.log(f"  ⚠️ {row['종목명']} 카드 생략: {str(e)[:80]}")
-        return None
-
-
 def _infographic(data):
     """보유 현황 인포그래픽 → image 블록. 표는 모바일에서 열이 잘려 이미지로 간다(사용자 요청).
     업로드는 신버전 API, 삽입은 구버전(after 지원) — dashboard 가 처리."""
@@ -297,11 +228,7 @@ def main():
     items = []
     for row, pos in sorted(rows, key=lambda x: -x[1]["eval"]):
         code = row["code"]
-        a = analysis.get(code, {})
-        card = _card(row, pos, a, flows.get(code) or {})
-        if card:
-            items.append((card, []))          # 카드(요약) → 바로 아래 토글(원문 8섹션)
-        tog = _holding_toggle(row, pos, a, flows.get(code) or {}, roes.get(code))
+        tog = _holding_toggle(row, pos, analysis.get(code, {}), flows.get(code) or {}, roes.get(code))
         extra = []
         qt = M._quarter_table(incomes.get(code))
         if qt:
