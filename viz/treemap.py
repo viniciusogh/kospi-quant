@@ -158,7 +158,7 @@ def _font():
     return None
 
 
-def render(sectors, asof, out_path, w=1600, h=980):
+def render(sectors, asof, out_path, w=1600, h=1180, strip=None):
     """sectors: [(섹터명, 오늘%, 시총합)] — 섹터 단위 타일만 그린다(개별 종목 없음).
 
     표시는 **오늘 기준으로 통일**한다. 예전엔 큰 숫자가 5일 수익률, 작은 줄이 "오늘 ..." 이라
@@ -178,7 +178,8 @@ def render(sectors, asof, out_path, w=1600, h=980):
     plt.rcParams["axes.unicode_minus"] = False
 
     fig = plt.figure(figsize=(w / 100, h / 100), dpi=100, facecolor=SURFACE)
-    ax = fig.add_axes([0.006, 0.006, 0.988, 0.885])
+    STRIP_H = 0.185 if strip else 0.0        # 하단 요약 스트립 높이(도형 좌표 비율)
+    ax = fig.add_axes([0.006, 0.006 + STRIP_H, 0.988, 0.885 - STRIP_H])
     ax.set_xlim(0, 100); ax.set_ylim(0, 100); ax.axis("off")
     ax.set_facecolor(SURFACE)
 
@@ -223,6 +224,28 @@ def render(sectors, asof, out_path, w=1600, h=980):
         if show_pct:
             ax.text(cx, cy - min(th * 0.19, 3.0), f"{chg:+.1f}%", ha="center", va="center",
                     fontsize=nm_fs * 0.88, color=INK)
+
+    # ── 하단 요약 스트립 (강세/약세 + 대표 종목) ──────────────────────
+    # 표·목록은 모바일에서 잘리고 여백이 뜬다(사용자 지적) → 이미지 안에 넣으면 안 깨진다.
+    if strip:
+        sa = fig.add_axes([0.006, 0.008, 0.988, STRIP_H - 0.012])
+        sa.set_xlim(0, 100); sa.set_ylim(0, 100); sa.axis("off")
+        sa.add_patch(plt.Rectangle((0, 0), 100, 100, facecolor="#22252e",
+                                   edgecolor="#3a3f4d", lw=1.2))
+        for ci, (title, rows, accent) in enumerate(
+                [("▲ 오늘 강세", strip.get("hot", []), UP_STEPS[-1]),
+                 ("▼ 오늘 약세", strip.get("cold", []), DOWN_STEPS[-1])]):
+            x0 = 2.5 + ci * 49.5
+            sa.text(x0, 84, title, fontsize=13, fontweight="bold", color=INK)
+            for ri, (sec, pct, stocks) in enumerate(rows[:3]):
+                y = 62 - ri * 21
+                sa.add_patch(plt.Rectangle((x0, y - 5), 1.0, 15, facecolor=accent))
+                sa.text(x0 + 2.2, y + 4.5, sec, fontsize=12, fontweight="bold", color=INK)
+                sa.text(x0 + 14.5, y + 4.5, f"{pct:+.1f}%", fontsize=12, fontweight="bold",
+                        color=accent)
+                if stocks:
+                    txt = "   ".join(f"{n} {c*100:+.1f}%" for n, c in stocks[:3])
+                    sa.text(x0 + 2.2, y - 3.5, txt[:52], fontsize=9.5, color="#aab0bd")
 
     fig.savefig(out_path, facecolor=SURFACE)
     plt.close(fig)

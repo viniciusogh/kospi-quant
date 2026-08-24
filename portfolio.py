@@ -311,22 +311,6 @@ def recent_changes(code, tok, n=5):
     return out, last_d, last_c
 
 
-def _hist_cell(hist):
-    """최근 5일 셀: '8/18(화) -2.3%' 를 줄바꿈으로. 상승 빨강·하락 파랑(국내 관습)."""
-    if not hist:
-        return [{"type": "text", "text": {"content": "—"}, "annotations": {"color": "gray"}}]
-    wd = "월화수목금토일"
-    rich = []
-    for i, (d, chg) in enumerate(hist):
-        dt = datetime.strptime(d, "%Y%m%d")
-        col = "red" if chg > 0 else ("blue" if chg < 0 else "gray")
-        rich.append({"type": "text",
-                     "text": {"content": f"{'' if i == 0 else chr(10)}{dt.month}/{dt.day}({wd[dt.weekday()]}) "},
-                     "annotations": {"color": "gray"}})
-        rich.append({"type": "text", "text": {"content": f"{chg*100:+.1f}%"},
-                     "annotations": {"color": col}})
-    return rich
-
 
 def health_warnings():
     """파이프라인 정지를 대시보드에 노출한다.
@@ -376,25 +360,6 @@ def _rt(text, bold=False, color=None):
     return [{"type": "text", "text": {"content": str(text)}, "annotations": a}]
 
 
-def _cell_rows(data):
-    """표 행: 종목(증권사) / 수량 / 평단→현재가 / 평가금액 / 수익률. 등락색은 한국식(상승 빨강)."""
-    head = [{"object": "block", "type": "table_row", "table_row": {"cells": [
-        _rt("종목", True), _rt("수량", True), _rt("평단 → 현재가", True),
-        _rt("평가금액", True), _rt("수익률", True), _rt("최근 5일 (전일대비)", True)]}}]
-    rows = []
-    for r in data["positions"]:
-        col = "red" if r["ret"] > 0 else ("blue" if r["ret"] < 0 else "gray")
-        star = " ⭐" if r["signal"] else ""
-        name = [{"type": "text", "text": {"content": f"{r['name']}{star}"}, "annotations": {"bold": True}},
-                {"type": "text", "text": {"content": f"\n{r['broker']}"}, "annotations": {"color": "gray"}}]
-        rows.append({"object": "block", "type": "table_row", "table_row": {"cells": [
-            name, _rt(f"{r['qty']:,.0f}"),
-            _rt(f"{r['avg']:,.0f} → {r['price']:,.0f}"),
-            _rt(f"{r['eval']:,.0f}"),
-            _rt(f"{r['ret']*100:+.1f}%", True, col),
-            _hist_cell(r.get("hist"))]}})
-    return head + rows
-
 
 def _blocks(data):
     t = data["total"]
@@ -421,9 +386,11 @@ def _blocks(data):
         parts = [f"{b} {v['eval']:,.0f}원({v['n']})" for b, v in data["by_broker"].items()]
         out.append({"object": "block", "type": "paragraph",
                     "paragraph": {"rich_text": _rt("증권사별: " + "  ·  ".join(parts), color="gray")}})
-    out.append({"object": "block", "type": "table", "table": {
-        "table_width": 6, "has_column_header": True, "has_row_header": False,
-        "children": _cell_rows(data)}})
+    # 표는 모바일에서 6열이 잘리고 여백이 뜬다(사용자 지적) → 인포그래픽 이미지로 대체.
+    # 구버전 API(2022-06-28)도 file_upload 이미지 블록과 after 삽입을 받는다(실측 확인).
+    img = _holdings_image(data)
+    if img:
+        out.append(img)
     sig = (f"⭐ 오늘 모멘텀 리포트 추천과 겹치는 보유: "
            + ", ".join(f"{r['name']}({'/'.join(r['signal'])})" for r in held)) if held else \
           "⭐ 오늘 리포트 추천과 겹치는 보유 종목 없음"
@@ -431,6 +398,26 @@ def _blocks(data):
         "icon": {"type": "emoji", "emoji": "🎯"}, "color": "gray_background",
         "rich_text": _rt(sig)}})
     return out
+
+
+def _holdings_image(data):
+    """보유 현황 인포그래픽 PNG 를 만들어 업로드하고 image 블록을 돌려준다."""
+    try:
+        import sys
+        sys.path.insert(0, os.path.join(_DIR, "viz"))
+        import holdings as HV
+        import dashboard as D
+        png = os.path.join(_DIR, "latest_holdings.png")
+        HV.render(data, png)
+        with open(png, "rb") as f:
+            fid = D.upload_image(f.read(), "holdings.png")
+        if not fid:
+            return None
+        return {"object": "block", "type": "image",
+                "image": {"type": "file_upload", "file_upload": {"id": fid}}}
+    except Exception as e:
+        print(f"  ⚠️ 보유 이미지 생략: {str(e)[:80]}")
+        return None
 
 
 def upload_notion(data):

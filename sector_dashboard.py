@@ -189,26 +189,8 @@ def _pct(v, bold=False):
 
 
 def blocks(agg, tops, asof):
-    head = [{"object": "block", "type": "table_row", "table_row": {"cells": [
-        [{"type": "text", "text": {"content": h}, "annotations": {"bold": True}}]
-        for h in ["섹터 (종목수)", "오늘", "5일", "20일", "외국인+기관 순매수", "주요 종목 (시총순·오늘)"]]}}]
-    rows = []
-    for _, r in agg.iterrows():
-        stocks = tops.get(r["섹터"], [])
-        cell = []
-        for i, (nm, ch) in enumerate(stocks):
-            if i:
-                cell.append({"type": "text", "text": {"content": "\n"}})
-            cell.append({"type": "text", "text": {"content": f"{nm} "}})
-            cell.append(_pct(ch))
-        rows.append({"object": "block", "type": "table_row", "table_row": {"cells": [
-            [{"type": "text", "text": {"content": f"{r['섹터']} ({int(r['n'])})"},
-              "annotations": {"bold": True}}],
-            [_pct(r["오늘"], bold=True)], [_pct(r["d5"])], [_pct(r["d20"])],
-            [{"type": "text", "text": {"content": _flow(r["순매수"])},
-              "annotations": {"color": "red" if r["순매수"] > 0 else "blue"}}],
-            cell or [{"type": "text", "text": {"content": "—"}}]]}})
-
+    """요약 콜아웃 + 한 줄 목록. 6열 표는 모바일에서 열이 잘리고 행이 여러 줄로 늘어난다
+    (사용자 지적) → 목록으로. 전체 섹터는 트리맵이 담당하고 여기선 강세·약세만 짚는다."""
     hot = " · ".join(agg.head(3)["섹터"].tolist())
     cold = " · ".join(agg.tail(3)["섹터"].tolist()[::-1])
     hot5 = " · ".join(agg.nlargest(3, "d5")["섹터"].tolist())
@@ -222,13 +204,32 @@ def blocks(agg, tops, asof):
             {"type": "text", "text": {"content": f"🔄 5일 기준 강세(순환매): {hot5}\n"}},
             {"type": "text", "text": {"content": f"💰 순매수 유입 상위: {' · '.join(flow)}\n"}},
             {"type": "text", "text": {"content":
-                f"기준: {asof} 정규장 종가 · 시총 상위 {UNIVERSE_N} + 테마종목 · 섹터/테마 등가중 "
-                f"(시총가중은 소수 대형주에 지배돼 체감과 어긋남) · ETF/ETN/우선주 제외"},
+                f"{asof} 정규장 종가 · 시총 상위 {UNIVERSE_N}+테마 · 섹터 등가중"},
              "annotations": {"color": "gray"}}]}}]
-    table = {"object": "block", "type": "table", "table": {
-        "table_width": 6, "has_column_header": True, "has_row_header": False,
-        "children": head + rows}}
-    return header, table
+
+    def line(r, mark):
+        sec = r["섹터"]
+        stocks = " · ".join(f"{nm} {ch*100:+.1f}%" for nm, ch in (tops.get(sec) or [])[:3])
+        col = "red" if r["오늘"] > 0 else ("blue" if r["오늘"] < 0 else "gray")
+        return {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {
+            "rich_text": [
+                {"type": "text", "text": {"content": f"{mark} {sec}({int(r['n'])}) "},
+                 "annotations": {"bold": True}},
+                {"type": "text", "text": {"content": f"{r['오늘']*100:+.1f}%"},
+                 "annotations": {"bold": True, "color": col}},
+                {"type": "text", "text": {"content":
+                    f"  5일 {r['d5']*100:+.1f}% · 20일 {r['d20']*100:+.1f}% · 순매수 {_flow(r['순매수'])}"},
+                 "annotations": {"color": "gray"}},
+                {"type": "text", "text": {"content": f"\n{stocks}" if stocks else ""},
+                 "annotations": {"color": "gray"}}]}}
+
+    rows = [line(r, "🔥") for _, r in agg.head(8).iterrows()]
+    rows += [line(r, "🧊") for _, r in agg.tail(5).iloc[::-1].iterrows()]
+    rows.append({"object": "block", "type": "paragraph", "paragraph": {
+        "rich_text": [{"type": "text",
+                       "text": {"content": f"… 전체 {len(agg)}개 섹터는 위 트리맵 참고"},
+                       "annotations": {"color": "gray", "italic": True}}]}})
+    return header, rows
 
 
 def main():
@@ -257,7 +258,7 @@ def main():
             f"{datetime.now(KST).strftime('%H:%M')}")
     agg, tops = aggregate(m)
     M.log(f"  섹터 {len(agg)}개 집계 (종목 {len(m)}개)")
-    header, table = blocks(agg, tops, asof)
+    header, rows = blocks(agg, tops, asof)
     tid = D.add_report(f"🔄 {asof} 섹터 장세 (순환매)", header)
     if not tid:
         M.log("❌ 대시보드 토글 생성 실패")
@@ -273,14 +274,20 @@ def main():
                   for _, r in agg.iterrows()]      # 섹터 단위·오늘 기준
         groups.sort(key=lambda g: -g[2])
         png = os.path.join(_DIR, "latest_sector_treemap.png")
-        T.render(groups, asof, png)
+        strip = {
+            "hot": [(r["섹터"], r["오늘"] * 100, tops.get(r["섹터"]) or [])
+                    for _, r in agg.head(3).iterrows()],
+            "cold": [(r["섹터"], r["오늘"] * 100, tops.get(r["섹터"]) or [])
+                     for _, r in agg.tail(3).iloc[::-1].iterrows()],
+        }
+        T.render(groups, asof, png, strip=strip)
         with open(png, "rb") as f:
             ok = D.append_image(tid, f.read(), "sector_treemap.png")
         M.log("  🗺 트리맵 업로드 " + ("완료" if ok else "실패(표는 정상)"))
     except Exception as e:
         M.log(f"  ⚠️ 트리맵 생략: {str(e)[:90]}")
 
-    D.append_blocks(tid, [table], chunk=1)
+    D.append_blocks(tid, rows, chunk=20)
     M.log(f"✅ 대시보드에 섹터 장세 추가: {D.url()}")
     print(agg.assign(**{c: (agg[c] * 100).round(1) for c in ["오늘", "d5", "d20"]})
           .to_string(index=False))
