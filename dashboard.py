@@ -13,6 +13,7 @@
   → 종목 토글을 먼저 만들고 분기표는 그 토글 id 로 별도 append (2단계).
 """
 import os, json
+from datetime import datetime, timedelta, timezone
 import requests
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
@@ -193,6 +194,36 @@ def _append(bid, blocks, after=None, tries=3):
 # 리포트 슬롯 — 페이지에 늘 이 순서로 놓인다. 상태파일 없이 제목으로 판별하므로
 # GitHub Actions(상태파일 없음)와 로컬이 같은 페이지를 일관되게 갱신할 수 있다.
 # 검사 순서 주의: "추세게이트" 를 "모멘텀 추천" 보다 먼저 봐야 부분일치 충돌이 없다.
+# 토글 제목 끝에 갱신 시각을 붙인다(사용자 요청). 슬롯 판정·재사용 비교는 이 꼬리를 뗀
+# '기준 제목' 으로 해야 한다 — 안 그러면 매 실행마다 제목이 달라져 유튜브 토글이 삭제·재생성되며
+# 그날 누적한 영상 분석이 통째로 날아간다.
+STAMP_SEP = "   ·   갱신 "
+KST_TZ = timezone(timedelta(hours=9))
+
+
+def _now_stamp():
+    return datetime.now(KST_TZ).strftime("%m-%d %H:%M")
+
+
+def _base_title(t):
+    return (t or "").split(STAMP_SEP)[0].strip()
+
+
+def _stamped(t):
+    return f"{_base_title(t)}{STAMP_SEP}{_now_stamp()}"
+
+
+def _retitle(block_id, title):
+    """이미 있는 토글의 제목만 갱신 시각으로 교체."""
+    try:
+        requests.patch(f"{API}/blocks/{block_id}", headers=_h(), timeout=25,
+                       json={"toggle": {"rich_text": [{"type": "text",
+                             "text": {"content": title},
+                             "annotations": {"bold": True}}]}})
+    except Exception as e:
+        print(f"  ⚠️ 제목 갱신 실패: {str(e)[:60]}")
+
+
 SLOT_RULES = [(1, "내 보유종목"), (2, "핵심 요약"), (3, "섹터 장세"),
               (5, "추세게이트"), (4, "모멘텀 추천"), (6, "유튜브")]
 
@@ -252,7 +283,7 @@ def _slot_slot(tail, div, slot, keep_title=None):
         t = "".join(x.get("plain_text", "") for x in b["toggle"]["rich_text"])
         sv = _slot_of(t)
         if sv == slot:
-            if keep_title is not None and t == keep_title:
+            if keep_title is not None and _base_title(t) == _base_title(keep_title):
                 reuse = b["id"]          # 같은 날 같은 리포트 → 재사용
             else:
                 _delete([b["id"]])       # 이전 실행분·날짜 바뀜 → 교체
@@ -272,9 +303,10 @@ def get_or_create_report(toggle_title, color="gray_background"):
         return None
     after, reuse = _slot_slot(tail, div, _slot_of(toggle_title), keep_title=toggle_title)
     if reuse:
+        _retitle(reuse, _stamped(toggle_title))     # 이어붙이기여도 시각은 갱신
         return reuse
     r = _append(pid, [{"object": "block", "type": "toggle", "toggle": {
-        "rich_text": [{"type": "text", "text": {"content": toggle_title},
+        "rich_text": [{"type": "text", "text": {"content": _stamped(toggle_title)},
                        "annotations": {"bold": True}}],
         "color": color, "children": []}}], after=after)
     return r[0]["id"] if r else None
@@ -294,7 +326,7 @@ def add_report(toggle_title, header_blocks, items=None, color="gray_background")
     after, _ = _slot_slot(tail, div, _slot_of(toggle_title))   # 같은 슬롯 기존분은 교체
 
     r = _append(pid, [{"object": "block", "type": "toggle", "toggle": {
-        "rich_text": [{"type": "text", "text": {"content": toggle_title},
+        "rich_text": [{"type": "text", "text": {"content": _stamped(toggle_title)},
                        "annotations": {"bold": True}}],
         "color": color, "children": header_blocks or []}}], after=after)
     if not r:

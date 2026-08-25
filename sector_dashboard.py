@@ -288,9 +288,9 @@ def main():
         png = os.path.join(_DIR, "latest_sector_treemap.png")
         strip = {
             "hot": [(r["섹터"], r["오늘"] * 100, tops.get(r["섹터"]) or [])
-                    for _, r in agg.head(3).iterrows()],
+                    for _, r in agg.head(6).iterrows()],
             "cold": [(r["섹터"], r["오늘"] * 100, tops.get(r["섹터"]) or [])
-                     for _, r in agg.tail(3).iloc[::-1].iterrows()],
+                     for _, r in agg.tail(6).iloc[::-1].iterrows()],
         }
         T.render(groups, asof, png, strip=strip)
         with open(png, "rb") as f:

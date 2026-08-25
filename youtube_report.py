@@ -804,17 +804,23 @@ def _main():
     # 부모(대시보드 유튜브 토글)는 올릴 내용이 확정된 뒤 get_or_create_channel_toggle 에서
     # 지연 생성한다. 여기서 미리 만들면 새 영상이 없는 날 빈 토글이 전날 분석을 덮어쓴다.
 
+    failed = 0
     for channel in CHANNELS:
         log(f"")
         log(f"=== [{channel['name']}] ===")
         try:
-            _process_channel(channel, today, page_id)
+            _process_channel(channel, today)
         except Exception as e:
             log(f"❌ {channel['name']} 처리 실패: {e}")
+            failed += 1
             continue
+    # 전 채널 실패를 success 로 끝내면 며칠씩 조용히 멈춘다(2026-08-18~25 실제 발생).
+    # 워크플로가 빨간불이 되어야 알 수 있다.
+    if failed == len(CHANNELS):
+        raise SystemExit(f"전 채널 실패 ({failed}/{len(CHANNELS)}) — 조용한 중단 방지를 위해 실패 처리")
 
 
-def _process_channel(channel: dict, today: str, page_id: str):
+def _process_channel(channel: dict, today: str):
     # RSS 영상 수집
     videos = get_channel_videos(channel["channel_id"])
     log(f"✅ RSS 영상 {len(videos)}개 수집")

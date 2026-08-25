@@ -15,10 +15,11 @@ RED_ANCHOR   = "#b04a4a"    # 하락 팔 색상
 INK          = "#ffffff"    # 라벨 (다크 타일이므로 흰색 고정)
 SUBINK       = "#9aa0ae"    # 보조 텍스트
 
-# 팔당 4단계 명도 (다크 배경에서 흰 라벨 대비를 확보하는 범위)
+# 팔당 4단계 명도. **등락이 클수록 어둡게** (사용자 요청 2026-08-25) — 인덱스가 커질수록 L 감소.
 # 초록은 같은 OKLab L 에서도 휘도가 높아 흰 라벨 대비가 빨강보다 낮다.
-# 상한 0.55 는 **초록**이 흰 라벨 대비 4.5 를 넘기는 경계(실측). 양팔 L 은 동일하게 유지.
-ARM_L = [0.395, 0.447, 0.499, 0.551]
+# 상한 0.551 은 **초록**이 흰 라벨 대비 4.5 를 넘기는 경계(실측)라 가장 약한 단계에 둔다.
+# 강한 단계일수록 어두워지므로 대비는 더 좋아진다 — 범위를 안 바꿔 안전.
+ARM_L = [0.551, 0.499, 0.447, 0.395]
 # 당일 등락 기준 구간. 5일 기준(±7%)을 쓰면 당일 변동(보통 ±2%)이 전부 회색으로 뭉친다.
 BANDS = [0.3, 1.0, 2.0, 3.5]
 SECTOR_AREA_EXP = 0.5      # 섹터 면적 = 시총^0.5 (대형주 지배 완화, 순서 보존)
@@ -72,7 +73,10 @@ def _arm(anchor_hex):
     return out
 
 
-UP_STEPS   = _arm(GREEN_ANCHOR)     # 약 → 강 (명도 상승)
+UP_STEPS   = _arm(GREEN_ANCHOR)     # 약 → 강 (명도 하강 = 클수록 어둡게)
+# 하단 스트립은 배경(#22252e)이 어두워 타일 램프를 글자에 그대로 쓰면 대비가 3.4 밖에 안 나온다.
+# 글자 전용 밝은 색을 따로 둔다 (실측: 초록 5.23 · 빨강 5.40).
+STRIP_UP, STRIP_DOWN = "#3fab56", "#e67a77"
 DOWN_STEPS = _arm(RED_ANCHOR)
 
 
@@ -158,7 +162,7 @@ def _font():
     return None
 
 
-def render(sectors, asof, out_path, w=1600, h=1180, strip=None):
+def render(sectors, asof, out_path, w=1600, h=1400, strip=None):
     """sectors: [(섹터명, 오늘%, 시총합)] — 섹터 단위 타일만 그린다(개별 종목 없음).
 
     표시는 **오늘 기준으로 통일**한다. 예전엔 큰 숫자가 5일 수익률, 작은 줄이 "오늘 ..." 이라
@@ -178,7 +182,7 @@ def render(sectors, asof, out_path, w=1600, h=1180, strip=None):
     plt.rcParams["axes.unicode_minus"] = False
 
     fig = plt.figure(figsize=(w / 100, h / 100), dpi=100, facecolor=SURFACE)
-    STRIP_H = 0.185 if strip else 0.0        # 하단 요약 스트립 높이(도형 좌표 비율)
+    STRIP_H = 0.30 if strip else 0.0         # 강세·약세 6행씩 담으려면 예전(0.185)보다 커야 한다
     ax = fig.add_axes([0.006, 0.006 + STRIP_H, 0.988, 0.885 - STRIP_H])
     ax.set_xlim(0, 100); ax.set_ylim(0, 100); ax.axis("off")
     ax.set_facecolor(SURFACE)
@@ -233,19 +237,19 @@ def render(sectors, asof, out_path, w=1600, h=1180, strip=None):
         sa.add_patch(plt.Rectangle((0, 0), 100, 100, facecolor="#22252e",
                                    edgecolor="#3a3f4d", lw=1.2))
         for ci, (title, rows, accent) in enumerate(
-                [("▲ 오늘 강세", strip.get("hot", []), UP_STEPS[-1]),
-                 ("▼ 오늘 약세", strip.get("cold", []), DOWN_STEPS[-1])]):
+                [("▲ 오늘 강세", strip.get("hot", []), STRIP_UP),
+                 ("▼ 오늘 약세", strip.get("cold", []), STRIP_DOWN)]):
             x0 = 2.5 + ci * 49.5
-            sa.text(x0, 84, title, fontsize=13, fontweight="bold", color=INK)
-            for ri, (sec, pct, stocks) in enumerate(rows[:3]):
-                y = 62 - ri * 21
-                sa.add_patch(plt.Rectangle((x0, y - 5), 1.0, 15, facecolor=accent))
-                sa.text(x0 + 2.2, y + 4.5, sec, fontsize=12, fontweight="bold", color=INK)
-                sa.text(x0 + 14.5, y + 4.5, f"{pct:+.1f}%", fontsize=12, fontweight="bold",
+            sa.text(x0, 92, title, fontsize=13, fontweight="bold", color=INK)
+            for ri, (sec, pct, stocks) in enumerate(rows[:6]):
+                y = 76 - ri * 13.5
+                sa.add_patch(plt.Rectangle((x0, y - 3.5), 0.9, 11, facecolor=accent))
+                sa.text(x0 + 2.0, y + 3.5, sec, fontsize=11, fontweight="bold", color=INK)
+                sa.text(x0 + 13.5, y + 3.5, f"{pct:+.1f}%", fontsize=11, fontweight="bold",
                         color=accent)
                 if stocks:
                     txt = "   ".join(f"{n} {c*100:+.1f}%" for n, c in stocks[:3])
-                    sa.text(x0 + 2.2, y - 3.5, txt[:52], fontsize=9.5, color="#aab0bd")
+                    sa.text(x0 + 2.0, y - 3.0, txt[:54], fontsize=8.8, color="#aab0bd")
 
     fig.savefig(out_path, facecolor=SURFACE)
     plt.close(fig)
