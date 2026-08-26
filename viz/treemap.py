@@ -156,9 +156,13 @@ def _font():
     import matplotlib.font_manager as fm
     have = {f.name for f in fm.fontManager.ttflist}
     for c in ("Apple SD Gothic Neo", "AppleGothic", "NanumGothic", "Nanum Gothic",
-              "Noto Sans CJK KR", "Noto Sans KR", "Malgun Gothic", "DejaVu Sans"):
+              "Noto Sans CJK KR", "Noto Sans KR", "Malgun Gothic"):
         if c in have:
             return c
+    # 한글 폰트가 없으면 라벨이 전부 네모(두부)로 나간다. 조용히 넘기면 그림이 통째로
+    # 못 읽는 상태로 배포된다(2026-08-26 실제 발생) → 로그에 크게 남긴다.
+    print("  🚨 한글 폰트 없음 — 이미지 라벨이 네모로 깨집니다. "
+          "워크플로에 'apt-get install fonts-nanum' 단계가 있는지 확인하세요.")
     return None
 
 

@@ -31,6 +31,15 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # 키워드 트리맵이 daily_recommend 로 옮겨오면서 폰트 의존성이 따라오지 않아
+      # 한글이 전부 네모로 깨졌다(2026-08-26). daily_quant.yml 과 동일한 단계.
+      - name: Install Korean fonts (키워드 트리맵 한글 라벨 — 없으면 네모로 깨짐)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fonts-nanum
+          fc-cache -f >/dev/null 2>&1 || true
+          python -c "import matplotlib.font_manager as fm; fm._load_fontmanager(try_read_cache=False)" || true
+
       - name: Run daily recommendation
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
