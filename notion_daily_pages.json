@@ -886,5 +886,13 @@
       "3proTV": "3c74a006-32f8-81b5-9d01-d466601e1abe",
       "futuresnow": "3c74a006-32f8-814b-99f3-e709f2d6c6db"
     }
+  },
+  "2026-08-27": {
+    "page_id": "3c84a006-32f8-8125-85b0-e26c7210990c",
+    "channels": {
+      "3proTV": "3c84a006-32f8-81a1-befe-d372ce3027cc",
+      "futuresnow": "3c84a006-32f8-8189-8c2f-f0b64714dee2",
+      "moneyinside": "3c84a006-32f8-81cc-ad9a-c56bc0dca644"
+    }
   }
 }
