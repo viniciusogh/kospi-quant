@@ -335,8 +335,10 @@ def health_warnings():
         d = json.load(open(os.path.join(_DIR, "latest_youtube_analysis.json")))
         last = max(d.keys()) if d else None
         if last and busgap(last) >= 3:
+            # 2026-08-18~25 정지의 실제 원인은 NameError 였는데 이 문구가 프록시·크레딧을
+            # 가리켜 엉뚱한 곳을 뒤지게 했다. 원인 후보를 나열하지 말고 로그부터 보게 한다.
             warn.append(f"유튜브 분석이 영업일 {busgap(last)}일째 멈춤 (마지막 {last}) "
-                        f"— 프록시 대역폭·Gemini 크레딧 확인")
+                        f"— Actions 로그 확인: gh run list --workflow=youtube_report.yml")
     except Exception:
         pass
 
