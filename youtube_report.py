@@ -48,10 +48,12 @@ NOTION_DATE_ROOT = os.environ.get("NOTION_PARENT_PAGE_ID", "3324a00632f880fbb014
 PROCESSED_FILE       = os.path.join(_BASE_DIR, "processed_videos.json")
 FAILED_FILE          = os.path.join(_BASE_DIR, "failed_videos.json")
 QUOTA_FILE           = os.path.join(_BASE_DIR, "yt_quota.json")
-# 20 이던 이유: 2026-08-18 **무료 티어**에서 40 편이 Gemini 429(일일 할당량)를 유발했다.
-# 이후 Tier 1(유료)로 전환돼 일일 요청 쿼터 제약이 사라졌다 → 40 으로 복귀(2026-08-27).
-# 이제 실질 제약은 쿼터가 아니라 **월 지출 한도**다. 지출은 aistudio 대시보드에서 확인.
-MAX_ATTEMPTS_PER_DAY = int(os.environ.get("YT_MAX_PER_DAY", "40"))
+# 한도는 이제 **폭주 방지용**이다. 정상 운영을 막으면 안 된다(2026-08-28 재조정).
+# 원래 근거 둘 다 소멸: ① 무료 티어 Gemini 429 → 유튜브는 OpenAI 로 이동 + Gemini 도 Tier 1
+# ② 프록시 월 1GB → 1GB 를 태운 건 정상 볼륨이 아니라 재시도 루프 버그였고 8/18 에 고쳤다.
+# 실측 하루 발행량(RSS): 8/24 6편 · 8/25 11 · 8/26 9 · 8/27 22(3proTV 만 14).
+# 정상일엔 절대 안 닿고, 버그로 폭주할 때만 걸리는 값으로 둔다.
+MAX_ATTEMPTS_PER_DAY = int(os.environ.get("YT_MAX_PER_DAY", "80"))
 MAX_FAIL_BEFORE_SKIP = int(os.environ.get("YT_MAX_FAIL", "3"))   # 이 횟수 실패하면 영구 스킵
 NOTION_DAILY_PAGES   = os.path.join(_BASE_DIR, "notion_daily_pages.json")
 ANALYSIS_CACHE       = os.path.join(_BASE_DIR, "latest_youtube_analysis.json")  # daily_recommend.py 가 사용
@@ -62,10 +64,9 @@ MAX_TRANSCRIPT_CHARS = 25000
 # flash 와 속도 동급(6.1초 vs 5.8초)인데 화자 식별이 정확했다. gpt-5.5 는 26초로 4배 느리고
 # 출력 토큰도 2.4배. 이 작업은 추론보다 '정해진 형식 준수 + 압축' 이라 큰 모델의 이점이 적다.
 YT_MODEL = os.environ.get("YT_MODEL", "gpt-5.4-mini")
-# 채널당 1회 상한. 15 였을 때 3proTV 하나가 14편으로 일일 한도의 70% 를 먹고
-# 오선·머니인사이드가 밀렸다(2026-08-27) → 6 으로 낮춰 6개 채널이 골고루 들어오게 한다.
-# 한 채널의 밀린 분은 다음 정시 실행에서 이어 처리된다.
-MAX_VIDEOS_PER_RUN   = int(os.environ.get("YT_MAX_VIDEOS", "6"))
+# 채널당 1회 상한. 6 은 3proTV 하루 14편의 절반도 못 받아 매일 밀렸다(사용자 지적).
+# 실제 게시일 기반 YT_DAYS_BACK 필터가 살아났으므로 볼륨은 그쪽이 잡는다 → 20 으로 완화.
+MAX_VIDEOS_PER_RUN   = int(os.environ.get("YT_MAX_VIDEOS", "20"))
 LOCK_MAX_AGE_HOURS   = 0.5   # lock 파일 최대 유효 시간 (30분 — 정상 실행은 1~2분 내 완료)
 ANALYSIS_CACHE_DAYS  = 7     # 분석본 캐시 보존 기간 (daily_recommend 가 최근 7일 사용)
 
@@ -157,11 +158,37 @@ def _save_analysis_cache(today: str, channel: dict, video: dict, analysis: str):
 # ==========================
 # YouTube RSS 영상 목록 수집
 # ==========================
+def _videos_from_rss(channel_id: str) -> list:
+    """RSS 로 실제 게시일까지 받는다. 2026-05 경 막혔다가 2026-08-28 재확인 시 200 으로 열려 있다.
+    실제 날짜가 있어야 YT_DAYS_BACK(어제+오늘) 필터가 제 역할을 한다 — 하드코딩된 '오늘' 로는
+    그 필터와 '3일 이상 묵은 영상 자동 스킵' 이 둘 다 무력했다."""
+    import html as _html
+    try:
+        r = requests.get("https://www.youtube.com/feeds/videos.xml",
+                         params={"channel_id": channel_id}, timeout=25)
+        if r.status_code != 200:
+            return []
+    except Exception:
+        return []
+    out = []
+    for e in re.findall(r"<entry>(.*?)</entry>", r.text, re.S):
+        vid = re.search(r"<yt:videoId>([^<]+)</yt:videoId>", e)
+        tit = re.search(r"<media:title>(.*?)</media:title>", e, re.S)
+        pub = re.search(r"<published>(\d{4}-\d\d-\d\d)", e)
+        if not (vid and tit and pub):
+            continue
+        out.append({"id": vid.group(1), "title": _html.unescape(tit.group(1)).strip(),
+                    "published": pub.group(1), "url": f"https://youtu.be/{vid.group(1)}"})
+    return out
+
+
 def get_channel_videos(channel_id: str) -> list:
-    """yt-dlp 로 채널 최근 영상 15개의 ID/title 수집.
-    YouTube RSS endpoint 가 막힌 이후 (2026-05 경) 대체 경로. flat-playlist 모드는
-    timestamp 를 안 주므로 published 는 오늘 날짜로 하드코딩 (cutoff 로직과 호환).
-    """
+    """채널 최근 영상 목록. RSS 우선(실제 게시일), 막히면 yt-dlp 로 폴백.
+    yt-dlp 의 --flat-playlist 는 timestamp 를 주지 않아 published 를 오늘로 채운다."""
+    rss = _videos_from_rss(channel_id)
+    if rss:
+        return rss
+    log("    ℹ️ RSS 실패 → yt-dlp 폴백 (게시일은 오늘로 채움)")
     url = f"https://www.youtube.com/channel/{channel_id}/videos"
     try:
         result = subprocess.run(
