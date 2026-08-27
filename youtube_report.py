@@ -48,15 +48,20 @@ NOTION_DATE_ROOT = os.environ.get("NOTION_PARENT_PAGE_ID", "3324a00632f880fbb014
 PROCESSED_FILE       = os.path.join(_BASE_DIR, "processed_videos.json")
 FAILED_FILE          = os.path.join(_BASE_DIR, "failed_videos.json")
 QUOTA_FILE           = os.path.join(_BASE_DIR, "yt_quota.json")
-# 프록시 월 1GB 와 Gemini 일일 쿼터를 함께 보호. 40 은 Gemini 429 를 유발했으므로 20 으로.
-MAX_ATTEMPTS_PER_DAY = int(os.environ.get("YT_MAX_PER_DAY", "20"))
+# 20 이던 이유: 2026-08-18 **무료 티어**에서 40 편이 Gemini 429(일일 할당량)를 유발했다.
+# 이후 Tier 1(유료)로 전환돼 일일 요청 쿼터 제약이 사라졌다 → 40 으로 복귀(2026-08-27).
+# 이제 실질 제약은 쿼터가 아니라 **월 지출 한도**다. 지출은 aistudio 대시보드에서 확인.
+MAX_ATTEMPTS_PER_DAY = int(os.environ.get("YT_MAX_PER_DAY", "40"))
 MAX_FAIL_BEFORE_SKIP = int(os.environ.get("YT_MAX_FAIL", "3"))   # 이 횟수 실패하면 영구 스킵
 NOTION_DAILY_PAGES   = os.path.join(_BASE_DIR, "notion_daily_pages.json")
 ANALYSIS_CACHE       = os.path.join(_BASE_DIR, "latest_youtube_analysis.json")  # daily_recommend.py 가 사용
 COOKIES_FILE         = os.path.join(_BASE_DIR, "youtube_cookies.txt")
 LOCK_FILE            = os.path.join(_BASE_DIR, "youtube_report.lock")  # 중복 실행 방지
 MAX_TRANSCRIPT_CHARS = 25000
-MAX_VIDEOS_PER_RUN   = 15    # 유료 전환 후 제한 해제
+# 채널당 1회 상한. 15 였을 때 3proTV 하나가 14편으로 일일 한도의 70% 를 먹고
+# 오선·머니인사이드가 밀렸다(2026-08-27) → 6 으로 낮춰 6개 채널이 골고루 들어오게 한다.
+# 한 채널의 밀린 분은 다음 정시 실행에서 이어 처리된다.
+MAX_VIDEOS_PER_RUN   = int(os.environ.get("YT_MAX_VIDEOS", "6"))
 LOCK_MAX_AGE_HOURS   = 0.5   # lock 파일 최대 유효 시간 (30분 — 정상 실행은 1~2분 내 완료)
 ANALYSIS_CACHE_DAYS  = 7     # 분석본 캐시 보존 기간 (daily_recommend 가 최근 7일 사용)
 
@@ -905,13 +910,13 @@ def _process_channel(channel: dict, today: str):
         pool = [v for v in new_videos if v["published"] >= cutoff]
     else:
         pool = today_new + other_new
-    cap = int(os.environ.get("YT_MAX_VIDEOS") or MAX_VIDEOS_PER_RUN)
-    target      = list(reversed(pool[:cap]))
+    target = list(reversed(pool[:MAX_VIDEOS_PER_RUN]))
 
     used = _quota(today)
     left = MAX_ATTEMPTS_PER_DAY - used
     if left <= 0:
-        log(f"⏸️ 오늘 자막 시도 한도 도달 ({used}/{MAX_ATTEMPTS_PER_DAY}) — 프록시 대역폭 보호. 종료.")
+        log(f"⏸️ 오늘 자막 시도 한도 도달 ({used}/{MAX_ATTEMPTS_PER_DAY}) — 종료. "
+            f"올리려면 YT_MAX_PER_DAY (월 지출 한도 확인 후)")
         return
     if len(target) > left:
         log(f"⏸️ 일일 한도로 {len(target)}개 → {left}개만 처리 ({used}/{MAX_ATTEMPTS_PER_DAY} 사용)")
