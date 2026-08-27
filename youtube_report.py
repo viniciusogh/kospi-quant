@@ -246,6 +246,30 @@ def get_transcript(video_id: str) -> str | None:
         if is_main:
             signal.alarm(0)
 
+def _clean_title(t, limit=40):
+    """유튜브 원제목 → (코너, 짧은 헤드라인).
+
+    원제목은 '헤드라인 | 게스트 소속·직함 [코너명]' 꼴이라 그대로 쓰면 두 줄로 넘치고
+    목록이 어지러워진다(사용자 지적). 게스트 부분은 버리고 코너를 앞으로 뺀다.
+    """
+    t = (t or "").strip()
+    seg = ""
+    m = re.search(r"\[([^\[\]]{1,14})\]\s*$", t)          # 끝의 [코너명]
+    if m:
+        seg = m.group(1).strip()
+        t = t[:m.start()].strip()
+    m = re.match(r"^[\[【]([^\]】]{1,16})[\]】]\s*(.+)$", t)  # 앞의 【…】/[…] 는 항상 떼고
+    if m:                                                    # 코너가 비어 있을 때만 태그로 승격
+        lead, t = m.group(1).strip(), m.group(2).strip()
+        seg = seg or lead
+    t = t.split("|")[0].strip()                             # 게스트 이름·직함 꼬리 제거
+    t = re.sub(r"\s*-\s*20\d\d/\d\d/\d\d\s*$", "", t)    # 끝의 날짜
+    t = re.sub(r"\s{2,}", " ", t).strip(" -·|")
+    if len(t) > limit:
+        t = t[:limit].rstrip() + "…"
+    return seg, t
+
+
 # ==========================
 # Gemini 분석
 # ==========================
@@ -437,16 +461,19 @@ def build_video_blocks(video: dict, analysis: str | None, transcript_len: int) -
     else:
         children.extend(_para("⚠️ Gemini 분석 실패 (자막은 정상 수집됨)"))
 
+    seg, head = _clean_title(video["title"])
+
     # Notion 토글 블록 (children 최대 95개 제한)
     toggle = {
         "object": "block",
         "type": "toggle",
         "toggle": {
-            "rich_text": [{
-                "type": "text",
-                "text": {"content": video["title"], "link": {"url": video["url"]}},
-                "annotations": {"bold": True},
-            }],
+            "rich_text": ([{"type": "text",
+                            "text": {"content": f"{seg}  "},
+                            "annotations": {"bold": True, "color": "gray"}}] if seg else [])
+                         + [{"type": "text",
+                             "text": {"content": head, "link": {"url": video["url"]}},
+                             "annotations": {"bold": True}}],
             "children": children[:95],
         },
     }
