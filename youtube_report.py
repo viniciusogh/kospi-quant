@@ -355,10 +355,27 @@ def _llm(prompt: str, model: str) -> str | None:
     if model.startswith(("gpt-", "o3", "o4")):
         out = _openai(prompt, model)
         if out:
+            _used(model)
             return out
         log(f"    ⚠️ {model} 실패 → gemini-2.5-flash 로 폴백")
-        return _gemini(prompt, "gemini-2.5-flash")
-    return _gemini(prompt, model)
+        fb = _gemini(prompt, "gemini-2.5-flash")
+        if fb:
+            _used("gemini-2.5-flash (폴백)")
+        return fb
+    out = _gemini(prompt, model)
+    if out:
+        _used(model)
+    return out
+
+
+_USED = set()
+
+
+def _used(model):
+    """실행당 한 번만 찍는다 — 어느 제공자로 돌았는지 로그로 확인 가능해야 한다."""
+    if model not in _USED:
+        _USED.add(model)
+        log(f"    🤖 분석 모델: {model}")
 
 
 def _openai(prompt: str, model: str) -> str | None:
