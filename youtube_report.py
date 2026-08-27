@@ -1050,9 +1050,15 @@ def _process_channel(channel: dict, today: str):
     # 무음 실패 방지: 처리 대상이 있었는데 하나도 못 받았으면 인프라 문제(프록시 만료·쿠키·차단)다.
     # 2026-08-12~17 Webshare 402 로 자막이 5일간 0개였는데 워크플로가 success 로 떠서 아무도 몰랐다.
     save_failed(failed)          # 종료 경로와 무관하게 카운터는 남겨야 누적된다
+    # 표본이 1~2개면 '전부 실패' 가 인프라 장애의 근거가 못 된다. 자막이 아예 없는
+    # 생방송 한 편이 걸려도 전부 실패가 되어 프로세스를 죽이고 남은 채널까지 못 돌았다
+    # (2026-08-28 실제 발생: 오선 채널 1편 실패로 뒤 4개 채널이 아예 실행 안 됨).
+    # 채널 단위로 예외를 올리고, 런 실패 여부는 _main 의 '전 채널 실패' 판정에 맡긴다.
     if target and not results:
-        log(f"❌ 처리 대상 {len(target)}개 전부 자막 실패 — 프록시/쿠키/차단 확인 필요 (종료코드 1)")
-        raise SystemExit(1)
+        if len(target) >= 3:
+            raise RuntimeError(f"처리 대상 {len(target)}개 전부 자막 실패 — 프록시/쿠키/차단 확인")
+        log(f"⚠️ 대상 {len(target)}개 전부 자막 실패 — 표본이 작아 장애로 보지 않고 넘어감")
+        return
 
     order = {v["id"]: i for i, v in enumerate(target)}
     results.sort(key=lambda r: order[r["video"]["id"]])
