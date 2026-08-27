@@ -262,8 +262,10 @@ def _clean_title(t, limit=40):
     if m:                                                    # 코너가 비어 있을 때만 태그로 승격
         lead, t = m.group(1).strip(), m.group(2).strip()
         seg = seg or lead
-    t = t.split("|")[0].strip()                             # 게스트 이름·직함 꼬리 제거
+    # 구분자로 세로바(|) 말고 한글 자모 'ㅣ'(U+3163) 나 전각(｜) 을 쓰는 제목이 섞여 있다
+    t = re.split(r"[|｜ㅣ]", t)[0].strip()                    # 게스트 이름·직함 꼬리 제거
     t = re.sub(r"\s*-\s*20\d\d/\d\d/\d\d\s*$", "", t)    # 끝의 날짜
+    t = re.sub(r"\s*\([^()]{0,30}\d부\)\s*$", "", t)         # 끝의 (게스트 N부)
     t = re.sub(r"\s{2,}", " ", t).strip(" -·|")
     if len(t) > limit:
         t = t[:limit].rstrip() + "…"
