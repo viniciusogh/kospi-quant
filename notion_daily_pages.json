@@ -894,5 +894,16 @@
       "futuresnow": "3c84a006-32f8-8189-8c2f-f0b64714dee2",
       "moneyinside": "3c84a006-32f8-81cc-ad9a-c56bc0dca644"
     }
+  },
+  "2026-08-28": {
+    "page_id": "3c94a006-32f8-8186-9ca1-ec5fa81b4a1c",
+    "channels": {
+      "3proTV": "3c94a006-32f8-817c-a109-fedeb13cc57d",
+      "futuresnow": "3c94a006-32f8-813e-8236-f9feb5393ee2",
+      "moneyinside": "3c94a006-32f8-815b-8176-e8930f06237e",
+      "donkkang": "3c94a006-32f8-810b-9330-e80e30228584",
+      "moneydo": "3c94a006-32f8-8177-b342-f7c2097ac6e1",
+      "chaegookjang": "3c94a006-32f8-816e-ab84-fe35bc97d144"
+    }
   }
 }
