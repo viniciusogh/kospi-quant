@@ -45,6 +45,7 @@ jobs:
       - name: Run YouTube analysis
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
           NOTION_DAILY_DB_ID: ${{ secrets.NOTION_DAILY_DB_ID }}

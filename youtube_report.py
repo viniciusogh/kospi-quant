@@ -58,6 +58,10 @@ ANALYSIS_CACHE       = os.path.join(_BASE_DIR, "latest_youtube_analysis.json")  
 COOKIES_FILE         = os.path.join(_BASE_DIR, "youtube_cookies.txt")
 LOCK_FILE            = os.path.join(_BASE_DIR, "youtube_report.lock")  # 중복 실행 방지
 MAX_TRANSCRIPT_CHARS = 25000
+# 영상 분석 모델. 실제 자막 1건으로 3종 비교(2026-08-28) 후 gpt-5.4-mini 채택 —
+# flash 와 속도 동급(6.1초 vs 5.8초)인데 화자 식별이 정확했다. gpt-5.5 는 26초로 4배 느리고
+# 출력 토큰도 2.4배. 이 작업은 추론보다 '정해진 형식 준수 + 압축' 이라 큰 모델의 이점이 적다.
+YT_MODEL = os.environ.get("YT_MODEL", "gpt-5.4-mini")
 # 채널당 1회 상한. 15 였을 때 3proTV 하나가 14편으로 일일 한도의 70% 를 먹고
 # 오선·머니인사이드가 밀렸다(2026-08-27) → 6 으로 낮춰 6개 채널이 골고루 들어오게 한다.
 # 한 채널의 밀린 분은 다음 정시 실행에서 이어 처리된다.
@@ -281,8 +285,6 @@ def _clean_title(t, limit=40):
 # Gemini 분석
 # ==========================
 def analyze_with_gemini(title: str, transcript: str, date: str, channel_name: str) -> str | None:
-    client = genai.Client(api_key=GEMINI_API_KEY)
-
     prompt = f"""아래는 한국 주식 투자 유튜브 채널 {channel_name} 영상의 자막입니다.
 이 영상을 **읽는 사람이 흐름을 한눈에 파악할 수 있게** 역피라미드(결론 먼저) 구조로 정리해주세요.
 
@@ -295,6 +297,9 @@ def analyze_with_gemini(title: str, transcript: str, date: str, channel_name: st
   · **전문용어·영어약어(디파이·레이어2·cBTC·MiCA 등)는 처음 나올 때 괄호로 한 번 풀 것.** 예: "MiCA(EU 가상자산 규제법)". 못 풀면 그 개념을 아예 빼라.
   · **"과거엔 이랬는데 지금은 이렇다" 대비**로 변화를 또렷하게. 예: "예전엔 신기술 자랑만 해도 10배 뛰었지만, 이제는 실제로 돈 버는 프로젝트만 오른다."
   · **한 문장에 개념 하나, 짧게.** 만연체·미사여구·수식어 남발 금지. 한 문단 5줄 넘으면 쪼개라.
+  · **미확인 정보는 미확인이라고 쓸 것.** 자막이 "~보도", "~한다는 소식", "확인되지 않았다" 로
+    말한 것을 사실처럼 단정하지 마라. 근거 불릿에 `공식 확인 없음` 처럼 한 조각 덧붙여라.
+    (비교 테스트에서 큰 모델만 이걸 지켰다 — 휴전 '보도' 를 확정 사실로 쓰면 판단이 왜곡된다.)
   · **숫자는 지어내지 말 것 (가장 흔한 사고).** 복잡한 통계(예: 0.8 엑사바이트, 웨이퍼 66만 장)는 과감히 생략하고 "훨씬 많이·폭등·급감" 같은 방향어로 옮겨라. 자막에 그대로 나온 숫자만 인용하고, "3배" 같은 비율을 직접 계산해 만들지 말 것 — 자막에 "3배"라고 안 했으면 "3배"라 쓰지 마라. 방향만 맞으면 충분하다.
 
 ⚠️ 제목·게시일은 별도 표시되므로 **첫 줄에 제목 반복 금지**. 바로 아래 구조로 시작.
@@ -340,22 +345,64 @@ def analyze_with_gemini(title: str, transcript: str, date: str, channel_name: st
 자막:
 {transcript}"""
 
-    for attempt in range(2):   # 최대 2회만 재시도 (무한 대기 방지)
+    return _llm(prompt, YT_MODEL)
+
+
+def _llm(prompt: str, model: str) -> str | None:
+    """모델 이름으로 제공자를 고른다. gpt-*/o* → OpenAI, 그 외 → Gemini.
+    OpenAI 가 죽으면(크레딧 소진 등) Gemini 로 떨어져 리포트 자체는 살린다 —
+    2026-08-27 에 실제로 OpenAI 크레딧 0 으로 429 를 맞았다."""
+    if model.startswith(("gpt-", "o3", "o4")):
+        out = _openai(prompt, model)
+        if out:
+            return out
+        log(f"    ⚠️ {model} 실패 → gemini-2.5-flash 로 폴백")
+        return _gemini(prompt, "gemini-2.5-flash")
+    return _gemini(prompt, model)
+
+
+def _openai(prompt: str, model: str) -> str | None:
+    key = os.environ.get("OPENAI_API_KEY")
+    if not key:
+        log("    ⚠️ OPENAI_API_KEY 없음")
+        return None
+    try:
+        from openai import OpenAI
+    except ImportError:
+        log("    ⚠️ openai 패키지 없음 (requirements.txt 확인)")
+        return None
+    c = OpenAI(api_key=key)
+    for attempt in range(2):
         try:
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt,
-            )
-            return response.text.strip()
+            r = c.chat.completions.create(model=model, max_completion_tokens=12000,
+                                          messages=[{"role": "user", "content": prompt}])
+            return (r.choices[0].message.content or "").strip() or None
+        except Exception as e:
+            err = str(e)
+            if "429" in err and "no credits" not in err.lower():
+                log(f"    OpenAI 한도 → 30초 대기 후 재시도 ({attempt+1}/2)")
+                time.sleep(30)
+            else:
+                log(f"    OpenAI 오류: {err[:150]}")
+                break
+    return None
+
+
+def _gemini(prompt: str, model: str) -> str | None:
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    for attempt in range(2):
+        try:
+            r = client.models.generate_content(model=model, contents=prompt)
+            return (r.text or "").strip() or None
         except Exception as e:
             err = str(e)
             if "429" in err:
                 m = re.search(r"retry in (\d+(?:\.\d+)?)s", err)
-                wait = min(float(m.group(1)) + 3 if m else 60, 65)  # 최대 65초
+                wait = min(float(m.group(1)) + 3 if m else 60, 65)
                 log(f"    Gemini 할당량 초과 → {wait:.0f}초 대기 후 재시도 ({attempt+1}/2)")
                 time.sleep(wait)
             else:
-                log(f"    Gemini 오류: {e}")
+                log(f"    Gemini 오류: {err[:150]}")
                 break
     return None
 
