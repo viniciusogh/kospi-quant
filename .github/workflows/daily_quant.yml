@@ -120,6 +120,16 @@ jobs:
         run: python momentum_daily.py
         continue-on-error: true
 
+      # 검증 게이트 — 깨진 산출물은 커밋 전에 차단한다 (2026-08-29).
+      # 위 스텝 다수가 continue-on-error 라 실패가 초록불에 묻혔다: 자막 5일 0개·NameError
+      # 8일 정지가 며칠 뒤 대시보드 경고로야 발견됐다. 스텝 성공여부가 아니라 산출물로 판정한다
+      # — 성공하고도 쓰레기를 내놓는 게 무음 실패의 본질이다.
+      # 여기서 죽으면 아래 커밋 스텝 전부 skip → 하위 소비자(investment-chatbot)는 어제 데이터
+      # 를 유지한다. 낡은 데이터가 깨진 데이터보다 안전하다.
+      - name: 산출물 검증 게이트 (수급·퀄리티)
+        if: always()
+        run: python sanity_check.py supply quality
+
       - name: Commit latest KOSPI supply CSV
         run: |
           git config user.name "github-actions[bot]"
@@ -151,6 +161,11 @@ jobs:
           git add latest_수급_reco.csv latest_quality_reco.csv 2>/dev/null || true
           git diff --staged --quiet || git commit -m "Auto-update: reco CSVs $(date +%Y-%m-%d)"
           for i in 1 2 3; do git pull --rebase --autostash && git push && break || sleep 5; done
+
+      # 모멘텀은 수급 CSV 파생이라 위 게이트 통과가 전제다. 별도 게이트로 두어 모멘텀만
+      # 깨진 날에도 수급·퀄리티 커밋은 이미 끝나 있게 한다.
+      - name: 산출물 검증 게이트 (모멘텀)
+        run: python sanity_check.py momentum
 
       - name: Commit momentum reco CSV
         run: |

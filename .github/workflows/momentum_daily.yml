@@ -62,6 +62,12 @@ jobs:
         run: python momentum_daily.py
         continue-on-error: true
 
+      # 검증 게이트 — 깨진 산출물은 커밋 전에 차단 (2026-08-29). v20g 스텝이
+      # continue-on-error 라 실패가 묻힌다.
+      - name: 산출물 검증 게이트 (모멘텀)
+        if: always()
+        run: python sanity_check.py momentum
+
       - name: Commit latest momentum reco CSV
         run: |
           git config user.name "github-actions[bot]"
