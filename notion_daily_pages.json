@@ -922,5 +922,11 @@
       "moneyinside": "3cb4a006-32f8-8161-b8d0-eef66dd865af",
       "3proTV": "3cc4a006-32f8-8127-932f-f7fb723787db"
     }
+  },
+  "2026-08-31": {
+    "page_id": "3cc4a006-32f8-81dd-b5a6-c0094656cfdb",
+    "channels": {
+      "3proTV": "3cc4a006-32f8-81c0-b362-fbe31fc22379"
+    }
   }
 }
