@@ -409,9 +409,16 @@ def _blocks(data):
         parts = [f"{b} {v['eval']:,.0f}원({v['n']})" for b, v in data["by_broker"].items()]
         out.append({"object": "block", "type": "paragraph",
                     "paragraph": {"rich_text": _rt("증권사별: " + "  ·  ".join(parts), color="gray")}})
-    out.append({"object": "block", "type": "table", "table": {
-        "table_width": 4, "has_column_header": True, "has_row_header": False,
-        "children": _cell_rows(data)}})
+    if data["positions"]:
+        out.append({"object": "block", "type": "table", "table": {
+            "table_width": 4, "has_column_header": True, "has_row_header": False,
+            "children": _cell_rows(data)}})
+    else:
+        out.append({"object": "block", "type": "callout", "callout": {
+            "icon": {"type": "emoji", "emoji": "💤"}, "color": "gray_background",
+            "rich_text": _rt("보유 종목 없음 (전량 매도)", True)
+                         + _rt("\n조회 실패로 0종목이 나올 수도 있습니다. 계좌에 종목이 있는데 "
+                               "이 문구가 보이면 토스 API 연결을 확인하세요.", color="gray")}})
     sig = (f"⭐ 오늘 모멘텀 리포트 추천과 겹치는 보유: "
            + ", ".join(f"{r['name']}({'/'.join(r['signal'])})" for r in held)) if held else \
           "⭐ 오늘 리포트 추천과 겹치는 보유 종목 없음"
@@ -440,7 +447,15 @@ def main():
     rows += toss_holdings()
     rows += manual_rows()
     if not rows:
-        print("보유 종목 없음 (KIS_CANO 미설정 + holdings_manual.csv 없음)")
+        # 조용히 return 하면 노션에 직전 스냅샷이 남아 '이미 판 종목'이 보유 중으로 보인다
+        # (2026-08-31: 오전 매도 후에도 10:30 시점 58만원이 최신인 것처럼 표시됨).
+        print("보유 종목 없음 — 전량 매도이거나 조회 실패. 노션을 '보유 없음'으로 갱신한다.")
+        empty = {"asof": datetime.now(KST).strftime("%Y-%m-%d %H:%M"),
+                 "positions": [], "by_broker": {},
+                 "total": {"eval": 0.0, "cost": 0.0, "pl": 0.0, "ret": 0.0}}
+        json.dump(empty, open(OUT, "w"), ensure_ascii=False, indent=1)
+        if os.environ.get("NOTION_API_KEY"):
+            upload_notion(empty)
         return
     tok_px = token()                   # 시세는 기존 리포트용 키로 (매매키에 시세권한 없을 수 있음)
     fill_price(tok_px, rows)

@@ -214,7 +214,14 @@ def main():
     data = json.load(open(PORTFOLIO))
     positions = data.get("positions") or []
     if not positions:
-        M.log("보유 종목 없음 — 리포트 생략")
+        # 그냥 return 하면 전날 토글이 남아 이미 판 종목이 보유 중으로 보인다
+        # (2026-08-31 전량 매도 후 GS건설·BGF리테일 분석이 그대로 남았다).
+        M.log("보유 종목 없음 — 토글을 '보유 없음'으로 교체")
+        D.add_report(TITLE, [{"object": "block", "type": "callout", "callout": {
+            "icon": {"type": "emoji", "emoji": "💤"}, "color": "gray_background",
+            "rich_text": _rt("보유 종목 없음 (전량 매도)", True)
+                         + _rt(f"\n기준 {data.get('asof','')} · 매수하면 다시 채워집니다",
+                               color="gray")}}], color="default")
         return
 
     tok = token()
