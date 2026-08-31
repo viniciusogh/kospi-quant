@@ -214,14 +214,20 @@ def _stamped(t):
 
 
 def _retitle(block_id, title):
-    """이미 있는 토글의 제목만 갱신 시각으로 교체."""
+    """이미 있는 **토글 블록**의 제목만 갱신 시각으로 교체. 성공 여부를 돌려준다.
+    상태코드를 안 보면 400(예: 대상이 토글이 아닌 페이지)이 조용히 묻힌다."""
     try:
-        requests.patch(f"{API}/blocks/{block_id}", headers=_h(), timeout=25,
-                       json={"toggle": {"rich_text": [{"type": "text",
-                             "text": {"content": title},
-                             "annotations": {"bold": True}}]}})
+        r = requests.patch(f"{API}/blocks/{block_id}", headers=_h(), timeout=25,
+                           json={"toggle": {"rich_text": [{"type": "text",
+                                 "text": {"content": title},
+                                 "annotations": {"bold": True}}]}})
+        if r.status_code != 200:
+            print(f"  ⚠️ 제목 갱신 실패 ({r.status_code}): {r.text[:120]}")
+            return False
+        return True
     except Exception as e:
         print(f"  ⚠️ 제목 갱신 실패: {str(e)[:60]}")
+        return False
 
 
 SLOT_RULES = [(1, "내 보유종목"), (2, "핵심 요약"), (3, "섹터 장세"),

@@ -830,13 +830,24 @@ def get_or_create_daily_page(today: str) -> str | None:
     _save_daily_pages(pages)
     return page_id
 
-def _touch_root_title(page_id: str | None, today: str):
-    """부모 유튜브 토글의 '갱신 HH:MM' 만 현재 시각으로 올린다(영상이 실제로 추가될 때 호출)."""
-    if not page_id:
+def _touch_root_title(today: str):
+    """부모 유튜브 토글의 '갱신 HH:MM' 을 현재 시각으로 올린다.
+
+    **업로드가 성공한 뒤에만** 부른다 — 먼저 부르면 append 가 실패해도 시각만 최신이 되어
+    고치려던 오해(제목이 실제 상태와 다름)를 그대로 재현한다.
+    대시보드 모드에서만 유효하다. 일반 페이지 모드의 page_id 에 토글용 PATCH 를 보내면
+    400 이고, 페이지 제목은 properties.title 로 바꿔야 한다.
+    """
+    if os.environ.get("YT_TARGET", "dashboard") != "dashboard":
+        return
+    pages = _load_pages()
+    entry = _get_entry(pages, today)
+    pid = entry.get("page_id") if isinstance(entry, dict) else None
+    if not pid:
         return
     try:
         import dashboard as D
-        D._retitle(page_id, D._stamped(f"📺 {today} 유튜브 분석"))
+        D._retitle(pid, D._stamped(f"📺 {today} 유튜브 분석"))
     except Exception as e:
         log(f"  ⚠️ 유튜브 토글 제목 갱신 실패: {str(e)[:60]}")
 
@@ -858,10 +869,6 @@ def get_or_create_channel_toggle(today: str, channel: dict) -> str | None:
         entry = _get_entry(pages, today)
         if entry is None:
             return None
-    else:
-        # 캐시된 부모를 재사용할 때도 제목의 갱신 시각은 올려야 한다. 안 그러면
-        # 하루 종일 영상이 추가되는데 제목은 첫 실행 시각(08:01)에 멈춘다(2026-08-31 지적).
-        _touch_root_title(entry.get("page_id"), today)
 
     slug = channel["slug"]
     if slug in entry.get("channels", {}):
@@ -1126,6 +1133,7 @@ def _process_channel(channel: dict, today: str):
         processed.update(processed_now)
         save_processed(processed)
         save_failed(failed)          # 포기 처리분·재시도 카운트 반영
+        _touch_root_title(today)     # 업로드가 실제로 끝난 뒤에만 '갱신' 시각을 올린다
         log(f"🎉 완료! {len(processed_now)}개 영상 분석 이어붙이기 완료")
 
 if __name__ == "__main__":
