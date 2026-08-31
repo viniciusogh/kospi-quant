@@ -8,6 +8,11 @@ import _env  # .env 자동 로드
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+# Gemini HTTP 타임아웃(ms). 없으면 응답이 안 올 때 무한 대기한다 — 2026-08-28 holdings_report 가
+# Gemini 연결에 3일 6시간 물려 좀비로 남았고, launchd 가 이후 실행을 전부 건너뛰었다.
+GENAI_TIMEOUT_MS = int(os.environ.get("GENAI_TIMEOUT_MS", "180000"))
+
+
 KST = timezone(timedelta(hours=9))   # GitHub Actions 러너는 UTC, 모든 날짜·시각은 KST 기준
 
 # ==========================
@@ -756,7 +761,7 @@ def summarize_supply(reco_kor: pd.DataFrame) -> str:
     )
     try:
         from google import genai
-        client = genai.Client(api_key=GEMINI_API_KEY)
+        client = genai.Client(api_key=GEMINI_API_KEY, http_options={"timeout": GENAI_TIMEOUT_MS})
         resp = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
         return (resp.text or "").strip()
     except Exception as e:

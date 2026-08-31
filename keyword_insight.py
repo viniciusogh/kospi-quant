@@ -7,6 +7,11 @@
 """
 import os, re, json, collections
 
+# Gemini HTTP 타임아웃(ms). 없으면 응답이 안 올 때 무한 대기한다 — 2026-08-28 holdings_report 가
+# Gemini 연결에 3일 6시간 물려 좀비로 남았고, launchd 가 이후 실행을 전부 건너뛰었다.
+GENAI_TIMEOUT_MS = int(os.environ.get("GENAI_TIMEOUT_MS", "180000"))
+
+
 CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "latest_keyword_insight.json")
 
 
@@ -73,7 +78,7 @@ def extract(txt, n_videos, top=28, log=print):
 {txt[:120000]}
 """
     try:
-        c = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        c = genai.Client(api_key=os.environ["GEMINI_API_KEY"], http_options={"timeout": GENAI_TIMEOUT_MS})
         r = c.models.generate_content(
             model="gemini-2.5-flash", contents=prompt,
             config={"max_output_tokens": 4000, "thinking_config": {"thinking_budget": 0}})

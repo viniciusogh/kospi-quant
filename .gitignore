@@ -70,3 +70,5 @@ latest_keywords.png
 latest_keyword_insight.json
 latest_holdings.png
 latest_sector_table.png
+.agents/
+skills-lock.json

@@ -17,6 +17,11 @@ from youtube_transcript_api.proxies import WebshareProxyConfig
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+# Gemini HTTP 타임아웃(ms). 없으면 응답이 안 올 때 무한 대기한다 — 2026-08-28 holdings_report 가
+# Gemini 연결에 3일 6시간 물려 좀비로 남았고, launchd 가 이후 실행을 전부 건너뛰었다.
+GENAI_TIMEOUT_MS = int(os.environ.get("GENAI_TIMEOUT_MS", "180000"))
+
+
 # 모든 socket 작업에 60초 default timeout — 외부 API hang 으로 인한 좀비 누적 방지
 socket.setdefaulttimeout(60)
 
@@ -433,7 +438,7 @@ def _openai(prompt: str, model: str) -> str | None:
 
 
 def _gemini(prompt: str, model: str) -> str | None:
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=GEMINI_API_KEY, http_options={"timeout": GENAI_TIMEOUT_MS})
     for attempt in range(2):
         try:
             r = client.models.generate_content(model=model, contents=prompt)

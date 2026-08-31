@@ -12,7 +12,10 @@ set -a
 set +a
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] ─── 실행 ───" >> "$LOG"
-/opt/homebrew/bin/python3 sector_dashboard.py >> "$LOG" 2>&1
+# 하드 상한 1200s — 응답 없는 API 에 물려 좀비로 남으면 launchd 가 이후 실행을 전부 막는다
+# (2026-08-28 holdings_report 가 Gemini 연결에 3일 6시간 물려 4일치 리포트가 누락됐다).
+# macOS 기본 bash 엔 timeout(1) 이 없어 perl alarm 을 쓴다.
+perl -e 'alarm shift; exec @ARGV' 1200 /opt/homebrew/bin/python3 sector_dashboard.py >> "$LOG" 2>&1
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] 종료(exit=$?)" >> "$LOG"
 
 if [ "$(wc -l < "$LOG")" -gt 3000 ]; then

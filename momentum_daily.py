@@ -10,6 +10,11 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from momentum_backtest import token, _get, BASE, APP_KEY, APP_SECRET, KST
 
+# Gemini HTTP 타임아웃(ms). 없으면 응답이 안 올 때 무한 대기한다 — 2026-08-28 holdings_report 가
+# Gemini 연결에 3일 6시간 물려 좀비로 남았고, launchd 가 이후 실행을 전부 건너뛰었다.
+GENAI_TIMEOUT_MS = int(os.environ.get("GENAI_TIMEOUT_MS", "180000"))
+
+
 
 def _excluded(name, sector):
     """레포트=개별주. ETF/ETN·우선주·스팩 제외."""
@@ -599,7 +604,7 @@ def gemini_analyze(top10, flows, roes, cache, ebitdas=None, dranks=None):
     """
     from google import genai
     ebitdas = ebitdas or {}; dranks = dranks or {}
-    c = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    c = genai.Client(api_key=os.environ["GEMINI_API_KEY"], http_options={"timeout": GENAI_TIMEOUT_MS})
     today = datetime.now(KST); out = {}
     for _, r in top10.iterrows():
         code = r["code"]; fl = flows.get(code) or {}; roe = roes.get(code)
