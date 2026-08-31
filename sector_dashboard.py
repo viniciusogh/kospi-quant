@@ -188,19 +188,37 @@ def _pct(v, bold=False):
             "annotations": {"color": col, "bold": bold}}
 
 
+# 트리맵이 중립(회색)으로 칠하는 구간과 같은 기준. 부호만 보면 '+0.0%' 도 강세가 된다.
+NEUTRAL_PCT = 0.003
+
+
+def _rank_labels(agg):
+    """상단/하단 라벨. 전 섹터가 빠진 날 -0.1% 를 '강세' 로, 보합인 +0.0% 를 '강세' 로
+    부르면 오독한다(2026-08-31 실제 발생). 부호가 아니라 중립 구간(±0.3%)으로 판정한다."""
+    top_v, bot_v = agg["오늘"].iloc[0], agg["오늘"].iloc[-1]
+    hot = ("🔥 오늘 강세" if top_v >= NEUTRAL_PCT else
+           "🔻 전 섹터 하락 — 덜 빠진 순" if top_v < 0 else
+           "🔸 오늘 보합 — 상위 순")
+    cold = ("🧊 오늘 약세" if bot_v <= -NEUTRAL_PCT else
+            "🔺 전 섹터 상승 — 덜 오른 순" if bot_v > 0 else
+            "🔹 오늘 보합 — 하위 순")
+    return hot, cold
+
+
 def blocks(agg, tops, asof):
     """요약 콜아웃 + 한 줄 목록. 6열 표는 모바일에서 열이 잘리고 행이 여러 줄로 늘어난다
     (사용자 지적) → 목록으로. 전체 섹터는 트리맵이 담당하고 여기선 강세·약세만 짚는다."""
     hot = " · ".join(agg.head(3)["섹터"].tolist())
     cold = " · ".join(agg.tail(3)["섹터"].tolist()[::-1])
+    hot_lbl, cold_lbl = _rank_labels(agg)
     hot5 = " · ".join(agg.nlargest(3, "d5")["섹터"].tolist())
     flow = agg.nlargest(3, "순매수")["섹터"].tolist()
     header = [{"object": "block", "type": "callout", "callout": {
         "icon": {"type": "emoji", "emoji": "🔄"}, "color": "gray_background",
         "rich_text": [
-            {"type": "text", "text": {"content": f"🔥 오늘 강세: {hot}\n"},
+            {"type": "text", "text": {"content": f"{hot_lbl}: {hot}\n"},
              "annotations": {"bold": True}},
-            {"type": "text", "text": {"content": f"🧊 오늘 약세: {cold}\n"}},
+            {"type": "text", "text": {"content": f"{cold_lbl}: {cold}\n"}},
             {"type": "text", "text": {"content": f"🔄 5일 기준 강세(순환매): {hot5}\n"}},
             {"type": "text", "text": {"content": f"💰 순매수 유입 상위: {' · '.join(flow)}\n"}},
             {"type": "text", "text": {"content":
@@ -287,6 +305,8 @@ def main():
         groups.sort(key=lambda g: -g[2])
         png = os.path.join(_DIR, "latest_sector_treemap.png")
         strip = {
+            "hot_label": _rank_labels(agg)[0].split(" — ")[0].replace("🔥", "▲").replace("🔻", "▼"),
+            "cold_label": _rank_labels(agg)[1].split(" — ")[0].replace("🧊", "▼").replace("🔺", "▲"),
             "hot": [(r["섹터"], r["오늘"] * 100, tops.get(r["섹터"]) or [])
                     for _, r in agg.head(6).iterrows()],
             "cold": [(r["섹터"], r["오늘"] * 100, tops.get(r["섹터"]) or [])

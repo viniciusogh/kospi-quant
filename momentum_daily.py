@@ -196,14 +196,19 @@ def kospi_trend(tok):
     s = pd.Series(dict(rows)).sort_index()   # 날짜 오름차순
     c = s.iloc[-1]; ma200 = s.tail(200).mean(); ma120 = s.tail(120).mean()
     uptrend = (c >= ma200 and c >= ma120)   # 백테스트 레짐게이트 정의 (강세) — 비강세면 경고
+    # 200일선만 표시하던 탓에 '지수 6,789 / 200일선 5,996' 을 보고도 게이트가 막히는
+    # 이유를 알 수 없었다(2026-08-30). 두 선을 다 보여주고 어느 조건에서 걸렸는지 밝힌다.
     if uptrend:
-        txt, emo, color = "상승추세 (200·120일선 위) — 진입 우호", "📈", "green_background"
+        txt, emo, color = "상승추세 (200·120일선 위) — 게이트 통과", "📈", "green_background"
+        reason = ""
     elif c >= ma200:
-        txt, emo, color = "상승추세 (200일선 위·단기 조정) — 보통", "📊", "yellow_background"
+        txt, emo, color = "혼조 (200일선 위 · 120일선 아래) — 게이트 미충족", "📊", "yellow_background"
+        reason = f"120일선({ma120:,.0f})을 {(1-c/ma120)*100:.1f}% 밑돌아"
     else:
-        txt, emo, color = "하락추세 (200일선 아래) — 진입 주의", "📉", "orange_background"
-    return {"text": f"{txt}  ·  지수 {c:,.0f} / 200일선 {ma200:,.0f}", "emoji": emo,
-            "color": color, "uptrend": uptrend}
+        txt, emo, color = "하락추세 (200일선 아래) — 게이트 미충족", "📉", "orange_background"
+        reason = f"200일선({ma200:,.0f})을 {(1-c/ma200)*100:.1f}% 밑돌아"
+    return {"text": f"{txt}  ·  지수 {c:,.0f} / 200일선 {ma200:,.0f} / 120일선 {ma120:,.0f}",
+            "emoji": emo, "color": color, "uptrend": uptrend, "reason": reason}
 
 
 def score_today(code, tok):
@@ -890,10 +895,14 @@ def upload_notion(top, analysis=None, trend=None, flows=None, roes=None, deltas=
     ]
     if cash:     # 게이트 발동: 추세 이탈 → 추천 비우고 현금 메시지
         header.append({"object": "block", "type": "callout", "callout": {
+            # 실제로는 한쪽 선만 밑도는 경우가 흔한데 '200·120일선 아래' 라고 뭉뚱그려
+            # 리포트끼리 모순돼 보였다(2026-08-30: 200일선 위 · 120일선 아래였다).
             "rich_text": [{"type": "text", "text": {"content":
-                "🛑 추세 이탈 — 신규 진입 중단·전량 현금 권장. KOSPI 지수가 200·120일선 아래로 내려와 "
-                "비강세 구간입니다. 이 모멘텀 전략은 백테스트상 상승추세에서만 수익이 났고 비추세장에선 약했습니다. "
-                "추세가 200·120일선 위로 회복될 때까지 신규 매수를 멈추고 현금 비중을 높이세요. (오늘 추천 종목 없음)"},
+                "🛑 게이트 미충족 — 신규 진입 중단·전량 현금 권장. "
+                + ((trend or {}).get("reason") or "200·120일선 조건을 채우지 못해") +
+                " 게이트가 요구하는 강세 구간이 아닙니다. 이 전략은 백테스트상 상승추세에서만 수익이 났고 "
+                "비추세장에선 약했습니다. 지수가 200일선과 120일선을 **모두** 넘길 때까지 신규 매수를 멈추세요. "
+                "(오늘 추천 종목 없음)"},
                 "annotations": {"bold": True}}],
             "icon": {"type": "emoji", "emoji": "🛑"}, "color": "red_background"}})
     else:

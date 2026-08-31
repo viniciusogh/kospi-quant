@@ -241,8 +241,9 @@ def render(sectors, asof, out_path, w=1600, h=1400, strip=None):
         sa.add_patch(plt.Rectangle((0, 0), 100, 100, facecolor="#22252e",
                                    edgecolor="#3a3f4d", lw=1.2))
         for ci, (title, rows, accent) in enumerate(
-                [("▲ 오늘 강세", strip.get("hot", []), STRIP_UP),
-                 ("▼ 오늘 약세", strip.get("cold", []), STRIP_DOWN)]):
+                # 전 섹터 하락일엔 '강세' 가 아니라 '덜 빠짐' 이다 — 호출부가 라벨을 정해 넘긴다
+                [(strip.get("hot_label", "▲ 오늘 강세"), strip.get("hot", []), STRIP_UP),
+                 (strip.get("cold_label", "▼ 오늘 약세"), strip.get("cold", []), STRIP_DOWN)]):
             x0 = 2.5 + ci * 49.5
             sa.text(x0, 92, title, fontsize=13, fontweight="bold", color=INK)
             for ri, (sec, pct, stocks) in enumerate(rows[:6]):
