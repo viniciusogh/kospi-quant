@@ -830,6 +830,17 @@ def get_or_create_daily_page(today: str) -> str | None:
     _save_daily_pages(pages)
     return page_id
 
+def _touch_root_title(page_id: str | None, today: str):
+    """부모 유튜브 토글의 '갱신 HH:MM' 만 현재 시각으로 올린다(영상이 실제로 추가될 때 호출)."""
+    if not page_id:
+        return
+    try:
+        import dashboard as D
+        D._retitle(page_id, D._stamped(f"📺 {today} 유튜브 분석"))
+    except Exception as e:
+        log(f"  ⚠️ 유튜브 토글 제목 갱신 실패: {str(e)[:60]}")
+
+
 def get_or_create_channel_toggle(today: str, channel: dict) -> str | None:
     """
     오늘 통합 페이지 안의 채널 토글 block_id 반환.
@@ -847,6 +858,10 @@ def get_or_create_channel_toggle(today: str, channel: dict) -> str | None:
         entry = _get_entry(pages, today)
         if entry is None:
             return None
+    else:
+        # 캐시된 부모를 재사용할 때도 제목의 갱신 시각은 올려야 한다. 안 그러면
+        # 하루 종일 영상이 추가되는데 제목은 첫 실행 시각(08:01)에 멈춘다(2026-08-31 지적).
+        _touch_root_title(entry.get("page_id"), today)
 
     slug = channel["slug"]
     if slug in entry.get("channels", {}):
