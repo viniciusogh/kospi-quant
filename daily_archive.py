@@ -257,13 +257,74 @@ def md_blocks(md):
     return out
 
 
+def _toggle(title, children, color="default"):
+    """노션 토글. children 은 100개/요청 한도가 있어 95개로 자른다."""
+    return {"object": "block", "type": "toggle", "toggle": {
+        "rich_text": _rt(title, True), "color": color, "children": children[:95]}}
+
+
+def report_sections(d):
+    """통합 대시보드가 만들던 내용을 이 페이지에서 직접 생성한다(사용자 요청).
+    스냅샷 복사가 아니라 원본 재료로 새로 쓴다."""
+    out = []
+    # 섹터 장세 — 전체 28개 표
+    if d.get("sector") is not None:
+        rows = [{"type": "table_row", "table_row": {"cells": [
+            _rt("섹터", True), _rt("당일", True), _rt("5일", True), _rt("20일", True),
+            _rt("순매수", True), _rt("주도주", True)]}}]
+        for _, r in d["sector"].iterrows():
+            col = "red" if r["오늘"] > 0 else ("blue" if r["오늘"] < 0 else "gray")
+            rows.append({"type": "table_row", "table_row": {"cells": [
+                _rt(r["섹터"], True), _rt(f"{r['오늘']*100:+.1f}%", True, col),
+                _rt(f"{r['d5']*100:+.1f}%"), _rt(f"{r['d20']*100:+.1f}%"),
+                _rt(f"{r['순매수']/100:+,.0f}억"), _rt(str(r["주도주"]))]}})
+        out.append(_toggle("🔄 섹터 장세 (순환매) — 전체 28개", [
+            {"object": "block", "type": "table", "table": {
+                "table_width": 6, "has_column_header": True,
+                "has_row_header": False, "children": rows}}], "gray_background"))
+
+    # 모멘텀 상위 10 — 종목별 지표·수급·촉매
+    if d.get("cands"):
+        kids = []
+        for i, c in enumerate(d["cands"], 1):
+            col = "red" if c["chg"] > 0 else ("blue" if c["chg"] < 0 else "gray")
+            kids.append(_para(
+                _rt(f"{i}. {c['name']} ", True) + _rt(f"{c['chg']*100:+.1f}%", True, col)
+                + _rt(f" ({c['code']}) · {c['sector']} · {c['price']:,.0f}원", color="gray")))
+            kids.append(_para(_rt(
+                f"    5일 {c['ret5']*100:+.1f}% · 20일 {c['ret20']*100:+.1f}% · "
+                f"60일고점대비 {(c['hi60']-1)*100:+.1f}% · "
+                f"외인 {c['frgn5']:+,.0f}억 · 기관 {c['orgn5']:+,.0f}억 · 개인 {c['prsn5']:+,.0f}억",
+                color="gray")))
+            if c.get("한줄"):
+                kids.append(_para(_rt("    " + c["한줄"][:400])))
+        out.append(_toggle("🚀 모멘텀 상위 10 — 지표·수급·투자포인트", kids, "gray_background"))
+
+    # 유튜브 — 키워드 급증 + 영상별 분석
+    yt = []
+    if d.get("kw"):
+        for w, cnt, kind, why, v in d["kw"][:15]:
+            lift = "NEW" if v is None else f"{v:.1f}배"
+            yt.append(_bul(_rt(f"{w} ", True) + _rt(lift, True, "red" if (v and v >= 2) else "gray")
+                           + _rt(f" · {cnt}회 — {why[:170]}", color="gray")))
+    for v in (d.get("yt") or [])[:12]:
+        yt.append(_toggle(f"[{v['ch']}] {v['title'][:70]}",
+                          md_blocks(v["analysis"][:6000]) or [_para(_rt("분석 없음"))]))
+    if yt:
+        out.append(_toggle(f"📺 유튜브 분석 — 키워드 {len(d.get('kw') or [])}개 · 영상 {len(d.get('yt') or [])}편",
+                           yt, "gray_background"))
+    return out
+
+
 def build_blocks(d, report, pick, gate_ok):
     b = [{"object": "block", "type": "callout", "callout": {
         "icon": {"type": "emoji", "emoji": "🧭"},
         "color": "green_background" if gate_ok else "red_background",
         "rich_text": _rt(f"게이트 {'통과 — 신규 진입 가능' if gate_ok else '미충족 — 신규 진입 보류'}", True)
                      + _rt(f"\n{(d.get('trend') or {}).get('text','')}", color="gray")}}]
-    b += md_blocks(report)
+    # 종합 레포트는 토글 하나로 (사용자 요청) — 펼치면 전문
+    b.append(_toggle("📊 오늘의 종합 레포트 — 펼쳐 보기", md_blocks(report), "blue_background"))
+    b += report_sections(d)
     if pick:
         b.append({"object": "block", "type": "callout", "callout": {
             "icon": {"type": "emoji", "emoji": "📌"}, "color": "gray_background",
@@ -314,7 +375,7 @@ def evaluate():
     tok = token()
     q = requests.post(f"{API}/databases/{DB}/query", headers=_H, timeout=30,
                       json={"filter": {"property": "종목코드", "rich_text": {"is_not_empty": True}},
-                            "sorts": [{"property": "날짜", "direction": "descending"}], "page_size": 60})
+                            "sorts": [{"property": "날짜", "direction": "descending"}], "page_size": 100})
     n = 0
     for p in q.json().get("results", []):
         pr = p["properties"]
