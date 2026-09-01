@@ -940,5 +940,11 @@
       "moneydo": "3ce4a006-32f8-8188-8756-f3ce6e0ff515",
       "chaegookjang": "3ce4a006-32f8-81e6-9976-d47d1f80f2f6"
     }
+  },
+  "2026-09-02": {
+    "page_id": "3ce4a006-32f8-810f-a1af-f528e304da62",
+    "channels": {
+      "3proTV": "3ce4a006-32f8-81e1-a38c-f209c66bc049"
+    }
   }
 }
