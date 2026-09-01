@@ -288,6 +288,18 @@ def main():
             f"{datetime.now(KST).strftime('%H:%M')}")
     agg, tops = aggregate(m)
     M.log(f"  섹터 {len(agg)}개 집계 (종목 {len(m)}개)")
+    # 섹터 집계를 이력으로 append — 매 실행 덮어써서 과거가 안 남던 문제(2026-09-01).
+    # 일일 아카이브와 나중 백테스트의 재료다.
+    try:
+        hist = os.path.join(_DIR, "sector_history.csv")
+        h = agg.copy()
+        h.insert(0, "date", asof[:10])
+        h["주도주"] = [((tops.get(sec) or [("", 0)])[0][0]) for sec in h["섹터"]]
+        h.to_csv(hist, mode="a", header=not os.path.exists(hist), index=False, encoding="utf-8-sig")
+        M.log(f"  📁 섹터 이력 저장 ({len(h)}행)")
+    except Exception as e:
+        M.log(f"  ⚠️ 섹터 이력 저장 실패: {str(e)[:70]}")
+
     header, rows = blocks(agg, tops, asof)
     tid = D.add_report(f"🔄 {asof} 섹터 장세 (순환매)", header)
     if not tid:

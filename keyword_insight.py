@@ -155,7 +155,13 @@ def spike(date, items, min_days=2, log=print):
         log(f"  급증도 보류 — 과거 표본 {len(past)}일 (최소 {min_days}일 필요)")
         return [(w, c, k, why, None) for w, c, k, why in items]
     today = h.get(date) or {}
-    tchars = max(today.get("chars", 1), 1)
+    tchars = today.get("chars") or 0
+    if tchars < 1000:
+        # 오늘 기록이 없으면 max(...,1) 로 1자가 되어 만자당 빈도가 1만배로 뻥튀김한다
+        # (2026-09-01: '2차전지 3,412,101배' 로 리포트에 나갔다). 호출자가 record_day 를
+        # 안 했을 수 있으므로 여기서 보류한다 — 틀린 배수보다 배수 없음이 낫다.
+        log(f"  급증도 보류 — {date} 기록 없음(chars={tchars}). record_day 를 먼저 호출해야 한다")
+        return [(w, c, k, why, None) for w, c, k, why in items]
     out = []
     for w, c, k, why in items:
         t_rate = c / tchars * 10000

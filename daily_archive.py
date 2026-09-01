@@ -16,6 +16,7 @@ import momentum_daily as M
 import dashboard as D
 from momentum_backtest import token, KST
 
+_DIR = os.path.dirname(os.path.abspath(__file__))
 DB = os.environ["NOTION_DAILY_DB_ID"]
 API = "https://api.notion.com/v1"
 _H = {"Authorization": f"Bearer {os.environ['NOTION_API_KEY']}",
@@ -41,118 +42,234 @@ def _bul(rich):
     return {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": rich}}
 
 
-def read_dashboard():
-    """대시보드 토글들을 긁어 원문을 보존한다. 종합 레포트의 근거이자 나중 재검증용."""
-    def kids(b, n=60):
-        return requests.get(f"{API}/blocks/{b}/children", headers=_H,
-                            params={"page_size": n}, timeout=30).json().get("results", [])
-    def tx(k):
-        t = k["type"]
-        return "".join(x["plain_text"] for x in k.get(t, {}).get("rich_text", []))
+def collect(tok):
+    """원본 파일에서 직접 재료를 모은다. 대시보드 스크랩이 아니라 소스에서 —
+    사용자가 '원문 스냅샷이 아니라 원문 자체' 를 원하고, 통합 대시보드는 안 살려도 된다고 했다."""
+    import pandas as pd
+    d = {}
+    d["trend"] = M.kospi_trend(tok)
 
-    _, _, _, mid, tail = D._layout(D.page_id())
-    out = {"보유": [tx(b) for b in mid if tx(b)]}
-    for b in tail:
-        if b["type"] != "toggle":
+    # 섹터: sector_history.csv 의 오늘 행
+    try:
+        h = pd.read_csv(os.path.join(_DIR, "sector_history.csv"), encoding="utf-8-sig")
+        h = h[h["date"] == h["date"].max()].sort_values("오늘", ascending=False)
+        d["sector"] = h
+    except Exception as e:
+        M.log(f"  ⚠️ 섹터 이력 없음: {str(e)[:60]}"); d["sector"] = None
+
+    # 모멘텀: 추천 CSV + 오늘 지표 + 수급 + 캐시된 촉매/리스크
+    cands = []
+    try:
+        r = pd.read_csv(os.path.join(_DIR, "latest_momentum_reco.csv"), dtype={"code": str})
+        cache = json.load(open(os.path.join(_DIR, "momentum_analysis.json"), encoding="utf-8"))
+        for _, x in r.head(10).iterrows():
+            code = str(x["code"]).zfill(6)
+            s2 = M.score_today(code, tok)
+            if not s2:
+                continue
+            fl = M.investor_flows(code, tok) or {}
+            a = cache.get(code, {})
+            cands.append({"name": x["종목명"], "code": code, "sector": x.get("섹터", "-"),
+                          "price": s2["price"], "chg": s2["chg"], "ret5": s2["ret5"],
+                          "ret20": s2["ret20"], "hi60": s2["hi60"],
+                          "per": s2.get("per"), "pbr": s2.get("pbr"),
+                          "frgn5": fl.get("frgn5", 0), "orgn5": fl.get("orgn5", 0),
+                          "prsn5": fl.get("prsn5", 0),
+                          "한줄": a.get("한줄", ""), "촉매": a.get("촉매", ""),
+                          "리스크": a.get("리스크", "")})
+    except Exception as e:
+        M.log(f"  ⚠️ 모멘텀 재료 실패: {str(e)[:70]}")
+    d["cands"] = cands
+
+    # 유튜브: 최신 분석본 + 키워드 급증
+    try:
+        y = json.load(open(os.path.join(_DIR, "latest_youtube_analysis.json"), encoding="utf-8"))
+        day = sorted(y)[-1]
+        vids = [v for ch in y[day].values() for v in ch]
+        d["yt_day"] = day
+        d["yt"] = [{"title": v["title"], "ch": v.get("channel_name", ""),
+                    "analysis": v.get("analysis", "")} for v in vids]
+    except Exception as e:
+        M.log(f"  ⚠️ 유튜브 재료 실패: {str(e)[:60]}"); d["yt"] = []
+    try:
+        import keyword_insight as KI
+        sys.path.insert(0, os.path.join(_DIR, "viz"))
+        import keywords as KW
+        txt, n = KW._load_text(os.path.join(_DIR, "latest_youtube_analysis.json"), days=2)
+        items = KI.extract(txt, n, top=25, log=lambda *a: None)
+        _today = datetime.now(KST).strftime("%Y-%m-%d")
+        KI.record_day(_today, txt, [w for w, _, _, _ in items])   # 오늘 표본을 먼저 남긴다
+        d["kw"] = KI.spike(_today, items, log=M.log)
+    except Exception as e:
+        M.log(f"  ⚠️ 키워드 재료 실패: {str(e)[:60]}"); d["kw"] = []
+    return d
+
+
+def _fmt_material(d):
+    """LLM 에 넘길 재료를 텍스트로. 숫자는 전부 우리가 계산한 값이다."""
+    L = []
+    t = d.get("trend") or {}
+    L.append(f"[게이트] {t.get('text','')} · 통과여부={t.get('uptrend')}")
+    if d.get("sector") is not None:
+        L.append("\n[섹터 28개 · 당일/5일/20일/순매수(백만)/주도주]")
+        for _, r in d["sector"].iterrows():
+            L.append(f"  {r['섹터']}: 당일 {r['오늘']*100:+.1f}% · 5일 {r['d5']*100:+.1f}% · "
+                     f"20일 {r['d20']*100:+.1f}% · 순매수 {r['순매수']/100:+,.0f}억 · 주도주 {r['주도주']}")
+    L.append("\n[모멘텀 상위 10 · 수급은 5일 누적 억원]")
+    for c in d["cands"]:
+        L.append(f"  {c['name']}({c['code']}, {c['sector']}) {c['price']:,.0f}원 · "
+                 f"당일 {c['chg']*100:+.1f}% · 5일 {c['ret5']*100:+.1f}% · 20일 {c['ret20']*100:+.1f}% · "
+                 f"60일고점대비 {(c['hi60']-1)*100:+.1f}% · 외인 {c['frgn5']:+,.0f} · 기관 {c['orgn5']:+,.0f} · "
+                 f"개인 {c['prsn5']:+,.0f}")
+        if c["한줄"]:
+            L.append(f"     투자포인트: {c['한줄'][:160]}")
+        if c["촉매"]:
+            L.append(f"     촉매: {c['촉매'].replace('||',' | ')[:220]}")
+        if c["리스크"]:
+            L.append(f"     리스크: {c['리스크'].replace('||',' | ')[:200]}")
+    if d.get("kw"):
+        L.append("\n[유튜브 키워드 급증]")
+        for w, cnt, kind, why, v in d["kw"][:12]:
+            lift = "NEW" if v is None else f"{v:.1f}배"
+            L.append(f"  {w} {lift} ({cnt}회) — {why[:90]}")
+    if d.get("yt"):
+        L.append(f"\n[유튜브 분석본 {d.get('yt_day','')} · {len(d['yt'])}편]")
+        for v in d["yt"][:8]:
+            L.append(f"  [{v['ch']}] {v['title'][:60]}")
+            L.append("   " + v["analysis"][:700].replace("\n", " ")[:700])
+    return "\n".join(L)
+
+
+PROMPT = """너는 한국 주식 애널리스트다. 아래 오늘의 실측 데이터만 근거로 **일일 종합 레포트**를 써라.
+
+핵심 원칙:
+- **숫자를 지어내지 마라.** 아래 데이터에 있는 값만 인용한다. 단위를 바꾸지 마라(억은 억으로).\n- 배수가 안 적힌 키워드는 배수를 추측해 쓰지 마라. 급증도 없이 언급만 한다.
+- **논리를 써라.** 숫자 나열이 아니라 "왜 이 종목인가, 왜 다른 것은 아닌가" 를 논증한다.
+- 게이트가 미충족이면 그 사실을 숨기지 말고, 그 전제에서 고른 '관찰 후보' 임을 명시한다.
+- 쉬운 말로. 개조식 명사종결. 만연체 금지.
+
+아래 형식을 정확히 지켜라 (마크다운):
+
+## 오늘 시장
+2~3문장. 지수·게이트 상태와 섹터 흐름을 연결해 "오늘 무슨 장이었나" 를 말한다.
+
+## 순환매 흐름
+- 어디서 어디로: 당일 강세 섹터와 5일/20일 흐름을 비교해 자금이 이동하는 방향을 짚는다. 3~4개 불릿.
+- 각 불릿은 `섹터명 당일% (20일%) — 해석` 형태로 수치를 넣는다.
+
+## 유튜브가 말하는 것
+- 급증 키워드 3~4개를 근거로 시장의 관심이 어디로 쏠렸는지. 각 불릿에 배수와 이유를 넣는다.
+- 모멘텀 후보와 겹치는 테마가 있으면 반드시 연결한다.
+
+## 수급이 좋은 종목
+- 외국인·기관이 동시에 사는 종목만 나열. 각각 `종목명 외인 +N억 / 기관 +N억 · 20일 +N%` 형태.
+- 반대로 대량 이탈이 있는 종목도 짚는다.
+
+## 오늘의 추천 — <종목명>(코드)
+**한 줄 결론** (45자 이내)
+그리고 근거를 3~5개 불릿으로. 각 불릿은 수치를 포함하고, 다음을 반드시 다뤄라:
+- 수급이 왜 이 종목에서 가장 깨끗한지
+- 과열이 아닌 근거 (20일 상승률·고점대비)
+- 섹터가 뒷받침하는지
+- 촉매(있으면)
+- 이 종목의 최대 리스크 1개
+
+## 왜 다른 종목은 아닌가
+후보 중 상위 4~5개를 각각 한 줄로 탈락시켜라. `종목명 — 탈락 사유(수치 포함)`.
+
+## 판단의 한계
+2~3문장. 이 조합 규칙이 백테스트되지 않았다는 점과, 게이트 상태가 뜻하는 바를 적는다.
+
+--- 오늘의 데이터 ---
+{material}
+"""
+
+
+def synthesize(d):
+    """LLM 으로 종합 레포트를 쓴다. 어제 손으로 쓴 한화 논증 수준을 목표로 한다
+    (사용자 지적: 숫자 나열만 있고 매수 논리가 없다)."""
+    material = _fmt_material(d)
+    prompt = PROMPT.replace("{material}", material)
+    model = os.environ.get("ARCHIVE_MODEL", "gpt-5.5")
+    try:
+        from openai import OpenAI
+        c = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+        r = c.chat.completions.create(model=model, max_completion_tokens=6000,
+                                      messages=[{"role": "user", "content": prompt}])
+        out = (r.choices[0].message.content or "").strip()
+        M.log(f"  🤖 종합 레포트 {model} · {len(out):,}자 · 재료 {len(material):,}자")
+        return out
+    except Exception as e:
+        M.log(f"  ⚠️ {model} 실패 → Gemini 폴백: {str(e)[:90]}")
+    try:
+        from google import genai
+        cc = genai.Client(api_key=os.environ["GEMINI_API_KEY"], http_options={"timeout": GENAI_TIMEOUT_MS})
+        r = cc.models.generate_content(model="gemini-2.5-flash", contents=prompt,
+                config={"max_output_tokens": 8000, "thinking_config": {"thinking_budget": 0}})
+        return (r.text or "").strip()
+    except Exception as e:
+        M.log(f"  ❌ 종합 실패: {str(e)[:90]}")
+        return ""
+
+
+def pick_from(report, cands):
+    """레포트의 '## 오늘의 추천 — 종목명(코드)' 에서 종목을 뽑는다."""
+    m = re.search(r"오늘의 추천[^\n]*?([가-힣A-Za-z0-9·\.]+)\s*\((\d{6})\)", report)
+    if m:
+        code = m.group(2)
+        for c in cands:
+            if c["code"] == code:
+                return c
+    return cands[0] if cands else None
+
+
+def _md_rt(t):
+    """**볼드** 만 처리."""
+    parts, cur, bold, i = [], "", False, 0
+    while i < len(t):
+        if t[i:i+2] == "**":
+            if cur:
+                parts.append({"type": "text", "text": {"content": cur}, "annotations": {"bold": bold}})
+                cur = ""
+            bold = not bold; i += 2; continue
+        cur += t[i]; i += 1
+    if cur:
+        parts.append({"type": "text", "text": {"content": cur}, "annotations": {"bold": bold}})
+    return parts or [{"type": "text", "text": {"content": t[:2000]}}]
+
+
+def md_blocks(md):
+    """마크다운 → 노션 블록. 레포트 본문을 페이지에 그대로 쓴다(스냅샷 아님)."""
+    out = []
+    for raw in md.split("\n"):
+        line = raw.rstrip()
+        if not line.strip():
             continue
-        title = tx(b)
-        key = ("섹터" if "섹터" in title else "모멘텀게이트" if "게이트" in title
-               else "모멘텀" if "모멘텀" in title else "유튜브" if "유튜브" in title
-               else "핵심요약" if "핵심 요약" in title else None)
-        if not key:
-            continue
-        rows = []
-        for k in kids(b["id"]):
-            if k["type"] == "table":
-                for r in kids(k["id"], 20):
-                    rows.append(" | ".join("".join(x["plain_text"] for x in c).replace("\n", " ")
-                                           for c in r["table_row"]["cells"]))
-            elif k["type"] == "toggle":
-                rows.append("▸ " + tx(k))
-            elif tx(k):
-                rows.append(tx(k))
-        out[key] = {"title": title, "rows": rows}
+        if line.startswith("## "):
+            out.append({"object": "block", "type": "heading_2", "heading_2": {"rich_text": _md_rt(line[3:])}})
+        elif line.startswith("### "):
+            out.append({"object": "block", "type": "heading_3", "heading_3": {"rich_text": _md_rt(line[4:])}})
+        elif line.lstrip().startswith(("- ", "* ")):
+            out.append({"object": "block", "type": "bulleted_list_item",
+                        "bulleted_list_item": {"rich_text": _md_rt(line.lstrip()[2:])}})
+        else:
+            out.append(_para(_md_rt(line)))
     return out
 
 
-def synthesize(dash, tok):
-    """4개 리포트 → 종합 판단. 추천 1종목과 근거를 만든다."""
-    trend = M.kospi_trend(tok)
-    gate_ok = bool(trend and trend.get("uptrend"))
-
-    # 모멘텀 후보 코드 추출
-    cands = []
-    for r in (dash.get("모멘텀") or {}).get("rows", []):
-        m = re.search(r"([가-힣A-Za-z0-9·\.]+)\s+[+\-−][\d.]+%\s+\((\d{6})\)", r)
-        if m:
-            cands.append((m.group(1), m.group(2)))
-    scored = []
-    for name, code in cands[:10]:
-        s = M.score_today(code, tok)
-        fl = M.investor_flows(code, tok) or {}
-        if not s:
-            continue
-        f5, o5 = fl.get("frgn5", 0), fl.get("orgn5", 0)
-        # 수급이 양쪽 다 (+) 이고 과열이 아닌 것을 선호. 검증된 규칙이 아니라 후보 정렬용.
-        both = 1 if (f5 > 0 and o5 > 0) else 0
-        scored.append({"name": name, "code": code, "price": s["price"], "chg": s["chg"],
-                       "ret5": s["ret5"], "ret20": s["ret20"], "hi60": s["hi60"],
-                       "frgn5": f5, "orgn5": o5, "both": both,
-                       "rank": (both, -abs(s["ret20"]), f5 + o5)})
-    scored.sort(key=lambda x: (-x["both"], x["ret20"], -(x["frgn5"] + x["orgn5"])))
-    pick = scored[0] if scored else None
-    return trend, gate_ok, scored, pick
-
-
-def build_blocks(dash, trend, gate_ok, scored, pick, today):
-    b = []
-    b.append({"object": "block", "type": "callout", "callout": {
+def build_blocks(d, report, pick, gate_ok):
+    b = [{"object": "block", "type": "callout", "callout": {
         "icon": {"type": "emoji", "emoji": "🧭"},
         "color": "green_background" if gate_ok else "red_background",
         "rich_text": _rt(f"게이트 {'통과 — 신규 진입 가능' if gate_ok else '미충족 — 신규 진입 보류'}", True)
-                     + _rt(f"\n{(trend or {}).get('text','')}", color="gray")}})
-
-    b.append(_h2("📊 종합 판단"))
-    sec = (dash.get("섹터") or {}).get("rows", [])
-    sec_head = next((r for r in sec if "강세" in r or "덜 빠진" in r), "")
-    if sec_head:
-        b.append(_bul(_rt("순환매  ", True) + _rt(sec_head.split("\n")[0][:180])))
-    yt = (dash.get("핵심요약") or {}).get("rows", [])
-    kw = next((r for r in yt if "급증" in r or "처음 등장" in r), "")
-    if kw:
-        b.append(_bul(_rt("유튜브  ", True) + _rt(kw.replace("\n", " ")[:180])))
-    if scored:
-        good = [s for s in scored if s["both"]]
-        b.append(_bul(_rt("수급  ", True) + _rt(
-            f"후보 {len(scored)}개 중 외국인·기관 동시 순매수 {len(good)}개"
-            + (f" — {', '.join(s['name'] for s in good[:4])}" if good else " (없음)"))))
-
+                     + _rt(f"\n{(d.get('trend') or {}).get('text','')}", color="gray")}}]
+    b += md_blocks(report)
     if pick:
-        b.append(_h2("🎯 오늘의 추천"))
         b.append({"object": "block", "type": "callout", "callout": {
-            "icon": {"type": "emoji", "emoji": "🎯"},
-            "color": "gray_background" if gate_ok else "yellow_background",
-            "rich_text": _rt(f"{pick['name']} ({pick['code']})  {pick['price']:,.0f}원", True)
-              + _rt(f"\n오늘 {pick['chg']*100:+.1f}% · 5일 {pick['ret5']*100:+.1f}% · "
-                    f"20일 {pick['ret20']*100:+.1f}% · 60일고점대비 {(pick['hi60']-1)*100:+.1f}%"
-                    f"\n외국인 5일 {pick['frgn5']:+,.0f}억 · 기관 5일 {pick['orgn5']:+,.0f}억")
-              + _rt("\n" + ("게이트 통과 구간의 추천입니다."
-                            if gate_ok else
-                            "⚠️ 게이트 미충족 상태의 '관찰 후보'입니다. 검증된 규칙은 지금 신규 진입을 권하지 않습니다."),
-                    True, "red" if not gate_ok else "green")}})
-        b.append(_para(_rt("선정 방식: 모멘텀 상위 10 중 ①외국인·기관 동시 순매수 ②20일 상승률이 낮은(미과열) "
-                           "순. 이 조합은 백테스트되지 않았으므로 후보 정렬용입니다.", color="gray")))
-
-    b.append(_h2("📎 원문 스냅샷"))
-    for key in ("섹터", "모멘텀", "모멘텀게이트", "유튜브", "핵심요약", "보유"):
-        v = dash.get(key)
-        if not v:
-            continue
-        rows = v["rows"] if isinstance(v, dict) else v
-        title = v["title"] if isinstance(v, dict) else "보유 현황"
-        b.append({"object": "block", "type": "toggle", "toggle": {
-            "rich_text": _rt(title[:100], True), "color": "default",
-            "children": [_para(_rt(r[:1900])) for r in rows[:40] if r]}})
+            "icon": {"type": "emoji", "emoji": "📌"}, "color": "gray_background",
+            "rich_text": _rt(f"기록: {pick['name']}({pick['code']}) 진입가 {pick['price']:,.0f}원", True)
+              + _rt(f"\n외인 {pick['frgn5']:+,.0f}억 · 기관 {pick['orgn5']:+,.0f}억 · "
+                    f"20일 {pick['ret20']*100:+.1f}% · 60일고점대비 {(pick['hi60']-1)*100:+.1f}%", color="gray")}})
     return b
 
 
@@ -225,14 +342,26 @@ def main():
     today = datetime.now(KST).strftime("%Y-%m-%d")
     tok = token()
     M.log(f"▶ 일일 아카이브 {today}")
-    dash = read_dashboard()
-    M.log(f"  대시보드 수집: {[k for k in dash if dash.get(k)]}")
-    trend, gate_ok, scored, pick = synthesize(dash, tok)
-    summary = (f"{'게이트 통과' if gate_ok else '게이트 미충족'} · "
-               + (f"추천 {pick['name']}" if pick else "추천 없음"))
-    blocks = build_blocks(dash, trend, gate_ok, scored, pick, today)
+    d = collect(tok)
+    M.log(f"  재료: 섹터 {0 if d.get('sector') is None else len(d['sector'])}행 · "
+          f"후보 {len(d['cands'])}개 · 유튜브 {len(d.get('yt',[]))}편 · 키워드 {len(d.get('kw',[]))}개")
+    if not d["cands"]:
+        M.log("❌ 모멘텀 후보 없음 — 중단 (latest_momentum_reco.csv 확인)"); return
+    report = synthesize(d)
+    if not report:
+        M.log("❌ 종합 레포트 실패 — 중단"); return
+    gate_ok = bool((d.get("trend") or {}).get("uptrend"))
+    pick = pick_from(report, d["cands"])
+    m = re.search(r"^##\s*오늘 시장\s*$", report, re.M)
+    summary = ""
+    if m:
+        rest = [l.strip() for l in report[m.end():].split("\n") if l.strip()]
+        summary = rest[0][:110] if rest else ""
+    if not summary:
+        summary = f"{'게이트 통과' if gate_ok else '게이트 미충족'} · 추천 {pick['name'] if pick else '없음'}"
+    blocks = build_blocks(d, report, pick, gate_ok)
     pid = upsert(today, blocks, pick, gate_ok, summary)
-    M.log(f"✅ 아카이브 완료: {summary}" if pid else "❌ 아카이브 실패")
+    M.log(f"✅ 완료 · 추천 {pick['name'] if pick else '없음'} · 블록 {len(blocks)}개" if pid else "❌ 실패")
 
 
 if __name__ == "__main__":
