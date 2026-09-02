@@ -16,8 +16,13 @@ echo "[$(date '+%Y-%m-%d %H:%M:%S')] ─── 실행 ───" >> "$LOG"
 # (2026-08-28 holdings_report 가 Gemini 연결에 3일 6시간 물려 4일치 리포트가 누락됐다).
 # macOS 기본 bash 엔 timeout(1) 이 없어 perl alarm 을 쓴다.
 perl -e 'alarm shift; exec @ARGV' 1800 /opt/homebrew/bin/python3 holdings_report.py >> "$LOG" 2>&1
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] 종료(exit=$?)" >> "$LOG"
+rc=$?
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] 종료(exit=$rc)" >> "$LOG"
+[ "$rc" -eq 142 ] && echo "  🚨 하드 상한 초과로 강제 종료 — 원인 확인 필요" >> "$LOG"
 
 if [ "$(wc -l < "$LOG")" -gt 1000 ]; then
     tail -500 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
 fi
+
+# 타임아웃(142)·실패를 0 으로 마스킹하면 launchd 가 성공으로 본다(Codex 지적).
+exit "${rc:-0}"

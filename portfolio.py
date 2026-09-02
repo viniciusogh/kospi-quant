@@ -194,10 +194,17 @@ def _ip_help(resp):
     return True
 
 
+# 브로커별 조회 상태. '오류로 0건' 과 '실제 0건' 을 구분하지 못하면 전량매도로 오인해
+# 노션을 0원으로 덮어쓴다(Codex 지적 2026-09-02). ok_empty 만 진짜 0 으로 취급한다.
+SRC_STATUS = {}
+
+
 def toss_holdings():
     """토스증권 보유주식. accountSeq 는 /accounts 로 자동 조회 (수동 입력 불필요)."""
+    SRC_STATUS["토스"] = "error"
     tok = _toss_token()
     if not tok:
+        print("  ⚠️ 토스 토큰 발급 실패 — 조회 실패(0건 아님)")
         return []
     h = {"Authorization": f"Bearer {tok}"}
     seq = os.environ.get("TOSS_ACCOUNT_SEQ")
@@ -221,9 +228,13 @@ def toss_holdings():
         if not _ip_help(r):
             print(f"  ⚠️ 토스 보유조회 실패 HTTP {r.status_code}: {r.text[:160]}")
         return []
-    res = r.json().get("result") or {}
+    res = r.json().get("result")
+    if not isinstance(res, dict) or not isinstance(res.get("items"), list):
+        # HTTP 200 인데 스키마가 다르면 '0건' 이 아니라 응답 이상이다
+        print(f"  ⚠️ 토스 응답 스키마 이상 — 조회 실패로 처리: {str(res)[:120]}")
+        return []
     rows, skipped = [], 0
-    for it in res.get("items") or []:
+    for it in res["items"]:
         if it.get("marketCountry") != "KR":       # 해외분은 통화가 달라 원화 합산에서 제외
             skipped += 1
             continue
@@ -231,6 +242,7 @@ def toss_holdings():
                      "name": it.get("name") or "", "qty": float(it["quantity"]),
                      "avg": float(it["averagePurchasePrice"]),
                      "price": float(it["lastPrice"])})
+    SRC_STATUS["토스"] = "ok_nonempty" if rows else "ok_empty"
     if skipped:
         print(f"  ℹ️ 토스 해외종목 {skipped}건은 원화 합산에서 제외")
     return rows
@@ -409,11 +421,16 @@ def _blocks(data):
         parts = [f"{b} {v['eval']:,.0f}원({v['n']})" for b, v in data["by_broker"].items()]
         out.append({"object": "block", "type": "paragraph",
                     "paragraph": {"rich_text": _rt("증권사별: " + "  ·  ".join(parts), color="gray")}})
+    if data.get("_stale"):
+        out.append({"object": "block", "type": "callout", "callout": {
+            "icon": {"type": "emoji", "emoji": "🚨"}, "color": "red_background",
+            "rich_text": _rt("조회 실패 — 아래 값은 최신이 아닙니다", True)
+                         + _rt(f"\n{data['_stale']}", color="gray")}})
     if data["positions"]:
         out.append({"object": "block", "type": "table", "table": {
             "table_width": 4, "has_column_header": True, "has_row_header": False,
             "children": _cell_rows(data)}})
-    else:
+    elif not data.get("_stale"):
         out.append({"object": "block", "type": "callout", "callout": {
             "icon": {"type": "emoji", "emoji": "💤"}, "color": "gray_background",
             "rich_text": _rt("보유 종목 없음 (전량 매도)", True)
@@ -447,9 +464,21 @@ def main():
     rows += toss_holdings()
     rows += manual_rows()
     if not rows:
-        # 조용히 return 하면 노션에 직전 스냅샷이 남아 '이미 판 종목'이 보유 중으로 보인다
-        # (2026-08-31: 오전 매도 후에도 10:30 시점 58만원이 최신인 것처럼 표시됨).
-        print("보유 종목 없음 — 전량 매도이거나 조회 실패. 노션을 '보유 없음'으로 갱신한다.")
+        # 0건에는 두 원인이 섞인다. 구분하지 못하고 0원으로 덮어쓰면 조회 실패를
+        # 전량매도로 오인한다(Codex 지적 2026-09-02).
+        bad = [k for k, v in SRC_STATUS.items() if v == "error"]
+        if bad:
+            print(f"🚨 조회 실패({', '.join(bad)}) — 0건을 전량매도로 보지 않는다. "
+                  f"기존 스냅샷을 유지하고 실패를 표시한다.")
+            try:
+                prev = json.load(open(OUT, encoding="utf-8"))
+            except Exception:
+                prev = None
+            if prev and os.environ.get("NOTION_API_KEY"):
+                prev["_stale"] = f"{', '.join(bad)} 조회 실패 · 마지막 정상 {prev.get('asof','?')}"
+                upload_notion(prev)
+            raise SystemExit(f"보유 조회 실패: {', '.join(bad)}")   # launchd 가 실패로 보게
+        print("보유 종목 없음 — 전량 매도 확인(조회는 정상). 노션을 '보유 없음'으로 갱신한다.")
         empty = {"asof": datetime.now(KST).strftime("%Y-%m-%d %H:%M"),
                  "positions": [], "by_broker": {},
                  "total": {"eval": 0.0, "cost": 0.0, "pl": 0.0, "ret": 0.0}}
