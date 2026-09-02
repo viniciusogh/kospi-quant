@@ -38,6 +38,10 @@ def _h2(t):
     return {"object": "block", "type": "heading_2", "heading_2": {"rich_text": _rt(t, True)}}
 
 
+def _h3(t):
+    return {"object": "block", "type": "heading_3", "heading_3": {"rich_text": _rt(t, True)}}
+
+
 def _bul(rich):
     return {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": rich}}
 
@@ -403,21 +407,130 @@ def dashboard_copy():
     return out
 
 
+def _sections(md):
+    """## 헤딩으로 레포트를 쪼갠다 → [(제목, [본문줄])]."""
+    out, cur, body = [], None, []
+    for ln in md.split("\n"):
+        m = re.match(r"^##\s+(.*?)\s*$", ln)
+        if m:
+            if cur is not None:
+                out.append((cur, body))
+            cur, body = m.group(1), []
+        elif cur is not None:
+            body.append(ln)
+    if cur is not None:
+        out.append((cur, body))
+    return out
+
+
+def _bullets(lines):
+    return [re.sub(r"^\s*[-*\u2022\u00b7]\s*", "", l).strip().replace("**", "")
+            for l in lines if re.match(r"^\s*[-*\u2022\u00b7]\s+", l)]
+
+
+def _prose(lines):
+    return [l.strip().replace("**", "") for l in lines
+            if l.strip() and not re.match(r"^\s*[-*\u2022\u00b7]\s+", l)]
+
+
+def _table(head, rows):
+    """페이지 직속 표만 만든다. 토글 안에 넣으면 table_row 가 요청 깊이 3 이라 400 이 난다."""
+    def row(vals, bold=False):
+        return {"object": "block", "type": "table_row",
+                "table_row": {"cells": [_rt(v, bold) for v in vals]}}
+    return {"object": "block", "type": "table", "table": {
+        "table_width": len(head), "has_column_header": True, "has_row_header": False,
+        "children": [row(head, True)] + [row(r) for r in rows]}}
+
+
+# 서술형 섹션은 토글로 내리고, 판단에 쓰는 표·불릿은 펼치지 않아도 보이게 한다
+# (2026-09-02 사용자 지적: 추천이 블록 9번에 묻혀 있고 레포트가 접혀 아무것도 안 보인다).
+PROSE_SECS = ["오늘 시장", "순환매 흐름", "유튜브가 말하는 것", "판단의 한계"]
+
+
+def _leftovers(bullets, parsed_n, label):
+    """표 파싱이 놓친 줄은 불릿으로 살린다. 형식이 바뀌어도 내용이 조용히 사라지지 않게."""
+    if parsed_n >= len(bullets):
+        return []
+    miss = bullets[parsed_n:] if parsed_n else bullets
+    M.log(f"  \u26a0\ufe0f {label} {len(miss)}줄 표 파싱 실패 \u2014 불릿으로 대체")
+    return [{"object": "block", "type": "bulleted_list_item",
+             "bulleted_list_item": {"rich_text": _rt(t)}} for t in miss]
+
+
 def build_blocks(d, report, pick, gate_ok):
-    b = [{"object": "block", "type": "callout", "callout": {
+    secs = dict(_sections(report))
+    b = []
+
+    # ① 추천 — 맨 위. 종목·가격·한 줄 결론을 클릭 없이 본다.
+    rec_key = next((k for k in secs if k.startswith("오늘의 추천")), None)
+    rec_body = secs.get(rec_key, [])
+    one = next(iter(_prose(rec_body)), "")
+    if pick:
+        head = f"오늘의 추천 — {pick['name']} ({pick['code']})  ·  {pick['price']:,.0f}원"
+        sub = one or ("게이트 통과 후보" if gate_ok else "게이트 미충족 — 관찰 후보")
+        if not gate_ok:
+            sub += "  ·  게이트 미충족이라 확정 매수가 아닌 관찰 후보"
+        b.append({"object": "block", "type": "callout", "callout": {
+            "icon": {"type": "emoji", "emoji": "🎯"},
+            "color": "blue_background" if gate_ok else "orange_background",
+            "rich_text": _rt(head, True) + _rt(f"\n{sub}")}})
+        b.append(_table(["외국인", "기관", "20일", "60일 고점대비"],
+                        [[f"{pick['frgn5']:+,.0f}억", f"{pick['orgn5']:+,.0f}억",
+                          f"{pick['ret20']*100:+.1f}%", f"{(pick['hi60']-1)*100:+.1f}%"]]))
+        for t in _bullets(rec_body)[:5]:
+            b.append({"object": "block", "type": "bulleted_list_item",
+                      "bulleted_list_item": {"rich_text": _rt(t)}})
+
+    # ② 게이트 — 추천 바로 아래 (전제이므로 추천보다 뒤)
+    b.append({"object": "block", "type": "callout", "callout": {
         "icon": {"type": "emoji", "emoji": "🧭"},
         "color": "green_background" if gate_ok else "red_background",
         "rich_text": _rt(f"게이트 {'통과 — 신규 진입 가능' if gate_ok else '미충족 — 신규 진입 보류'}", True)
-                     + _rt(f"\n{(d.get('trend') or {}).get('text','')}", color="gray")}}]
-    # 종합 레포트는 토글 하나로 (사용자 요청) — 펼치면 전문
-    b.append(_toggle("📊 오늘의 종합 레포트 — 펼쳐 보기", md_blocks(report), "blue_background"))
+                     + _rt(f"\n{(d.get('trend') or {}).get('text','')}", color="gray")}})
+
+    # ③ 수급 표 — 같은 형태가 반복되는 목록은 불릿보다 표 (사용자 반복 요청)
+    sup = []
+    for t in _bullets(secs.get("수급이 좋은 종목", [])):
+        m = re.match(r"^(.+?)\s+외인\s*([+\-][\d,.]+\s*억)\s*/\s*기관\s*([+\-][\d,.]+\s*억)"
+                     r"[^\d+\-]*20일\s*([+\-][\d.]+%)", t)
+        if m:
+            sup.append([m.group(1).strip(), m.group(2), m.group(3), m.group(4)])
+    sup_all = _bullets(secs.get("수급이 좋은 종목", []))
+    if sup:
+        b.append(_h3("외국인·기관이 같이 사는 종목"))
+        b.append(_table(["종목", "외국인", "기관", "20일"], sup))
+    b += _leftovers(sup_all, len(sup), "수급")
+
+    # ④ 탈락 표
+    rej = []
+    for t in _bullets(secs.get("왜 다른 종목은 아닌가", [])):
+        # 종목명 안의 하이픈(S-Oil)과 구분자를 구별한다 — 긴 대시 먼저, 그다음 '띄어쓰기 하이픈'
+        m = (re.match(r"^(.+?)\s*[\u2014\u2013]\s*(.+)$", t)
+             or re.match(r"^(.+?)\s+-\s+(.+)$", t))
+        if m:
+            rej.append([m.group(1).strip(), m.group(2).strip()])
+    rej_all = _bullets(secs.get("왜 다른 종목은 아닌가", []))
+    if rej:
+        b.append(_h3("왜 다른 종목은 아닌가"))
+        b.append(_table(["종목", "탈락 사유"], rej))
+    b += _leftovers(rej_all, len(rej), "탈락")
+
+    # ⑤ 서술형은 토글로
+    detail = []
+    for name in PROSE_SECS:
+        if name not in secs:
+            continue
+        detail.append(_h3(name))
+        for t in _prose(secs[name]):
+            detail.append(_para(_rt(t)))
+        for t in _bullets(secs[name]):
+            detail.append({"object": "block", "type": "bulleted_list_item",
+                           "bulleted_list_item": {"rich_text": _rt(t)}})
+    if detail:
+        b.append(_toggle("📖 시장 해설 — 순환매·유튜브·한계", detail, "gray_background"))
+
     b += dashboard_copy()
-    if pick:
-        b.append({"object": "block", "type": "callout", "callout": {
-            "icon": {"type": "emoji", "emoji": "📌"}, "color": "gray_background",
-            "rich_text": _rt(f"기록: {pick['name']}({pick['code']}) 진입가 {pick['price']:,.0f}원", True)
-              + _rt(f"\n외인 {pick['frgn5']:+,.0f}억 · 기관 {pick['orgn5']:+,.0f}억 · "
-                    f"20일 {pick['ret20']*100:+.1f}% · 60일고점대비 {(pick['hi60']-1)*100:+.1f}%", color="gray")}})
     return b
 
 
