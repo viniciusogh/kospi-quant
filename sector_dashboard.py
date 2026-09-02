@@ -295,8 +295,14 @@ def main():
         h = agg.copy()
         h.insert(0, "date", asof[:10])
         h["주도주"] = [((tops.get(sec) or [("", 0)])[0][0]) for sec in h["섹터"]]
-        h.to_csv(hist, mode="a", header=not os.path.exists(hist), index=False, encoding="utf-8-sig")
-        M.log(f"  📁 섹터 이력 저장 ({len(h)}행)")
+        # 15분마다 실행되므로 append 만 하면 하루에 수백 행이 쌓인다(2026-09-02: 168행).
+        # 같은 (날짜, 섹터) 는 최신 것만 남긴다.
+        if os.path.exists(hist):
+            old = pd.read_csv(hist, encoding="utf-8-sig")
+            h = pd.concat([old, h], ignore_index=True)
+        h = h.drop_duplicates(subset=["date", "섹터"], keep="last")
+        h.to_csv(hist, index=False, encoding="utf-8-sig")
+        M.log(f"  📁 섹터 이력 저장 (누적 {len(h)}행 · {h['date'].nunique()}일)")
     except Exception as e:
         M.log(f"  ⚠️ 섹터 이력 저장 실패: {str(e)[:70]}")
 

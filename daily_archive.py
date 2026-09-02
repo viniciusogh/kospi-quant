@@ -52,7 +52,8 @@ def collect(tok):
     # 섹터: sector_history.csv 의 오늘 행
     try:
         h = pd.read_csv(os.path.join(_DIR, "sector_history.csv"), encoding="utf-8-sig")
-        h = h[h["date"] == h["date"].max()].sort_values("오늘", ascending=False)
+        h = h[h["date"] == h["date"].max()]
+        h = h.drop_duplicates(subset=["섹터"], keep="last").sort_values("오늘", ascending=False)
         d["sector"] = h
     except Exception as e:
         M.log(f"  ⚠️ 섹터 이력 없음: {str(e)[:60]}"); d["sector"] = None
@@ -81,6 +82,19 @@ def collect(tok):
         M.log(f"  ⚠️ 모멘텀 재료 실패: {str(e)[:70]}")
     d["cands"] = cands
 
+    # 보유 현황 + 심층분석 (portfolio.json / momentum_analysis.json)
+    try:
+        pf = json.load(open(os.path.join(_DIR, "portfolio.json"), encoding="utf-8"))
+        d["pf"] = pf
+        cache = json.load(open(os.path.join(_DIR, "momentum_analysis.json"), encoding="utf-8"))
+        for pos in pf.get("positions", []):
+            a = cache.get(pos["code"], {})
+            pos["한줄"] = a.get("한줄", "")
+            pos["촉매"] = a.get("촉매", "")
+            pos["리스크"] = a.get("리스크", "")
+    except Exception as e:
+        M.log(f"  ⚠️ 보유 재료 실패: {str(e)[:60]}"); d["pf"] = None
+
     # 유튜브: 최신 분석본 + 키워드 급증
     try:
         y = json.load(open(os.path.join(_DIR, "latest_youtube_analysis.json"), encoding="utf-8"))
@@ -103,6 +117,27 @@ def collect(tok):
     except Exception as e:
         M.log(f"  ⚠️ 키워드 재료 실패: {str(e)[:60]}"); d["kw"] = []
     return d
+
+
+def _llm(prompt, model, max_tokens):
+    """OpenAI 우선, 실패 시 Gemini 폴백. 한쪽이 죽어도 레포트는 나와야 한다."""
+    if model.startswith(("gpt-", "o3", "o4")):
+        try:
+            from openai import OpenAI
+            c = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+            r = c.chat.completions.create(model=model, max_completion_tokens=max_tokens,
+                                          messages=[{"role": "user", "content": prompt}])
+            return (r.choices[0].message.content or "").strip()
+        except Exception as e:
+            M.log(f"  ⚠️ {model} 실패 → Gemini 폴백: {str(e)[:80]}")
+    try:
+        from google import genai
+        c = genai.Client(api_key=os.environ["GEMINI_API_KEY"], http_options={"timeout": GENAI_TIMEOUT_MS})
+        r = c.models.generate_content(model="gemini-2.5-flash", contents=prompt,
+                config={"max_output_tokens": max_tokens, "thinking_config": {"thinking_budget": 0}})
+        return (r.text or "").strip()
+    except Exception as e:
+        M.log(f"  ❌ LLM 실패: {str(e)[:80]}"); return ""
 
 
 def _fmt_material(d):
@@ -191,25 +226,9 @@ def synthesize(d):
     material = _fmt_material(d)
     prompt = PROMPT.replace("{material}", material)
     model = os.environ.get("ARCHIVE_MODEL", "gpt-5.5")
-    try:
-        from openai import OpenAI
-        c = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-        r = c.chat.completions.create(model=model, max_completion_tokens=6000,
-                                      messages=[{"role": "user", "content": prompt}])
-        out = (r.choices[0].message.content or "").strip()
-        M.log(f"  🤖 종합 레포트 {model} · {len(out):,}자 · 재료 {len(material):,}자")
-        return out
-    except Exception as e:
-        M.log(f"  ⚠️ {model} 실패 → Gemini 폴백: {str(e)[:90]}")
-    try:
-        from google import genai
-        cc = genai.Client(api_key=os.environ["GEMINI_API_KEY"], http_options={"timeout": GENAI_TIMEOUT_MS})
-        r = cc.models.generate_content(model="gemini-2.5-flash", contents=prompt,
-                config={"max_output_tokens": 8000, "thinking_config": {"thinking_budget": 0}})
-        return (r.text or "").strip()
-    except Exception as e:
-        M.log(f"  ❌ 종합 실패: {str(e)[:90]}")
-        return ""
+    out = _llm(prompt, model, 6000)
+    M.log(f"  🤖 종합 레포트 {model} · {len(out):,}자 · 재료 {len(material):,}자")
+    return out
 
 
 def pick_from(report, cands):
@@ -263,56 +282,124 @@ def _toggle(title, children, color="default"):
         "rich_text": _rt(title, True), "color": color, "children": children[:95]}}
 
 
-def report_sections(d):
-    """통합 대시보드가 만들던 내용을 이 페이지에서 직접 생성한다(사용자 요청).
-    스냅샷 복사가 아니라 원본 재료로 새로 쓴다."""
+RO = {"id", "created_time", "last_edited_time", "created_by", "last_edited_by",
+      "has_children", "archived", "in_trash", "parent", "object", "request_id"}
+
+# 블록 타입별 허용 필드. 원본 body 를 그대로 넘기면 paragraph 에 icon 이 섞이는 식으로
+# 400 이 난다. 지우기(블랙리스트)보다 허용(화이트리스트)이 안전하다 — 새 필드가 생겨도 안 샌다.
+ALLOW = {
+    "paragraph": {"rich_text", "color", "children"},
+    "heading_1": {"rich_text", "color", "is_toggleable"},
+    "heading_2": {"rich_text", "color", "is_toggleable"},
+    "heading_3": {"rich_text", "color", "is_toggleable"},
+    "bulleted_list_item": {"rich_text", "color", "children"},
+    "numbered_list_item": {"rich_text", "color", "children"},
+    "to_do": {"rich_text", "color", "checked", "children"},
+    "toggle": {"rich_text", "color", "children"},
+    "callout": {"rich_text", "color", "icon", "children"},
+    "quote": {"rich_text", "color", "children"},
+    "code": {"rich_text", "language", "caption"},
+    "table": {"table_width", "has_column_header", "has_row_header", "children"},
+    "table_row": {"cells"},
+    "divider": set(),
+    "image": {"type", "external", "file_upload", "caption"},
+    "bookmark": {"url", "caption"},
+}
+
+
+def _copy_image(blk):
+    """노션 호스팅 이미지(type=file)는 API 로 재생성할 수 없다 — url 이 만료되는 서명 링크라
+    external 로 걸면 곧 깨진다. 내려받아 file_upload 로 다시 올린다."""
+    im = blk.get("image") or {}
+    if im.get("type") == "external":
+        return {"object": "block", "type": "image",
+                "image": {"type": "external", "external": {"url": im["external"]["url"]}}}
+    url = (im.get("file") or {}).get("url")
+    if not url:
+        return None
+    try:
+        r = requests.get(url, timeout=60)
+        if r.status_code != 200:
+            return None
+        fid = D.upload_image(r.content, "archive.png")
+        if not fid:
+            return None
+        return {"object": "block", "type": "image",
+                "image": {"type": "file_upload", "file_upload": {"id": fid}}}
+    except Exception as e:
+        M.log(f"  ⚠️ 이미지 복사 생략: {str(e)[:60]}")
+        return None
+
+
+def _strip(blk, depth=0):
+    """노션 블록을 '다시 만들 수 있는' 형태로 정제한다.
+    읽기전용 필드를 지우지 않으면 400 이 난다(2026-06-24 블록 이관 사고의 원인).
+    표는 3단계 중첩이 안 되므로 depth 로 자른다."""
+    t = blk.get("type")
+    if not t or t in ("child_page", "child_database", "unsupported", "synced_block"):
+        return None
+    if t == "image":
+        return _copy_image(blk)
+    # 노션은 요청 깊이 3 에서 table 을 못 만든다(모멘텀→종목토글→분기실적표).
+    # 표를 통째로 버리기보다 한 줄 요약 문단으로 낮춰 정보는 남긴다.
+    if t == "table" and depth >= 2:
+        return {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [
+            {"type": "text", "text": {"content": "📊 (표는 원본 리포트 참조 — 중첩 깊이 제한)"},
+             "annotations": {"color": "gray", "italic": True}}]}}
+    allow = ALLOW.get(t)
+    if allow is None:
+        return None                       # 모르는 타입은 넘기지 않는다(400 유발)
+    body = {k: v for k, v in (blk.get(t) or {}).items() if k in allow and k not in RO}
+    for k in ("rich_text", "caption"):
+        if k in body:
+            body[k] = [{kk: vv for kk, vv in r.items() if kk not in ("plain_text", "href")}
+                       for r in body[k]]
+    if t != "divider" and not body:
+        return None                       # 알맹이 없는 블록은 400 을 유발한다
+    out = {"object": "block", "type": t, t: body}
+    if blk.get("has_children") and depth < 2:
+        kids = _fetch_children(blk["id"], depth + 1)
+        if kids:
+            out[t]["children"] = kids[:95]
+    elif blk.get("has_children"):
+        out[t].pop("children", None)
+    return out
+
+
+def _fetch_children(bid, depth=0):
+    r = requests.get(f"{API}/blocks/{bid}/children", headers=_H,
+                     params={"page_size": 100}, timeout=30)
+    if r.status_code != 200:
+        return []
     out = []
-    # 섹터 장세 — 전체 28개 표
-    if d.get("sector") is not None:
-        rows = [{"type": "table_row", "table_row": {"cells": [
-            _rt("섹터", True), _rt("당일", True), _rt("5일", True), _rt("20일", True),
-            _rt("순매수", True), _rt("주도주", True)]}}]
-        for _, r in d["sector"].iterrows():
-            col = "red" if r["오늘"] > 0 else ("blue" if r["오늘"] < 0 else "gray")
-            rows.append({"type": "table_row", "table_row": {"cells": [
-                _rt(r["섹터"], True), _rt(f"{r['오늘']*100:+.1f}%", True, col),
-                _rt(f"{r['d5']*100:+.1f}%"), _rt(f"{r['d20']*100:+.1f}%"),
-                _rt(f"{r['순매수']/100:+,.0f}억"), _rt(str(r["주도주"]))]}})
-        out.append(_toggle("🔄 섹터 장세 (순환매) — 전체 28개", [
-            {"object": "block", "type": "table", "table": {
-                "table_width": 6, "has_column_header": True,
-                "has_row_header": False, "children": rows}}], "gray_background"))
+    for k in r.json().get("results", []):
+        c = _strip(k, depth)
+        if c and c.get("type") and c.get(c["type"]) is not None:
+            out.append(c)
+    return out
 
-    # 모멘텀 상위 10 — 종목별 지표·수급·촉매
-    if d.get("cands"):
-        kids = []
-        for i, c in enumerate(d["cands"], 1):
-            col = "red" if c["chg"] > 0 else ("blue" if c["chg"] < 0 else "gray")
-            kids.append(_para(
-                _rt(f"{i}. {c['name']} ", True) + _rt(f"{c['chg']*100:+.1f}%", True, col)
-                + _rt(f" ({c['code']}) · {c['sector']} · {c['price']:,.0f}원", color="gray")))
-            kids.append(_para(_rt(
-                f"    5일 {c['ret5']*100:+.1f}% · 20일 {c['ret20']*100:+.1f}% · "
-                f"60일고점대비 {(c['hi60']-1)*100:+.1f}% · "
-                f"외인 {c['frgn5']:+,.0f}억 · 기관 {c['orgn5']:+,.0f}억 · 개인 {c['prsn5']:+,.0f}억",
-                color="gray")))
-            if c.get("한줄"):
-                kids.append(_para(_rt("    " + c["한줄"][:400])))
-        out.append(_toggle("🚀 모멘텀 상위 10 — 지표·수급·투자포인트", kids, "gray_background"))
 
-    # 유튜브 — 키워드 급증 + 영상별 분석
-    yt = []
-    if d.get("kw"):
-        for w, cnt, kind, why, v in d["kw"][:15]:
-            lift = "NEW" if v is None else f"{v:.1f}배"
-            yt.append(_bul(_rt(f"{w} ", True) + _rt(lift, True, "red" if (v and v >= 2) else "gray")
-                           + _rt(f" · {cnt}회 — {why[:170]}", color="gray")))
-    for v in (d.get("yt") or [])[:12]:
-        yt.append(_toggle(f"[{v['ch']}] {v['title'][:70]}",
-                          md_blocks(v["analysis"][:6000]) or [_para(_rt("분석 없음"))]))
-    if yt:
-        out.append(_toggle(f"📺 유튜브 분석 — 키워드 {len(d.get('kw') or [])}개 · 영상 {len(d.get('yt') or [])}편",
-                           yt, "gray_background"))
+def dashboard_copy():
+    """통합 대시보드의 블록을 **원문 그대로** 복사한다.
+    재생성하면 중복이고 원본과 갈라진다(사용자 지적 2026-09-02).
+    가공은 '오늘의 추천' 하나만 한다."""
+    out = []
+    try:
+        _, _, _, mid, tail = D._layout(D.page_id())
+    except Exception as e:
+        M.log(f"  ⚠️ 대시보드 읽기 실패: {str(e)[:70]}"); return out
+    # 보유 현황(앵커~divider 사이)
+    held = [c for c in (_strip(b) for b in mid) if c]
+    if held:
+        out.append(_toggle("💰 보유 현황", held, "gray_background"))
+    # 리포트 토글들 — 제목·색까지 원본 유지
+    for b in tail:
+        if b.get("type") != "toggle":
+            continue
+        c = _strip(b)
+        if c and c.get("type") and c.get(c["type"]) is not None:
+            out.append(c)
+    M.log(f"  📋 대시보드 원문 복사: {len(out)}개 섹션")
     return out
 
 
@@ -324,7 +411,7 @@ def build_blocks(d, report, pick, gate_ok):
                      + _rt(f"\n{(d.get('trend') or {}).get('text','')}", color="gray")}}]
     # 종합 레포트는 토글 하나로 (사용자 요청) — 펼치면 전문
     b.append(_toggle("📊 오늘의 종합 레포트 — 펼쳐 보기", md_blocks(report), "blue_background"))
-    b += report_sections(d)
+    b += dashboard_copy()
     if pick:
         b.append({"object": "block", "type": "callout", "callout": {
             "icon": {"type": "emoji", "emoji": "📌"}, "color": "gray_background",
@@ -366,7 +453,7 @@ def upsert(today, blocks, pick, gate_ok, summary):
         rr = requests.patch(f"{API}/blocks/{pid}/children", headers=_H, timeout=60,
                             json={"children": blocks[i:i+40]})
         if rr.status_code != 200:
-            M.log(f"  ⚠️ 블록 추가 {rr.status_code}: {rr.text[:150]}")
+            M.log(f"  ⚠️ 블록 추가 {rr.status_code}: {rr.text[:600]}")
     return pid
 
 
