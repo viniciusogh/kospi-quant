@@ -354,6 +354,29 @@ def health_warnings():
     except Exception:
         pass
 
+    # 워크플로가 '실행 자체' 를 멈춘 것을 잡는다.
+    # 기존 경고는 산출물(분석본 날짜)만 봐서 발견이 느렸다 — 2026-08-18~25 정지를
+    # 8일 뒤에 알았다. 실행 시각을 보면 몇 시간 안에 안다.
+    # 저장소가 공개라 인증 없이 조회된다. GitHub 스케줄이 조용히 지연·누락되는 전례가 있고
+    # 지금은 외부 크론(cron-job.org)이 백업 중이라 둘 다 죽으면 알 방법이 필요하다.
+    for wf, label, limit_h in (("youtube_report.yml", "유튜브", 20),
+                               ("daily_quant.yml", "모멘텀·섹터", 30)):
+        try:
+            u = (f"https://api.github.com/repos/viniciusogh/kospi-quant"
+                 f"/actions/workflows/{wf}/runs?per_page=1")
+            j = requests.get(u, timeout=12).json()
+            runs = j.get("workflow_runs") or []
+            if not runs:
+                continue
+            last = datetime.strptime(runs[0]["created_at"], "%Y-%m-%dT%H:%M:%SZ")
+            gap = (datetime.utcnow() - last).total_seconds() / 3600
+            if gap >= limit_h:
+                warn.append(f"{label} 워크플로가 {gap:.0f}시간째 실행 안 됨 "
+                            f"(마지막 {last.strftime('%m-%d %H:%M')}Z) "
+                            f"— GitHub 스케줄·cron-job.org 둘 다 확인")
+        except Exception:
+            pass          # 감시가 본체를 막으면 안 된다
+
     # 모멘텀 리포트가 최신 거래일 기준인가 (daily_quant 는 평일만 실행)
     try:
         import pandas as pd
