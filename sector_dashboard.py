@@ -297,11 +297,23 @@ def main():
         h["주도주"] = [((tops.get(sec) or [("", 0)])[0][0]) for sec in h["섹터"]]
         # 15분마다 실행되므로 append 만 하면 하루에 수백 행이 쌓인다(2026-09-02: 168행).
         # 같은 (날짜, 섹터) 는 최신 것만 남긴다.
-        if os.path.exists(hist):
-            old = pd.read_csv(hist, encoding="utf-8-sig")
-            h = pd.concat([old, h], ignore_index=True)
-        h = h.drop_duplicates(subset=["date", "섹터"], keep="last")
-        h.to_csv(hist, index=False, encoding="utf-8-sig")
+        # read-modify-write 를 락으로 감싼다. 15분 스케줄과 21시 아카이브가 겹치면
+        # 두 실행이 같은 old 를 읽고 나중 writer 가 상대의 행을 덮어쓴다 (코덱스 지적 2026-09-02).
+        # 쓰기는 temp + os.replace 로 원자화 — 중간 상태를 읽는 것도 막는다.
+        import fcntl, tempfile
+        with open(hist + ".lock", "w") as lk:
+            fcntl.flock(lk, fcntl.LOCK_EX)
+            try:
+                if os.path.exists(hist):
+                    old = pd.read_csv(hist, encoding="utf-8-sig")
+                    h = pd.concat([old, h], ignore_index=True)
+                h = h.drop_duplicates(subset=["date", "섹터"], keep="last")
+                fd, tmp = tempfile.mkstemp(dir=_DIR, suffix=".csv")
+                os.close(fd)
+                h.to_csv(tmp, index=False, encoding="utf-8-sig")
+                os.replace(tmp, hist)
+            finally:
+                fcntl.flock(lk, fcntl.LOCK_UN)
         M.log(f"  📁 섹터 이력 저장 (누적 {len(h)}행 · {h['date'].nunique()}일)")
     except Exception as e:
         M.log(f"  ⚠️ 섹터 이력 저장 실패: {str(e)[:70]}")

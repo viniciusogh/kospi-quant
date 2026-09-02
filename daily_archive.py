@@ -335,24 +335,39 @@ def _copy_image(blk):
         return None
 
 
+# 복사 과정에서 잃은 것을 모은다. 빈 복사가 '성공' 으로 보이면 안 된다
+# (코덱스 지적 2026-09-02: HTTP 실패·절단·미지원 타입이 전부 무음이었다).
+COPY_ISSUES = []
+
+
+def _lost(what):
+    COPY_ISSUES.append(what)
+    M.log(f"  \u26a0\ufe0f 복사 손실: {what}")
+
+
 def _strip(blk, depth=0):
     """노션 블록을 '다시 만들 수 있는' 형태로 정제한다.
     읽기전용 필드를 지우지 않으면 400 이 난다(2026-06-24 블록 이관 사고의 원인).
     표는 3단계 중첩이 안 되므로 depth 로 자른다."""
     t = blk.get("type")
-    if not t or t in ("child_page", "child_database", "unsupported", "synced_block"):
+    if not t:
+        return None
+    if t in ("child_page", "child_database", "unsupported", "synced_block"):
+        _lost(f"{t} (API 로 재생성 불가)")
         return None
     if t == "image":
         return _copy_image(blk)
     # 노션은 요청 깊이 3 에서 table 을 못 만든다(모멘텀→종목토글→분기실적표).
     # 표를 통째로 버리기보다 한 줄 요약 문단으로 낮춰 정보는 남긴다.
     if t == "table" and depth >= 2:
+        _lost("표 → 문단 대체 (요청 깊이 3 제한)")
         return {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [
             {"type": "text", "text": {"content": "📊 (표는 원본 리포트 참조 — 중첩 깊이 제한)"},
              "annotations": {"color": "gray", "italic": True}}]}}
     allow = ALLOW.get(t)
     if allow is None:
-        return None                       # 모르는 타입은 넘기지 않는다(400 유발)
+        _lost(f"{t} (ALLOW 미등록 — 화이트리스트에 추가 필요)")
+        return None       # 그대로 넘기면 400 이 난다
     body = {k: v for k, v in (blk.get(t) or {}).items() if k in allow and k not in RO}
     for k in ("rich_text", "caption"):
         if k in body:
@@ -364,6 +379,8 @@ def _strip(blk, depth=0):
     if blk.get("has_children") and depth < 2:
         kids = _fetch_children(blk["id"], depth + 1)
         if kids:
+            if len(kids) > 95:
+                _lost(f"{t} 자식 {len(kids)-95}개 절단 (요청당 100 한도)")
             out[t]["children"] = kids[:95]
     elif blk.get("has_children"):
         out[t].pop("children", None)
@@ -371,12 +388,23 @@ def _strip(blk, depth=0):
 
 
 def _fetch_children(bid, depth=0):
-    r = requests.get(f"{API}/blocks/{bid}/children", headers=_H,
-                     params={"page_size": 100}, timeout=30)
-    if r.status_code != 200:
-        return []
+    # has_more 를 무시하면 101번째부터 조용히 사라진다 (코덱스 지적).
+    raw, cur = [], None
+    while True:
+        p = {"page_size": 100}
+        if cur:
+            p["start_cursor"] = cur
+        r = requests.get(f"{API}/blocks/{bid}/children", headers=_H, params=p, timeout=30)
+        if r.status_code != 200:
+            _lost(f"자식 조회 실패 HTTP {r.status_code} — 이 블록 이하 전부 누락")
+            break
+        j = r.json()
+        raw += j.get("results", [])
+        if not j.get("has_more"):
+            break
+        cur = j.get("next_cursor")
     out = []
-    for k in r.json().get("results", []):
+    for k in raw:
         c = _strip(k, depth)
         if c and c.get("type") and c.get(c["type"]) is not None:
             out.append(c)
@@ -531,6 +559,14 @@ def build_blocks(d, report, pick, gate_ok):
         b.append(_toggle("📖 시장 해설 — 순환매·유튜브·한계", detail, "gray_background"))
 
     b += dashboard_copy()
+    if COPY_ISSUES:
+        from collections import Counter
+        cnt = Counter(COPY_ISSUES)
+        detail = " · ".join(f"{k} ×{v}" if v > 1 else k for k, v in cnt.most_common(6))
+        b.append({"object": "block", "type": "callout", "callout": {
+            "icon": {"type": "emoji", "emoji": "⚠️"}, "color": "yellow_background",
+            "rich_text": _rt(f"원문 복사 중 {len(COPY_ISSUES)}건 누락", True)
+                         + _rt(f"\n{detail}", color="gray")}})
     return b
 
 
@@ -551,8 +587,19 @@ def upsert(today, blocks, pick, gate_ok, summary):
     if existing:
         pid = existing["id"]
         requests.patch(f"{API}/pages/{pid}", headers=_H, json={"properties": props}, timeout=30)
-        for k in requests.get(f"{API}/blocks/{pid}/children", headers=_H,
-                              params={"page_size": 100}, timeout=30).json().get("results", []):
+        # 첫 100개만 지우면 잔여 블록이 아래에 남아 누적된다 (코덱스 지적)
+        dead, cur = [], None
+        while True:
+            pp = {"page_size": 100}
+            if cur:
+                pp["start_cursor"] = cur
+            jj = requests.get(f"{API}/blocks/{pid}/children", headers=_H,
+                              params=pp, timeout=30).json()
+            dead += jj.get("results", [])
+            if not jj.get("has_more"):
+                break
+            cur = jj.get("next_cursor")
+        for k in dead:
             requests.delete(f"{API}/blocks/{k['id']}", headers=_H, timeout=30)
         M.log(f"  기존 {today} 행 갱신")
     else:
