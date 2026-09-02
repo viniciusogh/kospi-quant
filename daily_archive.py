@@ -311,27 +311,54 @@ ALLOW = {
 }
 
 
+# 노션이 받는 이미지 MIME. 응답 헤더를 무조건 믿지 않고 allowlist 로 건다 (코덱스 권고).
+IMG_MIME = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif",
+            "image/webp": ".webp", "image/svg+xml": ".svg"}
+
+
+def _caption(im):
+    """caption 을 재생성 가능한 형태로 정규화. _copy_image 가 ALLOW 를 우회해
+    caption 을 통째로 버리고 있었다 (코덱스 지적 2026-09-02)."""
+    cap = im.get("caption") or []
+    return [{k: v for k, v in r.items() if k not in ("plain_text", "href")} for r in cap]
+
+
 def _copy_image(blk):
     """노션 호스팅 이미지(type=file)는 API 로 재생성할 수 없다 — url 이 만료되는 서명 링크라
     external 로 걸면 곧 깨진다. 내려받아 file_upload 로 다시 올린다."""
     im = blk.get("image") or {}
+    cap = _caption(im)
     if im.get("type") == "external":
-        return {"object": "block", "type": "image",
-                "image": {"type": "external", "external": {"url": im["external"]["url"]}}}
+        out = {"type": "external", "external": {"url": im["external"]["url"]}}
+        if cap:
+            out["caption"] = cap
+        return {"object": "block", "type": "image", "image": out}
     url = (im.get("file") or {}).get("url")
     if not url:
+        _lost("이미지 url 없음")
         return None
     try:
         r = requests.get(url, timeout=60)
         if r.status_code != 200:
+            _lost(f"이미지 다운로드 실패 HTTP {r.status_code}")
             return None
-        fid = D.upload_image(r.content, "archive.png")
+        # Content-Type 에서 MIME 을 받아 확장자·업로드 타입을 맞춘다.
+        # PNG 로 고정하면 JPG·GIF 가 훼손되거나 업로드가 실패한다.
+        ct = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ct not in IMG_MIME:
+            if ct:
+                _lost(f"이미지 MIME 미지원 {ct} — PNG 로 시도")
+            ct = "image/png"
+        fid = D.upload_image(r.content, f"archive{IMG_MIME[ct]}", ct)
         if not fid:
+            _lost("이미지 업로드 실패")
             return None
-        return {"object": "block", "type": "image",
-                "image": {"type": "file_upload", "file_upload": {"id": fid}}}
+        out = {"type": "file_upload", "file_upload": {"id": fid}}
+        if cap:
+            out["caption"] = cap
+        return {"object": "block", "type": "image", "image": out}
     except Exception as e:
-        M.log(f"  ⚠️ 이미지 복사 생략: {str(e)[:60]}")
+        _lost(f"이미지 복사 예외 {str(e)[:40]}")
         return None
 
 

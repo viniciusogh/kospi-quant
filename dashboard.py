@@ -348,20 +348,20 @@ def add_report(toggle_title, header_blocks, items=None, color="gray_background")
     return tid
 
 
-def upload_image(png_bytes, filename="chart.png"):
+def upload_image(png_bytes, filename="chart.png", content_type="image/png"):
     """노션 파일 업로드 → file_upload id. 업로드 API 는 최신 버전을 요구하므로 이 호출만 NV_UPLOAD.
     (그 버전으로 /databases/{id}/query 를 쓰면 날짜필터가 빈결과가 된다 — index_ticker 때 확인된 함정)"""
     h = {"Authorization": f"Bearer {os.environ['NOTION_API_KEY']}",
          "Content-Type": "application/json", "Notion-Version": NV_UPLOAD}
     r = requests.post(f"{API}/file_uploads", headers=h, timeout=30,
-                      json={"filename": filename, "content_type": "image/png"})
+                      json={"filename": filename, "content_type": content_type})
     if r.status_code not in (200, 201):
         print(f"  ⚠️ 파일업로드 생성 실패 {r.status_code}: {r.text[:150]}")
         return None
     fid = r.json()["id"]
     h2 = {"Authorization": f"Bearer {os.environ['NOTION_API_KEY']}", "Notion-Version": NV_UPLOAD}
     r2 = requests.post(f"{API}/file_uploads/{fid}/send", headers=h2, timeout=120,
-                       files={"file": (filename, png_bytes, "image/png")})
+                       files={"file": (filename, png_bytes, content_type)})
     if r2.status_code not in (200, 201):
         print(f"  ⚠️ 파일 전송 실패 {r2.status_code}: {r2.text[:150]}")
         return None
