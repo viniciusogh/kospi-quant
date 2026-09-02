@@ -8,7 +8,11 @@
 # 사용: ./codex_review.sh <spec파일> [제목]
 set -u
 ME=term_d8eae294-5da0-4e6e-ad2d-2f7a7c66566d
-PEER=term_bf5219d5-c750-4ae3-af13-2487dcb5f879
+export ME   # 파이프라인의 python3 가 상속받아야 한다
+# 피어 핸들은 세션마다 바뀐다. 수신함의 최근 발신자로 찾고, 못 찾으면 마지막 known 값.
+# 하드코딩만 두면 코덱스를 새로 띄운 순간 dispatch 가 조용히 실패한다 (2026-09-02).
+PEER=${CODEX_PEER:-$(orca orchestration inbox --json 2>/dev/null | python3 _find_peer.py 2>/dev/null)}
+PEER=${PEER:-term_bf5219d5-c750-4ae3-af13-2487dcb5f879}
 SPEC="${1:?spec 파일 경로 필요}"
 TITLE="${2:-클로드 검토 요청}"
 LOG=codex_review.log
