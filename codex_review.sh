@@ -18,6 +18,7 @@ TITLE="${2:-클로드 검토 요청}"
 LOG=codex_review.log
 INTERVAL=${CODEX_RETRY_SEC:-45}
 MAX=${CODEX_RETRY_MAX:-40}          # 45s × 40 = 30분
+RESET_MAX=${CODEX_RESET_MAX:-3}      # 죽은 작업 되살리기 상한
 WAIT_SEC=${CODEX_WAIT_SEC:-30}      # 회신 폴링 간격
 WAIT_MAX=${CODEX_WAIT_MAX:-40}      # 30s × 40 = 20분
 
@@ -29,9 +30,22 @@ TASK=$(orca orchestration task-create --from "$ME" --task-title "$TITLE" \
 [ -z "${TASK:-}" ] && { log "❌ task 생성 실패"; exit 1; }
 log "task $TASK 생성 · 유휴 대기 시작 (최대 $((INTERVAL*MAX/60))분)"
 
+RESETS=0
 for i in $(seq 1 "$MAX"); do
-  CODE=$(orca orchestration dispatch --task "$TASK" --to "$PEER" --from "$ME" --inject --json 2>/dev/null \
-    | python3 -c "
+  # 유휴 대기 중 재시도가 쌓이면 작업이 failed 로 바뀌고, 그 뒤 dispatch 는 전부
+  # runtime_error 다. 2026-09-02 에 죽은 작업을 37번 더 두드리며 30분을 태웠다.
+  ST=$(orca orchestration task-list --json 2>/dev/null | python3 _task_status.py "$TASK" 2>/dev/null)
+  if [ "$ST" = "failed" ]; then
+    RESETS=$((RESETS + 1))
+    if [ "$RESETS" -gt "$RESET_MAX" ]; then
+      log "❌ 작업이 ${RESET_MAX}회 죽었다 — 중단 (코덱스가 계속 바쁘거나 주입을 못 받는 상태)"
+      exit 4
+    fi
+    orca orchestration task-update --id "$TASK" --status ready --from "$ME" >/dev/null 2>&1
+    log "↻ 작업을 ready 로 되돌림 ($RESETS/$RESET_MAX)"
+  fi
+  RESP=$(orca orchestration dispatch --task "$TASK" --to "$PEER" --from "$ME" --inject --json 2>/dev/null)
+  CODE=$(printf '%s' "$RESP" | python3 -c "
 import json,sys
 try:
     d=json.load(sys.stdin)
@@ -55,7 +69,11 @@ except Exception: print('parse')" 2>/dev/null)
         log "⏰ $((WAIT_SEC*WAIT_MAX/60))분간 회신 없음 — 코덱스 창의 권한 프롬프트 확인"
         exit 3 ;;
     agent_prompt_blocked) sleep "$INTERVAL" ;;         # 작업 중 — 조용히 기다린다
-    *) log "⚠️ $CODE (시도 $i)"; sleep "$INTERVAL" ;;
+    *) MSG=$(printf '%s' "$RESP" | python3 -c "
+import json,sys
+try: print(json.load(sys.stdin).get('error',{}).get('message','')[:150])
+except Exception: pass" 2>/dev/null)
+       log "⚠️ $CODE (시도 $i) $MSG"; sleep "$INTERVAL" ;;
   esac
 done
 log "⏸️ $((INTERVAL*MAX/60))분간 유휴가 안 됨 — 메시지는 큐에 남아 있다"
