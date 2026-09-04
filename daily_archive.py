@@ -684,6 +684,24 @@ def build_blocks(d, report, pick, gate_ok):
     return b
 
 
+def _table_after(parent, marker_id):
+    """marker 바로 뒤에 이미 표가 있나. 붙이기 재시도 전 중복 방지용."""
+    cur, prev_was_marker = None, False
+    while True:
+        pp = {"page_size": 100}
+        if cur:
+            pp["start_cursor"] = cur
+        j = requests.get(f"{API}/blocks/{parent}/children", headers=_H,
+                         params=pp, timeout=30).json()
+        for b in j.get("results", []):
+            if prev_was_marker:
+                return b["type"] == "table"
+            prev_was_marker = (b["id"] == marker_id)
+        if not j.get("has_more"):
+            return False
+        cur = j.get("next_cursor")
+
+
 def attach_deep_tables(pid):
     """자리표시 문단을 찾아 그 뒤에 표를 붙이고 문단을 지운다.
     실패하면 부모를 건드리지 않고 문단만 안내로 바꾼다 — 부모를 지우면 이미
@@ -722,10 +740,12 @@ def attach_deep_tables(pid):
         r = requests.patch(f"{API}/blocks/{parent}/children", headers=_H, timeout=60,
                            json={"children": [tbl], "after": marker_id})
         if r.status_code != 200:
-            # 한 번만 재시도. 성공 여부가 불명확할 수 있어 자식을 다시 세어 중복을 막는다.
-            before = len(requests.get(f"{API}/blocks/{parent}/children", headers=_H,
-                                      params={"page_size": 100}, timeout=30)
-                         .json().get("results", []))
+            # 재시도 전에 '이미 붙었나' 를 먼저 본다. timeout 처럼 결과가 불명확한 경우
+            # 그냥 재시도하면 표가 두 번 들어간다 (코덱스 권고).
+            if _table_after(parent, marker_id):
+                requests.delete(f"{API}/blocks/{marker_id}", headers=_H, timeout=30)
+                ok += 1
+                continue
             r = requests.patch(f"{API}/blocks/{parent}/children", headers=_H, timeout=60,
                                json={"children": [tbl], "after": marker_id})
             if r.status_code != 200:
@@ -735,7 +755,6 @@ def attach_deep_tables(pid):
                                    "📊 표는 원본 모멘텀 리포트 참조 (붙이기 실패)",
                                    color="gray")}})
                 continue
-            del before
         requests.delete(f"{API}/blocks/{marker_id}", headers=_H, timeout=30)
         ok += 1
     M.log(f"  📊 깊은 표 {ok}/{len(DEEP_TABLES)}개 붙임")
