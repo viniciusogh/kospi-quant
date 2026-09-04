@@ -453,6 +453,10 @@ def dashboard_copy():
     """통합 대시보드의 블록을 **원문 그대로** 복사한다.
     재생성하면 중복이고 원본과 갈라진다(사용자 지적 2026-09-02).
     가공은 '오늘의 추천' 하나만 한다."""
+    # 한 프로세스에서 두 번 돌면 이전 표가 다시 붙고 손실이 중복 집계된다.
+    # 실행 단위 상태라 여기서 초기화한다 (검증 중 자체 발견 2026-09-04).
+    DEEP_TABLES.clear()
+    COPY_ISSUES.clear()
     out = []
     try:
         _, _, _, mid, tail = D._layout(D.page_id())
@@ -758,6 +762,7 @@ def attach_deep_tables(pid):
         requests.delete(f"{API}/blocks/{marker_id}", headers=_H, timeout=30)
         ok += 1
     M.log(f"  📊 깊은 표 {ok}/{len(DEEP_TABLES)}개 붙임")
+    DEEP_TABLES.clear()
 
 
 def upsert(today, blocks, pick, gate_ok, summary):
