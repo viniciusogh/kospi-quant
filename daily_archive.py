@@ -621,11 +621,17 @@ def build_blocks(d, report, pick, gate_ok):
     asof = data_asof()
     sd = stale_days(asof)
     if sd >= 1:
+        # 1영업일은 평일 휴장(추석 등 휴장일엔 산출물이 안 올라온다)일 수도 있어 노란 안내,
+        # 2영업일 이상은 파이프라인 문제로 보고 빨간 경고 (2026-09-04 오탐 검증).
+        hard = sd >= 2
         b.append({"object": "block", "type": "callout", "callout": {
-            "icon": {"type": "emoji", "emoji": "🚨"}, "color": "red_background",
-            "rich_text": _rt(f"입력 데이터가 {sd}영업일 낡음 — 모멘텀 후보 기준일 {asof}", True)
+            "icon": {"type": "emoji", "emoji": "🚨" if hard else "📅"},
+            "color": "red_background" if hard else "yellow_background",
+            "rich_text": _rt(f"입력 데이터 기준일 {asof} ({sd}영업일 전)", True)
                          + _rt("\nGitHub Actions 산출물을 못 받은 상태다. "
-                               "이 추천은 오늘 후보가 아니라 그날 후보에서 고른 것이다.",
+                               "이 추천은 오늘 후보가 아니라 그날 후보에서 고른 것이다."
+                               if hard else
+                               "\n휴장일이면 정상이다. 이틀 이상 벌어지면 파이프라인을 확인할 것.",
                                color="gray")}})
 
     # ② 게이트 — 추천 바로 아래 (전제이므로 추천보다 뒤)
