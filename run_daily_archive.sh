@@ -1,6 +1,7 @@
 #!/bin/bash
-# 일일 아카이브 — launchd(com.vinicius.daily-archive)가 평일 21:00 에 호출.
-# 21:00 인 이유: 유튜브(20:00)·모멘텀(17:30)·섹터(17:11) 가 모두 끝난 뒤 종합해야 한다.
+# 일일 아카이브 — launchd(com.vinicius.daily-archive)가 평일 18:00 에 호출.
+# 18:00 인 이유: 모멘텀 산출물이 17:30~17:40 에 올라온다(실측). 장 마감 후 만들어
+# 다음 거래일에 살 종목을 찍는다 (2026-09-04 규환 결정).
 cd /Users/vinicius/Projects/kospi-quant || exit 1
 LOG=archive_cron.log
 [ "$(date +%u)" -gt 5 ] && exit 0

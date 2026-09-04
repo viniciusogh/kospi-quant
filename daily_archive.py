@@ -366,6 +366,9 @@ def _copy_image(blk):
 # (코덱스 지적 2026-09-02: HTTP 실패·절단·미지원 타입이 전부 무음이었다).
 COPY_ISSUES = []
 
+# 깊이 제한으로 미룬 표. 자리표시 문단 뒤에 페이지 생성 후 붙인다.
+DEEP_TABLES = {}
+
 
 def _lost(what):
     COPY_ISSUES.append(what)
@@ -387,9 +390,17 @@ def _strip(blk, depth=0):
     # 노션은 요청 깊이 3 에서 table 을 못 만든다(모멘텀→종목토글→분기실적표).
     # 표를 통째로 버리기보다 한 줄 요약 문단으로 낮춰 정보는 남긴다.
     if t == "table" and depth >= 2:
-        _lost("표 → 문단 대체 (요청 깊이 3 제한)")
+        # 요청당 중첩 깊이 제한이라 한 번에는 못 만든다. 자리표시 문단을 두고
+        # 페이지 생성 후 그 문단 뒤에 표를 따로 붙인다(staged append, 코덱스 권고).
+        # 표를 통째로 버리던 것을 살린다 (2026-09-04 규환 결정).
+        body = {k: v for k, v in (blk.get(t) or {}).items() if k in ALLOW["table"]}
+        kids = _fetch_children(blk["id"], depth + 1)
+        if kids:
+            body["children"] = kids[:95]
+        mark = f"⟦TBL:{len(DEEP_TABLES)}⟧"
+        DEEP_TABLES[mark] = {"object": "block", "type": "table", "table": body}
         return {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [
-            {"type": "text", "text": {"content": "📊 (표는 원본 리포트 참조 — 중첩 깊이 제한)"},
+            {"type": "text", "text": {"content": mark},
              "annotations": {"color": "gray", "italic": True}}]}}
     allow = ALLOW.get(t)
     if allow is None:
@@ -504,11 +515,17 @@ PROSE_SECS = ["오늘 시장", "순환매 흐름", "유튜브가 말하는 것",
 
 
 def _leftovers(bullets, parsed_n, label):
-    """표 파싱이 놓친 줄은 불릿으로 살린다. 형식이 바뀌어도 내용이 조용히 사라지지 않게."""
+    """표 파싱이 놓친 줄은 불릿으로 살린다. 형식이 바뀌어도 내용이 조용히 사라지지 않게.
+    다만 '대량 이탈: …' 같은 요약 문장은 애초에 표 행이 아니다 — 그건 경고하지 않는다
+    (2026-09-04: 정상 동작을 '파싱 실패' 로 로그해 헛걱정을 시켰다)."""
     if parsed_n >= len(bullets):
         return []
     miss = bullets[parsed_n:] if parsed_n else bullets
-    M.log(f"  \u26a0\ufe0f {label} {len(miss)}줄 표 파싱 실패 \u2014 불릿으로 대체")
+    # 종목 행처럼 보이는데 안 잡힌 것만 진짜 실패다
+    suspect = [t for t in miss if ("외인" in t or "외국인" in t)
+               and "기관" in t and "20일" in t]
+    if suspect:
+        M.log(f"  \u26a0\ufe0f {label} {len(suspect)}줄 표 파싱 실패 \u2014 불릿으로 대체")
     return [{"object": "block", "type": "bulleted_list_item",
              "bulleted_list_item": {"rich_text": _rt(t)}} for t in miss]
 
@@ -524,6 +541,18 @@ def data_asof():
     except Exception as e:
         M.log(f"  ⚠️ 기준일 확인 실패 — 낡음 검사 불가: {str(e)[:60]}")
         return ""
+
+
+def next_trading_day(now=None):
+    """이 추천으로 실제 매수하는 날. 장 마감 후 만들므로 다음 영업일이다.
+    (2026-09-04 규환 결정: 페이지 날짜는 데이터 날짜로 두고 라벨로 매수일을 밝힌다.)"""
+    d = (now or datetime.now(KST)).date() + timedelta(days=1)
+    while d.weekday() >= 5:
+        d += timedelta(days=1)
+    return d
+
+
+WD = ["월", "화", "수", "목", "금", "토", "일"]
 
 
 def expected_asof(now=None):
@@ -565,7 +594,9 @@ def build_blocks(d, report, pick, gate_ok):
     rec_body = secs.get(rec_key, [])
     one = next(iter(_prose(rec_body)), "")
     if pick:
-        head = f"오늘의 추천 — {pick['name']} ({pick['code']})  ·  {pick['price']:,.0f}원"
+        nd = next_trading_day()
+        head = (f"{nd.month}/{nd.day}({WD[nd.weekday()]}) 에 살 종목 — "
+                f"{pick['name']} ({pick['code']})  ·  {pick['price']:,.0f}원")
         sub = one or ("게이트 통과 후보" if gate_ok else "게이트 미충족 — 관찰 후보")
         if not gate_ok:
             sub += "  ·  게이트 미충족이라 확정 매수가 아닌 관찰 후보"
@@ -573,6 +604,8 @@ def build_blocks(d, report, pick, gate_ok):
             "icon": {"type": "emoji", "emoji": "🎯"},
             "color": "blue_background" if gate_ok else "orange_background",
             "rich_text": _rt(head, True) + _rt(f"\n{sub}")}})
+        b.append(_para(_rt(f"진입가 {pick['price']:,.0f}원은 오늘 종가다. "
+                           f"실제 매수는 {nd.month}/{nd.day} 시가부터 가능하다.", color="gray")))
         b.append(_table(["외국인", "기관", "20일", "60일 고점대비"],
                         [[f"{pick['frgn5']:+,.0f}억", f"{pick['orgn5']:+,.0f}억",
                           f"{pick['ret20']*100:+.1f}%", f"{(pick['hi60']-1)*100:+.1f}%"]]))
@@ -649,6 +682,63 @@ def build_blocks(d, report, pick, gate_ok):
             "rich_text": _rt(f"원문 복사 중 {len(COPY_ISSUES)}건 누락", True)
                          + _rt(f"\n{detail}", color="gray")}})
     return b
+
+
+def attach_deep_tables(pid):
+    """자리표시 문단을 찾아 그 뒤에 표를 붙이고 문단을 지운다.
+    실패하면 부모를 건드리지 않고 문단만 안내로 바꾼다 — 부모를 지우면 이미
+    복사된 제목·본문까지 잃는다(코덱스 권고 3b)."""
+    if not DEEP_TABLES:
+        return
+    found = {}
+
+    def walk(bid):
+        cur = None
+        while True:
+            pp = {"page_size": 100}
+            if cur:
+                pp["start_cursor"] = cur
+            j = requests.get(f"{API}/blocks/{bid}/children", headers=_H,
+                             params=pp, timeout=30).json()
+            for b in j.get("results", []):
+                if b["type"] == "paragraph":
+                    txt = "".join(x.get("plain_text", "")
+                                  for x in b["paragraph"].get("rich_text", []))
+                    if txt in DEEP_TABLES:
+                        found[txt] = (bid, b["id"])
+                elif b.get("has_children"):
+                    walk(b["id"])
+            if not j.get("has_more"):
+                break
+            cur = j.get("next_cursor")
+
+    walk(pid)
+    ok = 0
+    for mark, tbl in DEEP_TABLES.items():
+        if mark not in found:
+            _lost(f"표 자리표시 {mark} 를 페이지에서 못 찾음")
+            continue
+        parent, marker_id = found[mark]
+        r = requests.patch(f"{API}/blocks/{parent}/children", headers=_H, timeout=60,
+                           json={"children": [tbl], "after": marker_id})
+        if r.status_code != 200:
+            # 한 번만 재시도. 성공 여부가 불명확할 수 있어 자식을 다시 세어 중복을 막는다.
+            before = len(requests.get(f"{API}/blocks/{parent}/children", headers=_H,
+                                      params={"page_size": 100}, timeout=30)
+                         .json().get("results", []))
+            r = requests.patch(f"{API}/blocks/{parent}/children", headers=_H, timeout=60,
+                               json={"children": [tbl], "after": marker_id})
+            if r.status_code != 200:
+                _lost(f"표 붙이기 실패 {r.status_code} — 자리에 안내만 남김")
+                requests.patch(f"{API}/blocks/{marker_id}", headers=_H, timeout=30,
+                               json={"paragraph": {"rich_text": _rt(
+                                   "📊 표는 원본 모멘텀 리포트 참조 (붙이기 실패)",
+                                   color="gray")}})
+                continue
+            del before
+        requests.delete(f"{API}/blocks/{marker_id}", headers=_H, timeout=30)
+        ok += 1
+    M.log(f"  📊 깊은 표 {ok}/{len(DEEP_TABLES)}개 붙임")
 
 
 def upsert(today, blocks, pick, gate_ok, summary):
@@ -750,6 +840,8 @@ def main():
         summary = f"{'게이트 통과' if gate_ok else '게이트 미충족'} · 추천 {pick['name'] if pick else '없음'}"
     blocks = build_blocks(d, report, pick, gate_ok)
     pid = upsert(today, blocks, pick, gate_ok, summary)
+    if pid:
+        attach_deep_tables(pid)
     M.log(f"✅ 완료 · 추천 {pick['name'] if pick else '없음'} · 블록 {len(blocks)}개" if pid else "❌ 실패")
 
 
