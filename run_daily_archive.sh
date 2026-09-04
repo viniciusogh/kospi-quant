@@ -10,6 +10,16 @@ set -a
 set +a
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] ─── 실행 ───" >> "$LOG"
+
+# 실행 직전에 당긴다. 이 저장소를 pull 하는 스케줄이 아무 데도 없어서(2026-09-04 발견)
+# 아카이브가 GitHub Actions 산출물을 못 받고 이틀 묵은 모멘텀으로 추천을 냈다.
+# investment-chatbot 의 ETL 은 ~/Desktop/퀀트스코어 를 당기는데 그건 git 저장소가 아니다.
+# 실패해도 진행한다 — 낡은 데이터로라도 페이지는 남기고, 낡음은 daily_archive 가 표시한다.
+if git pull --rebase --autostash >> "$LOG" 2>&1; then
+    echo "  ✅ git pull 완료" >> "$LOG"
+else
+    echo "  🚨 git pull 실패 — 낡은 입력으로 진행한다" >> "$LOG"
+fi
 # 하드 상한 900s — 응답 없는 API 에 물려 좀비로 남으면 launchd 가 이후 실행을 막는다
 perl -e 'alarm shift; exec @ARGV' 900 /opt/homebrew/bin/python3 daily_archive.py >> "$LOG" 2>&1
 rc=$?

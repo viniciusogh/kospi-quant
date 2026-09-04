@@ -7,10 +7,10 @@
 실행: python daily_archive.py        (하루 1회, 장 마감 후)
 평가: python daily_archive.py --eval  (과거 행의 평가수익률 채우기)
 """
-import os, sys, json, re
+import os, sys, json, re, subprocess
 import _env
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import momentum_daily as M
 import dashboard as D
@@ -513,6 +513,36 @@ def _leftovers(bullets, parsed_n, label):
              "bulleted_list_item": {"rich_text": _rt(t)}} for t in miss]
 
 
+def data_asof():
+    """모멘텀 입력이 어느 날짜 것인지. CSV 에 날짜 컬럼이 없어 커밋 시각으로 판정한다.
+    이 저장소를 pull 하는 스케줄이 없어 이틀 묵은 후보로 추천이 나간 적이 있다(2026-09-04)."""
+    try:
+        out = subprocess.run(["git", "log", "-1", "--format=%cI", "--",
+                              "latest_momentum_reco.csv"], cwd=_DIR,
+                             capture_output=True, text=True, timeout=15)
+        return (out.stdout or "").strip()[:10]
+    except Exception as e:
+        M.log(f"  ⚠️ 기준일 확인 실패 — 낡음 검사 불가: {str(e)[:60]}")
+        return ""
+
+
+def stale_days(asof):
+    """입력 기준일이 최근 영업일보다 며칠 뒤쳐졌나. 주말은 세지 않는다."""
+    if not asof:
+        return 0
+    try:
+        a = datetime.strptime(asof, "%Y-%m-%d").date()
+    except ValueError:
+        return 0
+    cur = datetime.now(KST).date()
+    n = 0
+    while cur > a:
+        if cur.weekday() < 5:
+            n += 1
+        cur -= timedelta(days=1)
+    return n
+
+
 def build_blocks(d, report, pick, gate_ok):
     secs = dict(_sections(report))
     b = []
@@ -536,6 +566,17 @@ def build_blocks(d, report, pick, gate_ok):
         for t in _bullets(rec_body)[:5]:
             b.append({"object": "block", "type": "bulleted_list_item",
                       "bulleted_list_item": {"rich_text": _rt(t)}})
+
+    # 입력이 낡았으면 추천 바로 아래에 드러낸다. pull 이 실패해도 조용히 나가면 안 된다.
+    asof = data_asof()
+    sd = stale_days(asof)
+    if sd >= 1:
+        b.append({"object": "block", "type": "callout", "callout": {
+            "icon": {"type": "emoji", "emoji": "🚨"}, "color": "red_background",
+            "rich_text": _rt(f"입력 데이터가 {sd}영업일 낡음 — 모멘텀 후보 기준일 {asof}", True)
+                         + _rt("\nGitHub Actions 산출물을 못 받은 상태다. "
+                               "이 추천은 오늘 후보가 아니라 그날 후보에서 고른 것이다.",
+                               color="gray")}})
 
     # ② 게이트 — 추천 바로 아래 (전제이므로 추천보다 뒤)
     b.append({"object": "block", "type": "callout", "callout": {
