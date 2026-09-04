@@ -526,15 +526,28 @@ def data_asof():
         return ""
 
 
-def stale_days(asof):
-    """입력 기준일이 최근 영업일보다 며칠 뒤쳐졌나. 주말은 세지 않는다."""
+def expected_asof(now=None):
+    """지금 시점에서 '최신' 이어야 하는 모멘텀 기준일.
+    장 마감 후 산출물이 17:30 경 올라오므로, 그 전에는 전 영업일이 최신이다.
+    달력 기준으로 재면 아침 실행마다 오탐이 난다 (2026-09-04 검증에서 발견)."""
+    now = now or datetime.now(KST)
+    d = now.date()
+    if not (d.weekday() < 5 and (now.hour, now.minute) >= (17, 30)):
+        d -= timedelta(days=1)          # 아직 오늘 산출물이 없다
+    while d.weekday() >= 5:             # 주말은 건너뛴다
+        d -= timedelta(days=1)
+    return d
+
+
+def stale_days(asof, now=None):
+    """입력 기준일이 '최신이어야 하는 날' 보다 몇 영업일 뒤쳐졌나."""
     if not asof:
         return 0
     try:
         a = datetime.strptime(asof, "%Y-%m-%d").date()
     except ValueError:
         return 0
-    cur = datetime.now(KST).date()
+    cur = expected_asof(now)
     n = 0
     while cur > a:
         if cur.weekday() < 5:
