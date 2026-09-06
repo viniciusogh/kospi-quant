@@ -8,7 +8,7 @@
 승인 없이는 절대 주문이 나가지 않는다. 승인이 있어도 TRADE_ENABLED=1 이 아니면 드라이런이다.
 게이트 미충족이어도 주문안은 만든다(2026-09-06 규환님 결정) — 대신 알림 첫 줄에 게이트를 박는다.
 """
-import os, sys, json, time, csv
+import os, sys, json, time, csv, html
 from datetime import datetime, timedelta
 
 import requests
@@ -81,11 +81,19 @@ def _tg(method, **payload):
         return None
 
 
+def E(s):
+    """HTML parse_mode 를 쓰므로 종목명·API 메시지를 그대로 넣으면 안 된다.
+    코스피에 KT&G·F&F·신세계 I&C 처럼 & 가 든 종목이 있어 400 이 나고,
+    그러면 주문안 알림이 통째로 사라진다 (무음 실패)."""
+    return html.escape(str(s), quote=False)
+
+
 def notify(text, buttons=None):
+    """전송 성공하면 True. 실패를 삼키면 안 되는 자리가 있어 성공여부를 돌려준다."""
     p = {"chat_id": TG_CHAT, "text": text, "parse_mode": "HTML"}
     if buttons:
         p["reply_markup"] = {"inline_keyboard": [buttons]}
-    return _tg("sendMessage", **p)
+    return _tg("sendMessage", **p) is not None
 
 
 # ── KIS ───────────────────────────────────────────────────────────────
@@ -278,27 +286,34 @@ def cmd_propose():
 
     budget = min(MAX_KRW, cash)
     qty = budget // px
-    gate_line = "🟢 게이트 통과" if row["gate"] == "통과" else f"🛑 게이트 {row['gate'] or '미상'}"
+    gate_line = "🟢 게이트 통과" if row["gate"] == "통과" else f"🛑 게이트 {E(row['gate'] or '미상')}"
 
     if qty < 1:
-        notify(f"{gate_line}\n📭 <b>{row['name']}</b> ({row['code']}) 를 추천했지만 "
+        notify(f"{gate_line}\n📭 <b>{E(row['name'])}</b> ({row['code']}) 를 추천했지만 "
                f"매수가능금액이 {cash:,}원이라 1주도 못 삽니다. (주가 {px:,}원)")
         save_state({"date": d, "status": "skipped", "reason": f"자금부족 {cash}"})
         return
 
     tokid = f"{d}:{row['code']}:{int(time.time())}"
     amount = qty * px
-    notify(
+    sent = notify(
         f"{gate_line}\n"
-        f"<b>{row['name']}</b> ({row['code']})  {qty}주  {px:,}원\n"
+        f"<b>{E(row['name'])}</b> ({row['code']})  {qty}주  {px:,}원\n"
         f"주문금액 <b>{amount:,}원</b> · 매수가능 {cash:,}원\n"
         f"{'지정가' if ORD_DVSN == '00' else '시장가'} · 계좌 {cano}-{prdt}\n"
         f"{row['asof']} 리포트 추천 · 진입가 {int(row['entry'] or 0):,}원"
         + ("" if ENABLED else "\n\n⚠️ TRADE_ENABLED=0 — 승인해도 실제 주문은 안 나갑니다(드라이런)")
-        + (f"\n\n※ 게이트가 {row['gate']}입니다. 자체 백테스트는 게이트 미충족 구간에서 "
+        + (f"\n\n※ 게이트가 {E(row['gate'])}입니다. 자체 백테스트는 게이트 미충족 구간에서 "
            f"이 전략이 손실이었습니다." if row["gate"] != "통과" else ""),
         buttons=[{"text": "✅ 매수 승인", "callback_data": f"buy:{tokid}"},
                  {"text": "❌ 거절", "callback_data": f"no:{tokid}"}])
+
+    # 전송이 실패했는데 proposed 로 저장하면, 규환님은 아무것도 못 받았는데 시스템만
+    # 승인을 기다리다 TTL 로 조용히 만료된다. 저장을 건너뛰어야 다음 propose 슬롯이
+    # 다시 보낸다 — launchd 가 08:40·08:55·09:10 세 번 부르는 이유가 이것이다.
+    if not sent:
+        log("❌ 주문안 전송 실패 — 상태를 저장하지 않는다 (다음 실행에서 재시도)")
+        return
 
     save_state({"date": d, "status": "proposed", "token": tokid, "code": row["code"],
                 "name": row["name"], "qty": qty, "price": px, "gate": row["gate"],
@@ -317,7 +332,7 @@ def cmd_poll():
         return
     if time.time() - s.get("sent", 0) > TTL_H * 3600:
         s["status"] = "expired"; save_state(s)
-        notify(f"⌛ <b>{s['name']}</b> 주문안이 {TTL_H}시간 지나 만료됐습니다.")
+        notify(f"⌛ <b>{E(s['name'])}</b> 주문안이 {TTL_H}시간 지나 만료됐습니다.")
         return
 
     ups = _tg("getUpdates", offset=s.get("offset", 0), timeout=0) or []
@@ -341,7 +356,7 @@ def cmd_poll():
         return
     if decision == "no":
         s["status"] = "rejected"; save_state(s)
-        notify(f"❌ <b>{s['name']}</b> 주문을 취소했습니다.")
+        notify(f"❌ <b>{E(s['name'])}</b> 주문을 취소했습니다.")
         log_row(ts=datetime.now(KST).isoformat(), date=s["date"], code=s["code"],
                 name=s["name"], qty=s["qty"], price=s["price"], gate=s["gate"],
                 result="rejected", msg="", odno="", dry=int(not ENABLED))
@@ -354,7 +369,7 @@ def cmd_poll():
 
     if not ENABLED:
         s["status"] = "ordered"; s["dry"] = True; save_state(s)
-        notify(f"🧪 드라이런: <b>{s['name']}</b> {s['qty']}주 {s['price']:,}원 주문을 "
+        notify(f"🧪 드라이런: <b>{E(s['name'])}</b> {s['qty']}주 {s['price']:,}원 주문을 "
                f"만들었지만 전송하지 않았습니다. (TRADE_ENABLED=1 로 켜세요)")
         log_row(ts=now.isoformat(), date=s["date"], code=s["code"], name=s["name"],
                 qty=s["qty"], price=s["price"], gate=s["gate"], result="dryrun",
@@ -367,8 +382,8 @@ def cmd_poll():
     s["status"] = "ordered" if ok else "failed"
     s["msg"] = msg; s["odno"] = odno
     save_state(s)
-    notify((f"✅ 주문 전송 완료 — <b>{s['name']}</b> {s['qty']}주 {s['price']:,}원\n주문번호 {odno}"
-            if ok else f"❌ 주문 실패 — {s['name']}\n{msg}"))
+    notify((f"✅ 주문 전송 완료 — <b>{E(s['name'])}</b> {s['qty']}주 {s['price']:,}원\n주문번호 {E(odno)}"
+            if ok else f"❌ 주문 실패 — {E(s['name'])}\n{E(msg)}"))
     log_row(ts=now.isoformat(), date=s["date"], code=s["code"], name=s["name"],
             qty=s["qty"], price=s["price"], gate=s["gate"],
             result="ordered" if ok else "failed", msg=msg, odno=odno, dry=0)
