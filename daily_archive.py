@@ -7,7 +7,7 @@
 실행: python daily_archive.py        (하루 1회, 장 마감 후)
 평가: python daily_archive.py --eval  (과거 행의 평가수익률 채우기)
 """
-import os, sys, json, re, subprocess
+import os, sys, json, re, subprocess, time
 import _env
 import requests
 from datetime import datetime, timedelta
@@ -46,12 +46,17 @@ def _bul(rich):
     return {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": rich}}
 
 
-def collect(tok, upto=None):
+class _Skip(Exception):
+    """휴장일에 건너뛰는 구간 표시."""
+
+
+def collect(tok, upto=None, light=False):
     """원본 파일에서 직접 재료를 모은다. 대시보드 스크랩이 아니라 소스에서 —
     사용자가 '원문 스냅샷이 아니라 원문 자체' 를 원하고, 통합 대시보드는 안 살려도 된다고 했다."""
     import pandas as pd
     d = {}
-    d["trend"] = M.kospi_trend(tok)
+    # light=휴장일: 시세·수급을 안 쓰므로 KIS 를 호출하지 않는다 (코덱스 지적 2026-09-06)
+    d["trend"] = None if light else M.kospi_trend(tok)
 
     # 섹터: sector_history.csv 의 오늘 행
     try:
@@ -65,6 +70,8 @@ def collect(tok, upto=None):
     # 모멘텀: 추천 CSV + 오늘 지표 + 수급 + 캐시된 촉매/리스크
     cands = []
     try:
+        if light:                      # 휴장일엔 시세가 없어 후보를 만들지 않는다
+            raise _Skip()
         r = pd.read_csv(os.path.join(_DIR, "latest_momentum_reco.csv"), dtype={"code": str})
         cache = json.load(open(os.path.join(_DIR, "momentum_analysis.json"), encoding="utf-8"))
         for _, x in r.head(10).iterrows():
@@ -82,6 +89,8 @@ def collect(tok, upto=None):
                           "prsn5": fl.get("prsn5", 0),
                           "한줄": a.get("한줄", ""), "촉매": a.get("촉매", ""),
                           "리스크": a.get("리스크", "")})
+    except _Skip:
+        pass
     except Exception as e:
         M.log(f"  ⚠️ 모멘텀 재료 실패: {str(e)[:70]}")
     d["cands"] = cands
@@ -123,7 +132,15 @@ def collect(tok, upto=None):
         import keyword_insight as KI
         sys.path.insert(0, os.path.join(_DIR, "viz"))
         import keywords as KW
-        txt, n = KW._load_text(os.path.join(_DIR, "latest_youtube_analysis.json"), days=2)
+        # _load_text 는 파일 전체에서 최근 N일을 뽑아 upto 를 무시한다(코덱스 지적).
+        # 백필 시 미래 영상이 키워드에 섞이므로 필터한 임시 파일을 넘긴다.
+        _src = os.path.join(_DIR, "latest_youtube_analysis.json")
+        if upto:
+            import tempfile
+            _y = {k: v for k, v in json.load(open(_src, encoding="utf-8")).items() if k <= upto}
+            _fd, _src = tempfile.mkstemp(suffix=".json"); os.close(_fd)
+            json.dump(_y, open(_src, "w", encoding="utf-8"), ensure_ascii=False)
+        txt, n = KW._load_text(_src, days=2)
         items = KI.extract(txt, n, top=25, log=lambda *a: None)
         _today = datetime.now(KST).strftime("%Y-%m-%d")
         KI.record_day(_today, txt, [w for w, _, _, _ in items])   # 오늘 표본을 먼저 남긴다
@@ -442,13 +459,16 @@ DEEP_TABLES = {}
 # 깊이 제한으로 자식을 못 넣은 블록 수. 생성 후 따로 붙인다.
 DEEP_PENDING = [0]
 
+# 깊이 초과로 못 넣은 자식. key = 조상 경로((서명, 등장순서), ...)
+DEEP_KIDS = {}
+
 
 def _lost(what):
     COPY_ISSUES.append(what)
     M.log(f"  \u26a0\ufe0f 복사 손실: {what}")
 
 
-def _strip(blk, depth=0):
+def _strip(blk, depth=0, path=()):
     """노션 블록을 '다시 만들 수 있는' 형태로 정제한다.
     읽기전용 필드를 지우지 않으면 400 이 난다(2026-06-24 블록 이관 사고의 원인).
     표는 3단계 중첩이 안 되므로 depth 로 자른다."""
@@ -467,7 +487,7 @@ def _strip(blk, depth=0):
         # 페이지 생성 후 그 문단 뒤에 표를 따로 붙인다(staged append, 코덱스 권고).
         # 표를 통째로 버리던 것을 살린다 (2026-09-04 규환 결정).
         body = {k: v for k, v in (blk.get(t) or {}).items() if k in ALLOW["table"]}
-        kids = _fetch_children(blk["id"], depth + 1)
+        kids = _fetch_children(blk["id"], depth + 1, path)
         if kids:
             body["children"] = kids[:95]
         mark = f"⟦TBL:{len(DEEP_TABLES)}⟧"
@@ -488,20 +508,22 @@ def _strip(blk, depth=0):
         return None                       # 알맹이 없는 블록은 400 을 유발한다
     out = {"object": "block", "type": t, t: body}
     if blk.get("has_children") and depth < 2:
-        kids = _fetch_children(blk["id"], depth + 1)
+        kids = _fetch_children(blk["id"], depth + 1, path)
         if kids:
             if len(kids) > 95:
                 _lost(f"{t} 자식 {len(kids)-95}개 절단 (요청당 100 한도)")
             out[t]["children"] = kids[:95]
     elif blk.get("has_children"):
-        # 요청당 중첩 깊이 제한. 여기서 버리면 '빈 토글' 이 된다 —
-        # 페이지 생성 후 attach_missing_children() 이 따로 붙인다 (2026-09-06 규환 지적).
+        # 요청당 중첩 깊이 제한. 여기서 버리면 '빈 토글' 이 된다 (2026-09-06 규환 지적).
+        # 지금 떠서 경로와 함께 보관하고, 페이지 생성 후 그 경로로 찾아 붙인다.
+        # 붙일 때 원본을 다시 읽으면 대시보드가 15분마다 바뀌어 순서가 틀어진다(코덱스 지적).
         out[t].pop("children", None)
+        DEEP_KIDS[path] = _fetch_children(blk["id"], 0, path)
         DEEP_PENDING[0] += 1
     return out
 
 
-def _fetch_children(bid, depth=0):
+def _fetch_children(bid, depth=0, path=()):
     # has_more 를 무시하면 101번째부터 조용히 사라진다 (코덱스 지적).
     raw, cur = [], None
     while True:
@@ -518,8 +540,11 @@ def _fetch_children(bid, depth=0):
             break
         cur = j.get("next_cursor")
     out = []
+    seen = {}
     for k in raw:
-        c = _strip(k, depth)
+        sg = _sig(k)
+        seen[sg] = seen.get(sg, 0) + 1
+        c = _strip(k, depth, path + ((sg, seen[sg] - 1),))
         if c and c.get("type") and c.get(c["type"]) is not None:
             out.append(c)
     return out
@@ -534,20 +559,33 @@ def dashboard_copy():
     DEEP_TABLES.clear()
     COPY_ISSUES.clear()
     DEEP_PENDING[0] = 0
+    DEEP_KIDS.clear()
     out = []
     try:
         _, _, _, mid, tail = D._layout(D.page_id())
     except Exception as e:
         M.log(f"  ⚠️ 대시보드 읽기 실패: {str(e)[:70]}"); return out
-    # 보유 현황(앵커~divider 사이)
-    held = [c for c in (_strip(b) for b in mid) if c]
+    # 경로는 '사본 페이지 기준' 이어야 한다. 최상위 블록 자신의 단계를 빼먹으면
+    # 나중에 사본에서 위치를 못 찾는다 (2026-09-06 실측: 5개 전부 못 찾음).
+    HELD_SIG = ("toggle", "💰 보유 현황")
+    held = []
+    seen = {}
+    for b in mid:
+        sg = _sig(b)
+        seen[sg] = seen.get(sg, 0) + 1
+        c = _strip(b, 0, ((HELD_SIG, 0), (sg, seen[sg] - 1)))
+        if c:
+            held.append(c)
     if held:
         out.append(_toggle("💰 보유 현황", held, "gray_background"))
     # 리포트 토글들 — 제목·색까지 원본 유지
+    tseen = {}
     for b in tail:
         if b.get("type") != "toggle":
             continue
-        c = _strip(b)
+        sg = _sig(b)
+        tseen[sg] = tseen.get(sg, 0) + 1
+        c = _strip(b, 0, ((sg, tseen[sg] - 1),))
         if c and c.get("type") and c.get(c["type"]) is not None:
             out.append(c)
     M.log(f"  📋 대시보드 원문 복사: {len(out)}개 섹션")
@@ -829,6 +867,7 @@ def _kids_raw(bid):
             pp["start_cursor"] = cur
         r = requests.get(f"{API}/blocks/{bid}/children", headers=_H, params=pp, timeout=30)
         if r.status_code != 200:
+            _lost(f"자식 조회 실패 HTTP {r.status_code} (붙이기 단계)")
             return out
         j = r.json()
         out += j.get("results", [])
@@ -844,41 +883,57 @@ def _sig(b):
     return (t, txt.strip()[:120])
 
 
-def attach_missing_children(src_id, dst_id, depth=0, budget=None):
-    """원본엔 자식이 있는데 사본엔 없는 블록에 자식을 따로 붙인다.
-    요청당 중첩 깊이가 2 로 제한돼 3단계 이하가 '빈 토글' 로 남던 것을 살린다
-    (2026-09-06: 유튜브 영상 제목 토글 안이 전부 비어 있었다).
-    원본/사본을 나란히 훑으며 (타입, 텍스트) 로 짝을 찾는다."""
-    if budget is None:
-        budget = [400]
-    if budget[0] <= 0 or depth > 6:
+def _resolve_path(root, path):
+    """복사 시점 경로((서명, 등장순서), ...)로 사본에서 대상 블록을 찾는다."""
+    cur = root
+    for sg, idx in path:
+        seen, hit = 0, None
+        for b in _kids_raw(cur):
+            if _sig(b) == sg:
+                if seen == idx:
+                    hit = b["id"]; break
+                seen += 1
+        if not hit:
+            return None
+        cur = hit
+    return cur
+
+
+def attach_missing_children(pid, budget=None):
+    """복사 시점에 떠 둔 자식을 경로로 찾아 붙인다.
+    붙일 때 원본을 다시 읽지 않는다 — 대시보드가 15분마다 바뀌어 형제 순서가
+    틀어지면 엉뚱한 토글에 붙는다(코덱스 지적 2026-09-06).
+    얕은 경로부터 붙여야 깊은 경로가 해석된다."""
+    if not DEEP_KIDS:
         return 0
-    src, dst = _kids_raw(src_id), _kids_raw(dst_id)
-    used, n = set(), 0
-    for sb in src:
-        if not sb.get("has_children"):
-            continue
-        sig = _sig(sb)
-        db = None
-        for i, d in enumerate(dst):
-            if i not in used and _sig(d) == sig:
-                used.add(i); db = d; break
-        if db is None:
-            continue
-        if db.get("has_children"):
-            n += attach_missing_children(sb["id"], db["id"], depth + 1, budget)
-            continue
-        kids = [c for c in (_strip(k, 0) for k in _kids_raw(sb["id"])) if c]
+    budget = budget if budget is not None else [int(os.environ.get("ARCHIVE_HTTP_BUDGET", "600"))]
+    n = 0
+    for path, kids in sorted(DEEP_KIDS.items(), key=lambda kv: len(kv[0])):
         if not kids:
             continue
+        if budget[0] <= 0:
+            _lost(f"요청 예산 소진 — 남은 빈 토글 미처리")
+            break
+        tgt = _resolve_path(pid, path)
+        if not tgt:
+            _lost(f"빈 토글 위치 못 찾음: {path[-1][0][1][:34] if path else '?'}")
+            continue
         budget[0] -= 1
-        r = requests.patch(f"{API}/blocks/{db['id']}/children", headers=_H, timeout=60,
+        r = requests.patch(f"{API}/blocks/{tgt}/children", headers=_H, timeout=60,
                            json={"children": kids[:95]})
+        if r.status_code == 429:
+            # 노션 레이트리밋. Retry-After 를 지키고 한 번만 재시도한다.
+            wait = float(r.headers.get("Retry-After", "1"))
+            time.sleep(min(wait, 10))
+            budget[0] -= 1
+            r = requests.patch(f"{API}/blocks/{tgt}/children", headers=_H, timeout=60,
+                               json={"children": kids[:95]})
         if r.status_code != 200:
-            _lost(f"빈 토글 채우기 실패 {r.status_code}: {sig[1][:40]}")
+            _lost(f"빈 토글 채우기 실패 {r.status_code}: {path[-1][0][1][:30] if path else '?'}")
             continue
         n += 1
-        n += attach_missing_children(sb["id"], db["id"], depth + 1, budget)
+        time.sleep(0.34)      # 노션 3rps 제한
+    M.log(f"  🧩 빈 토글 {n}/{len(DEEP_KIDS)}개 채움 (남은 요청 예산 {budget[0]})")
     return n
 
 
@@ -1021,14 +1076,26 @@ def main():
     if "--eval" in sys.argv:
         evaluate(); return
     today = datetime.now(KST).strftime("%Y-%m-%d")
-    tok = token()
-    M.log(f"▶ 일일 아카이브 {today}")
-    d = collect(tok, upto=today)
+    weekend = datetime.now(KST).weekday() >= 5
+    tok = None if weekend else token()
+    M.log(f"▶ 일일 아카이브 {today}{' (휴장일)' if weekend else ''}")
+    d = collect(tok, upto=today, light=weekend)
     M.log(f"  재료: 섹터 {0 if d.get('sector') is None else len(d['sector'])}행 · "
           f"후보 {len(d['cands'])}개 · 유튜브 {len(d.get('yt',[]))}편 · 키워드 {len(d.get('kw',[]))}개")
     # 휴장일: 시세가 없어 추천을 만들 수 없다. 유튜브는 주말에도 올라오므로
     # 그것만으로 브리핑을 남긴다 (2026-09-06 규환 요청).
-    if datetime.now(KST).weekday() >= 5:
+    if weekend:
+        if not d.get("yt"):
+            # 수집이 끊기면 LLM 을 부르지 않고 상태를 알리는 페이지만 남긴다.
+            # 페이지를 건너뛰면 '조용히 빈 날' 이 되어 원인을 늦게 안다(코덱스 권고).
+            blocks = [{"object": "block", "type": "callout", "callout": {
+                "icon": {"type": "emoji", "emoji": "🚨"}, "color": "red_background",
+                "rich_text": _rt("최근 3일 유튜브 분석본 없음", True)
+                             + _rt("\n수집이 멈췄을 수 있다. youtube_report 워크플로와 "
+                                   "프록시 대역폭·Gemini 크레딧을 확인할 것.", color="gray")}}]
+            pid = upsert(today, blocks, None, False, "유튜브 분석본 없음 — 수집 상태 확인 필요")
+            M.log("⚠️ 유튜브 0건 — 상태 알림 페이지만 생성")
+            return
         report = synthesize_weekend(d)
         if not report:
             M.log("❌ 휴장일 브리핑 실패 — 중단"); return
@@ -1038,8 +1105,7 @@ def main():
         summary = (rest[0][:110] if rest else "휴장일 유튜브 브리핑")
         pid = upsert(today, blocks, None, False, summary)
         if pid:
-            k = attach_missing_children(D.page_id(), pid)
-            M.log(f"  🧩 빈 토글 {k}개 채움 (깊이 제한 보류 {DEEP_PENDING[0]}건)")
+            attach_missing_children(pid)
             attach_deep_tables(pid)
         M.log(f"✅ 휴장일 브리핑 완료 · 블록 {len(blocks)}개" if pid else "❌ 실패")
         return
@@ -1061,8 +1127,7 @@ def main():
     blocks = build_blocks(d, report, pick, gate_ok)
     pid = upsert(today, blocks, pick, gate_ok, summary)
     if pid:
-        k = attach_missing_children(D.page_id(), pid)
-        M.log(f"  🧩 빈 토글 {k}개 채움 (깊이 제한 보류 {DEEP_PENDING[0]}건)")
+        attach_missing_children(pid)
         attach_deep_tables(pid)
     M.log(f"✅ 완료 · 추천 {pick['name'] if pick else '없음'} · 블록 {len(blocks)}개" if pid else "❌ 실패")
 
