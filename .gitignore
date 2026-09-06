@@ -74,3 +74,7 @@ latest_sector_table.png
 skills-lock.json
 codex_review.log
 sector_history.csv.lock
+
+# 자동매수 (저장소가 public — 계좌 활동 절대 커밋 금지)
+.trade_state.json
+trade_log.csv

@@ -19,6 +19,59 @@ KIS API 관련 작업(엔드포인트 추가·필드 추출·디버그) 시 **�
 
 ---
 
+# 매매 (계좌·주문) — `auto_trade.py`
+
+시세용 `APP_KEY` 와 **다른 앱키**를 쓴다. KIS 앱키는 계좌 단위로 발급되므로 매매계좌 키를
+`KIS_TRADE_APP_KEY`/`KIS_TRADE_APP_SECRET` 로 따로 두고, 토큰 캐시도 `.kis_trade_token.json` 으로 분리한다.
+계좌는 `KIS_ACCOUNTS="<계좌번호>-<상품코드>:라벨"` 형식. **실제 계좌번호는 `.env` 에만 — 이 저장소는 public 이다.** **라벨은 사람 메모일 뿐 API 가 검증하지 않는다**
+(2026-09-06: 라벨이 `:ISA` 였으나 상품코드 01 은 종합위탁이었다).
+**앱키 하나에 계좌 하나.** 앱키가 안 묶인 계좌는 전부 `INVALID_CHECK_ACNO` 라, 어느 계좌에 묶였는지는
+후보 계좌를 순회 조회해서 `rt_cd=0` 하나를 찾는 방식으로 특정할 수 있다.
+
+계좌 유효성 판별법 — 잘못된 계좌는 `rt_cd=2 OPSQ2000 INVALID_CHECK_ACNO` 로 튕긴다.
+`rt_cd=0` 이면 그 앱키에 묶인 실계좌다. `조회할 내용이 없습니다(KIOK0560)` 는 **성공이며 잔고가 빈 것**이다.
+
+## 매수가능조회 — `TTTC8908R`
+`GET /uapi/domestic-stock/v1/trading/inquire-psbl-order`
+- Request: `CANO`, `ACNT_PRDT_CD`, `PDNO`, `ORD_UNPR`, `ORD_DVSN`, `CMA_EVLU_AMT_ICLD_YN`, `OVRS_ICLD_YN`
+- Response (output): `ord_psbl_cash`(현금 주문가능), `ord_psbl_sbst`(대용), `ruse_psbl_amt`(재사용),
+  `max_buy_amt` / `max_buy_qty`(최대 매수금액·수량), `nrcvb_buy_amt`, `psbl_qty_calc_unpr`, `cma_evlu_amt`
+
+## 잔고조회 — `TTTC8434R`
+`GET /uapi/domestic-stock/v1/trading/inquire-balance`
+- Request: 위 계좌 2종 + `AFHR_FLPR_YN`, `OFL_YN`, `INQR_DVSN`(02), `UNPR_DVSN`(01),
+  `FUND_STTL_ICLD_YN`, `FNCG_AMT_AUTO_RDPT_YN`, `PRCS_DVSN`(00), `CTX_AREA_FK100`/`NK100`
+- output1(array): `pdno`, `prdt_name`, `hldg_qty`, `pchs_avg_pric`, `prpr`
+- output2[0]: `dnca_tot_amt`(예수금), `prvs_rcdl_excc_amt`(D+2), `tot_evlu_amt`
+- 페이징: `tr_cont` 이 `F`/`M` 이면 `ctx_area_fk100`/`nk100` 을 넘겨 계속 조회
+
+## 투자계좌자산현황 — `CTRP6548R`
+`GET /uapi/domestic-stock/v1/trading/inquire-account-balance`
+- Request: `CANO`, `ACNT_PRDT_CD`, `INQR_DVSN_1`, `BSPR_BF_DT_APLY_YN`
+- output2: `tot_asst_amt`(총자산), `nass_tot_amt`(순자산), `evlu_amt_smtl`, `dncl_amt`, `pchs_amt_smtl` 등
+- output1(array, 20행): 자산구분별 `evlu_amt`, `whol_weit_rt`(비중)
+
+## 일별 주문체결조회 — `TTTC8001R`
+`GET /uapi/domestic-stock/v1/trading/inquire-daily-ccld`
+- Request: 계좌 2종 + `INQR_STRT_DT`, `INQR_END_DT`, `SLL_BUY_DVSN_CD`(00 전체),
+  `INQR_DVSN`(00), `PDNO`, `CCLD_DVSN`(00), `ORD_GNO_BRNO`, `ODNO`, `INQR_DVSN_3`(00),
+  `INQR_DVSN_1`, `CTX_AREA_FK100`/`NK100`
+
+## 해시키 — `POST /uapi/hashkey`
+주문 API 는 `hashkey` 헤더가 필요하다. 헤더는 `content-type`/`appkey`/`appsecret` 만 (토큰 불필요).
+- Response: `{"BODY": {...보낸 그대로...}, "HASH": "<64자 hex>"}` → 이 `HASH` 를 주문 요청의 `hashkey` 헤더에 넣는다
+
+## 주식주문(현금) — `TTTC0802U`(매수) / `TTTC0801U`(매도)
+`POST /uapi/domestic-stock/v1/trading/order-cash` · 모의는 `VTTC0802U`/`VTTC0801U`
+- Body: `CANO`, `ACNT_PRDT_CD`, `PDNO`, `ORD_DVSN`, `ORD_QTY`, `ORD_UNPR`
+- `ORD_DVSN`: `00` 지정가 · `01` 시장가(이때 `ORD_UNPR="0"`)
+- Response output: `ODNO`(주문번호), `ORD_TMD`(주문시각), `KRX_FWDG_ORD_ORGNO`
+- ⚠️ **2026-09-06 기준 미검증** — 예수금 0원이라 실주문을 넣어보지 못했다.
+  첫 실주문에서 `rt_cd`/`msg_cd` 를 확인하고 이 줄을 지울 것. TR_ID 가 거부되면
+  `KIS_TR_BUY` 환경변수로 갈아끼울 수 있게 해 뒀다.
+
+---
+
 # 국내주식
 
 ## 주식현재가 시세 — `FHKST01010100`

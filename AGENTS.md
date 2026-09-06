@@ -14,6 +14,7 @@
 - `daily_recommend.py` : 일일 종합 종목 추천 — 정량 데이터 + 유튜브 화자 의견 (`latest_youtube_analysis.json`) 의 교집합을 Gemini 분석. 노션 페이지 `💎 {date} 종합 추천` push
 - `momentum_daily.py` : **30일 모멘텀 추천 (healthy10 진입)**. 3단계 거름망: ①ETF/ETN/우선주 제외 + 5일평균 거래대금 100억↑ ②모멘텀(hi60+disp20+ret5 z합) 상위10% ③저변동성(vol20) 10개 압축. 전 종목 최근 100일 1콜. `latest_momentum_reco.csv` 저장 + Notion `🚀 {date} KOSPI 30일 모멘텀 추천` push (상위 카드에 Gemini 검색그라운딩 '이슈'). 제안 청산 = +20% 익절/-10% 손절. Notion 헬퍼는 수급.py 재활용 (`NOTION_API_KEY` 없으면 로컬 생략)
 - `momentum_backtest.py` / `supply_increment.py` / `value_increment.py` / `walkforward.py` / `trade_sim*.py` : **연구용 1회성 스크립트** (factor·진입·청산 검증). 운영 아님. 토큰캐시(`.kis_token.json`)·가격캐시(`price_cache/`)·OHLC캐시(`ohlc_cache/`) 정의. 결론은 아래 "모멘텀 연구" 참조
+- `auto_trade.py` : **리포트 추천 → 텔레그램 승인 → 한투 실계좌 매수**. `propose`(주문안 전송)·`poll`(승인 확인→주문)·`setup`(chat_id)·`status`. 상세는 아래 '자동매수'
 - `KOSPI재무데이터한투.csv` / `KOSDAQ재무데이터한투.csv` : 시장별 종목 마스터 (한투 .mst 에서 파싱)
 - `latest_kospi_supply.csv` : 가장 최근 코스피 전 종목 수급/재무 raw (2400+ 종목)
 - `latest_kospi_quality.csv` : 가장 최근 KOSPI Quality 전 종목 점수
@@ -79,6 +80,30 @@
 - **왜**: 파이프라인 스텝 다수가 `continue-on-error: true` 라 실패가 success 로 묻혔다. 자막 5일간 0개(프록시 402)·NameError 8일 정지가 모두 며칠 뒤 대시보드 경고로야 발견됐다. 스텝 성공여부가 아니라 **산출물**로 판정하는 이유 = 스텝이 성공하고도 쓰레기를 내놓는 게 무음 실패의 본질
 - 게이트가 죽으면 커밋이 전부 skip 되고 하위 소비자는 어제 데이터를 유지한다. **낡은 데이터 > 깨진 데이터** 가 의도다
 - 기대 형태가 바뀌면(TOP100→TOP50 등) `SPEC` 을 같이 고칠 것. 게이트를 지우거나 `continue-on-error` 를 붙이는 것으로 통과시키지 말 것
+
+### 자동매수 (2026-09-06 신설)
+
+`auto_trade.py` — Report DB 가 고른 종목을 **텔레그램 승인을 받은 뒤에만** 한투 실계좌로 매수한다.
+대상 계좌는 `.env` 의 `KIS_ACCOUNTS` 에만 둔다 — **저장소가 public 이라 계좌번호·잔고를 문서나 커밋 메시지에 쓰지 않는다.**
+KIS 매매 API 레퍼런스는 `docs/KIS_API_REFERENCE.md` 의 '매매' 절.
+매매 앱키는 **계좌 1개에만** 묶인다 — 이 키로 다른 계좌를 부르면 `INVALID_CHECK_ACNO` 다. 계좌를 바꾸려면 그 계좌로 앱키를 재발급해야 한다 (2026-09-06 실증).
+
+- **승인 없이는 주문이 나가지 않는다.** 텔레그램 인라인 버튼을 규환님이 눌러야만 집행된다.
+  버튼을 누른 사람의 `from.id` 가 `TELEGRAM_CHAT_ID` 와 다르면 무시한다
+- **승인이 있어도 `TRADE_ENABLED=1` 이 아니면 드라이런.** 기본값 0 — 켜는 건 사람이 명시적으로
+- **게이트 미충족이어도 주문안은 만든다** (2026-09-06 규환님 결정). 대신 알림 첫 줄에 게이트를 박고,
+  자체 백테스트가 미충족 구간에서 손실이었다는 경고를 같이 보낸다. 숨기지 말 것
+- 추천이 실린 **가장 최근 행**을 읽는다. 오늘 날짜로 찾으면 안 된다 —
+  `daily_archive.py` 는 장 마감 뒤 그날 날짜로 쓰고 그 추천은 **다음 영업일에 살 종목**이다
+- 상한 `TRADE_MAX_KRW`(10만원) · 승인 유효 `TRADE_APPROVE_TTL_H`(6h) · 하루 1건 · 장중(09:00~15:20)만 집행
+- 추천이 4일 넘게 낡으면 거부한다 (리포트가 멈췄는데 옛 종목을 사는 사고 방지)
+- **`.trade_state.json`·`trade_log.csv` 는 gitignore.** 저장소가 public 이라 계좌 활동이 새면 안 된다
+
+노브: `TRADE_ENABLED`(0) · `TRADE_MAX_KRW`(100000) · `TRADE_APPROVE_TTL_H`(6) ·
+`TRADE_ORD_DVSN`(00 지정가) · `KIS_TR_BUY`(TTTC0802U)
+
+launchd: `com.vinicius.autotrade-propose`(평일 08:40 1회) · `com.vinicius.autotrade-poll`(09:00~15:20 매 5분).
+사본은 `launchd/`. 주말은 `run_auto_trade.sh` 가 요일로, 대체공휴일은 `market_open_today()` 가 거른다.
 
 ## Notion 구조
 - 코스피 추천종목 : `3324a00632f880fbb014d766d87a1079` 하위에 날짜별 페이지 (제목: `📊 {date} 추천종목`)
