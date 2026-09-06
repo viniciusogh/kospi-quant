@@ -1003,7 +1003,8 @@ def upsert(today, blocks, pick, gate_ok, summary):
         "이름": {"title": [{"type": "text", "text": {"content": summary[:120]}}]},
         "날짜": {"date": {"start": today}},
         # 휴장일엔 게이트를 평가하지 않는다 — '미충족' 으로 찍으면 오해를 준다
-        "게이트": {"select": {"name": "휴장" if datetime.now(KST).weekday() >= 5
+        # gate_ok=None 은 휴장 신호. 요일만 보면 평일 공휴일에 '미충족' 으로 잘못 찍힌다
+        "게이트": {"select": {"name": "휴장" if gate_ok is None
                             else ("통과" if gate_ok else "미충족")}},
     }
     if pick:
@@ -1076,7 +1077,18 @@ def main():
     if "--eval" in sys.argv:
         evaluate(); return
     today = datetime.now(KST).strftime("%Y-%m-%d")
+    # 주말 + 대체공휴일. weekday()>=5 만 보면 평일 공휴일에 낡은 후보로 추천한다
+    # (코덱스 지적 2026-09-06). portfolio.market_open_today() 가 토스 장운영 API 로
+    # 공휴일까지 잡는다 — 판단 불가 시 True(개장)라 평일 로직이 기본이다.
     weekend = datetime.now(KST).weekday() >= 5
+    if not weekend:
+        try:
+            import portfolio as PF
+            if not PF.market_open_today():
+                weekend = True
+                M.log("  📅 평일이지만 휴장 — 유튜브 브리핑으로 전환")
+        except Exception as e:
+            M.log(f"  ⚠️ 장운영 확인 실패(개장으로 진행): {str(e)[:50]}")
     tok = None if weekend else token()
     M.log(f"▶ 일일 아카이브 {today}{' (휴장일)' if weekend else ''}")
     d = collect(tok, upto=today, light=weekend)
@@ -1093,7 +1105,7 @@ def main():
                 "rich_text": _rt("최근 3일 유튜브 분석본 없음", True)
                              + _rt("\n수집이 멈췄을 수 있다. youtube_report 워크플로와 "
                                    "프록시 대역폭·Gemini 크레딧을 확인할 것.", color="gray")}}]
-            pid = upsert(today, blocks, None, False, "유튜브 분석본 없음 — 수집 상태 확인 필요")
+            pid = upsert(today, blocks, None, None, "유튜브 분석본 없음 — 수집 상태 확인 필요")
             M.log("⚠️ 유튜브 0건 — 상태 알림 페이지만 생성")
             return
         report = synthesize_weekend(d)
@@ -1103,7 +1115,7 @@ def main():
         m = re.search(r"^##\s*휴장일 요약\s*$", report, re.M)
         rest = [l.strip() for l in report[m.end():].split("\n") if l.strip()] if m else []
         summary = (rest[0][:110] if rest else "휴장일 유튜브 브리핑")
-        pid = upsert(today, blocks, None, False, summary)
+        pid = upsert(today, blocks, None, None, summary)
         if pid:
             attach_missing_children(pid)
             attach_deep_tables(pid)
