@@ -4,7 +4,8 @@
 # 다음 거래일에 살 종목을 찍는다 (2026-09-04 규환 결정).
 cd /Users/vinicius/Projects/kospi-quant || exit 1
 LOG=archive_cron.log
-[ "$(date +%u)" -gt 5 ] && exit 0
+# 주말도 실행한다 — 시장은 쉬어도 유튜브는 올라온다 (2026-09-06 규환 요청).
+# 휴장일에는 daily_archive.py 가 추천 없이 유튜브 브리핑만 만든다.
 
 set -a
 . ./.env

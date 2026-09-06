@@ -46,7 +46,7 @@ def _bul(rich):
     return {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": rich}}
 
 
-def collect(tok):
+def collect(tok, upto=None):
     """원본 파일에서 직접 재료를 모은다. 대시보드 스크랩이 아니라 소스에서 —
     사용자가 '원문 스냅샷이 아니라 원문 자체' 를 원하고, 통합 대시보드는 안 살려도 된다고 했다."""
     import pandas as pd
@@ -102,11 +102,21 @@ def collect(tok):
     # 유튜브: 최신 분석본 + 키워드 급증
     try:
         y = json.load(open(os.path.join(_DIR, "latest_youtube_analysis.json"), encoding="utf-8"))
+        # 백필 시 미래 날짜가 섞이면 그날의 기록이 아니게 된다 (2026-09-06: 9/5 에 9/6 영상이 섞였다)
+        if upto:
+            y = {k: v for k, v in y.items() if k <= upto}
+        if not y:
+            raise ValueError(f"{upto} 이전 유튜브 분석본 없음")
         day = sorted(y)[-1]
         vids = [v for ch in y[day].values() for v in ch]
         d["yt_day"] = day
         d["yt"] = [{"title": v["title"], "ch": v.get("channel_name", ""),
                     "analysis": v.get("analysis", "")} for v in vids]
+        # 휴장일 브리핑은 하루가 아니라 최근 며칠을 묶어 본다
+        d["yt_days"] = sorted(y)[-3:]
+        d["yt_by_day"] = {k: [{"title": v["title"], "ch": v.get("channel_name", ""),
+                               "analysis": v.get("analysis", "")}
+                              for ch in y[k].values() for v in ch] for k in d["yt_days"]}
     except Exception as e:
         M.log(f"  ⚠️ 유튜브 재료 실패: {str(e)[:60]}"); d["yt"] = []
     try:
@@ -144,6 +154,23 @@ def _llm(prompt, model, max_tokens):
         M.log(f"  ❌ LLM 실패: {str(e)[:80]}"); return ""
 
 
+def _fmt_weekend(d):
+    """휴장일 재료 — 시세·수급·섹터는 낡았으므로 넣지 않는다."""
+    L = []
+    if d.get("kw"):
+        L.append("[키워드 급증]")
+        for w, cnt, kind, why, v in d["kw"][:12]:
+            lift = "NEW" if v is None else f"{v:.1f}배"
+            L.append(f"  {w} {lift} ({cnt}회) — {why[:90]}")
+    for day in d.get("yt_days", []):
+        vids = d["yt_by_day"].get(day, [])
+        L.append(f"\n[유튜브 {day} · {len(vids)}편]")
+        for v in vids[:12]:
+            L.append(f"  [{v['ch']}] {v['title'][:60]}")
+            L.append("   " + v["analysis"][:600].replace("\n", " ")[:600])
+    return "\n".join(L)
+
+
 def _fmt_material(d):
     """LLM 에 넘길 재료를 텍스트로. 숫자는 전부 우리가 계산한 값이다."""
     L = []
@@ -177,6 +204,40 @@ def _fmt_material(d):
             L.append(f"  [{v['ch']}] {v['title'][:60]}")
             L.append("   " + v["analysis"][:700].replace("\n", " ")[:700])
     return "\n".join(L)
+
+
+WEEKEND_PROMPT = """너는 한국 주식 애널리스트다. 오늘은 **휴장일**이라 시세·수급 데이터가 없다.
+아래 유튜브 분석본과 키워드만 근거로 **휴장일 브리핑**을 써라.
+
+핵심 원칙:
+- **숫자를 지어내지 마라.** 아래 데이터에 있는 값만 인용한다.
+- 종목 추천을 하지 마라. 시세 데이터가 없어 근거가 없다.
+- 쉬운 말로. 개조식 명사종결. 만연체 금지.
+
+아래 형식을 정확히 지켜라 (마크다운):
+
+## 휴장일 요약
+2~3문장. 이 기간 유튜브에서 가장 많이 다뤄진 주제가 무엇인지.
+
+## 반복해서 나온 이야기
+- 3~5개 불릿. 여러 채널이 공통으로 짚은 주제를 묶어라.
+- 각 불릿은 `주제 — 어느 채널이 무슨 근거로 무엇을 말했는지` 형태.
+- 채널 간 의견이 갈리면 그 대립을 명시하라.
+
+## 언급된 종목·업종
+- 실제로 영상에서 언급된 것만. 각각 `이름 — 어떤 맥락으로 나왔는지`.
+- 없으면 "뚜렷하게 반복된 종목 없음" 이라고 쓴다.
+
+## 다음 거래일에 볼 것
+- 3~4개 불릿. 확인해야 할 지표·이벤트·가격대.
+- 추천이 아니라 관찰 목록이다.
+
+## 이 브리핑의 한계
+2문장. 시세·수급 없이 화자 의견만 반영했다는 점.
+
+--- 데이터 ---
+{material}
+"""
 
 
 PROMPT = """너는 한국 주식 애널리스트다. 아래 오늘의 실측 데이터만 근거로 **일일 종합 레포트**를 써라.
@@ -222,6 +283,15 @@ PROMPT = """너는 한국 주식 애널리스트다. 아래 오늘의 실측 데
 --- 오늘의 데이터 ---
 {material}
 """
+
+
+def synthesize_weekend(d):
+    """휴장일 브리핑. 시세 없이 유튜브·키워드만 쓴다."""
+    material = _fmt_weekend(d)
+    model = os.environ.get("ARCHIVE_MODEL", "gpt-5.5")
+    out = _llm(WEEKEND_PROMPT.replace("{material}", material), model, 4000)
+    M.log(f"  🤖 휴장일 브리핑 {model} · {len(out or ''):,}자 · 재료 {len(material):,}자")
+    return out
 
 
 def synthesize(d):
@@ -589,6 +659,38 @@ def stale_days(asof, now=None):
     return n
 
 
+def build_weekend_blocks(d, report):
+    """휴장일 페이지 — 추천·게이트 없이 유튜브 중심.
+    시세 데이터가 없으므로 종목을 찍지 않는다 (낡은 후보로 추천하면 기록이 오염된다)."""
+    secs = dict(_sections(report))
+    nd = next_trading_day()
+    b = [{"object": "block", "type": "callout", "callout": {
+        "icon": {"type": "emoji", "emoji": "🌙"}, "color": "gray_background",
+        "rich_text": _rt("휴장일 — 유튜브 브리핑", True)
+                     + _rt(f"\n시세·수급 데이터가 없어 종목 추천은 하지 않는다. "
+                           f"다음 거래일은 {nd.month}/{nd.day}({WD[nd.weekday()]}).", color="gray")}}]
+    for name in ["휴장일 요약", "반복해서 나온 이야기", "언급된 종목·업종",
+                 "다음 거래일에 볼 것", "이 브리핑의 한계"]:
+        if name not in secs:
+            continue
+        b.append(_h3(name))
+        for t in _prose(secs[name]):
+            b.append(_para(_rt(t)))
+        for t in _bullets(secs[name]):
+            b.append({"object": "block", "type": "bulleted_list_item",
+                      "bulleted_list_item": {"rich_text": _rt(t)}})
+    b += dashboard_copy()
+    if COPY_ISSUES:
+        from collections import Counter
+        cnt = Counter(COPY_ISSUES)
+        detail = " · ".join(f"{k} ×{v}" if v > 1 else k for k, v in cnt.most_common(6))
+        b.append({"object": "block", "type": "callout", "callout": {
+            "icon": {"type": "emoji", "emoji": "⚠️"}, "color": "yellow_background",
+            "rich_text": _rt(f"원문 복사 중 {len(COPY_ISSUES)}건 누락", True)
+                         + _rt(f"\n{detail}", color="gray")}})
+    return b
+
+
 def build_blocks(d, report, pick, gate_ok):
     secs = dict(_sections(report))
     b = []
@@ -777,7 +879,9 @@ def upsert(today, blocks, pick, gate_ok, summary):
     props = {
         "이름": {"title": [{"type": "text", "text": {"content": summary[:120]}}]},
         "날짜": {"date": {"start": today}},
-        "게이트": {"select": {"name": "통과" if gate_ok else "미충족"}},
+        # 휴장일엔 게이트를 평가하지 않는다 — '미충족' 으로 찍으면 오해를 준다
+        "게이트": {"select": {"name": "휴장" if datetime.now(KST).weekday() >= 5
+                            else ("통과" if gate_ok else "미충족")}},
     }
     if pick:
         props["추천종목"] = {"rich_text": [{"type": "text", "text": {"content": pick["name"]}}]}
@@ -851,9 +955,25 @@ def main():
     today = datetime.now(KST).strftime("%Y-%m-%d")
     tok = token()
     M.log(f"▶ 일일 아카이브 {today}")
-    d = collect(tok)
+    d = collect(tok, upto=today)
     M.log(f"  재료: 섹터 {0 if d.get('sector') is None else len(d['sector'])}행 · "
           f"후보 {len(d['cands'])}개 · 유튜브 {len(d.get('yt',[]))}편 · 키워드 {len(d.get('kw',[]))}개")
+    # 휴장일: 시세가 없어 추천을 만들 수 없다. 유튜브는 주말에도 올라오므로
+    # 그것만으로 브리핑을 남긴다 (2026-09-06 규환 요청).
+    if datetime.now(KST).weekday() >= 5:
+        report = synthesize_weekend(d)
+        if not report:
+            M.log("❌ 휴장일 브리핑 실패 — 중단"); return
+        blocks = build_weekend_blocks(d, report)
+        m = re.search(r"^##\s*휴장일 요약\s*$", report, re.M)
+        rest = [l.strip() for l in report[m.end():].split("\n") if l.strip()] if m else []
+        summary = (rest[0][:110] if rest else "휴장일 유튜브 브리핑")
+        pid = upsert(today, blocks, None, False, summary)
+        if pid:
+            attach_deep_tables(pid)
+        M.log(f"✅ 휴장일 브리핑 완료 · 블록 {len(blocks)}개" if pid else "❌ 실패")
+        return
+
     if not d["cands"]:
         M.log("❌ 모멘텀 후보 없음 — 중단 (latest_momentum_reco.csv 확인)"); return
     report = synthesize(d)
