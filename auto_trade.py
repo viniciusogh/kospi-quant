@@ -31,6 +31,7 @@ ENABLED = os.environ.get("TRADE_ENABLED", "0") == "1"   # 0 이면 승인해도 
 MAX_KRW = int(os.environ.get("TRADE_MAX_KRW", "100000"))  # 1회 주문 상한
 TTL_H = int(os.environ.get("TRADE_APPROVE_TTL_H", "6"))   # 승인 유효시간
 ORD_DVSN = os.environ.get("TRADE_ORD_DVSN", "00")         # 00 지정가 / 01 시장가
+MAX_DRIFT = float(os.environ.get("TRADE_MAX_DRIFT", "0.03"))  # 승인가 대비 이보다 벌어지면 중단
 
 # 실전 현금매수. 첫 실주문 전까지 미검증 — docs/KIS_API_REFERENCE.md '주식주문(현금)' 참조
 TR_BUY = os.environ.get("KIS_TR_BUY", "TTTC0802U")
@@ -301,7 +302,9 @@ def cmd_propose():
         f"<b>{E(row['name'])}</b> ({row['code']})  {qty}주  {px:,}원\n"
         f"주문금액 <b>{amount:,}원</b> · 매수가능 {cash:,}원\n"
         f"{'지정가' if ORD_DVSN == '00' else '시장가'} · 계좌 {cano}-{prdt}\n"
-        f"{row['asof']} 리포트 추천 · 진입가 {int(row['entry'] or 0):,}원"
+        f"{row['asof']} 리포트 추천 · 진입가 {int(row['entry'] or 0):,}원\n"
+        f"※ 위 가격은 전일 종가입니다. 승인하시면 <b>개장 후 현재가로 다시 잡아</b> 주문하고, "
+        f"{MAX_DRIFT:.0%} 넘게 벌어지면 사지 않고 알려드립니다."
         + ("" if ENABLED else "\n\n⚠️ TRADE_ENABLED=0 — 승인해도 실제 주문은 안 나갑니다(드라이런)")
         + (f"\n\n※ 게이트가 {E(row['gate'])}입니다. 자체 백테스트는 게이트 미충족 구간에서 "
            f"이 전략이 손실이었습니다." if row["gate"] != "통과" else ""),
@@ -367,18 +370,47 @@ def cmd_poll():
         log("승인됐지만 장중이 아님 — 다음 폴링에서 재시도")
         return
 
+    # 주문 직전에 현재가를 다시 잡는다. propose 는 장 시작 전에 도는데 그때 시세 API 는
+    # 전일 종가를 준다 — 리포트의 '진입가' 와 같은 값이다. 그 가격으로 지정가를 걸면
+    # 갭상승한 모멘텀 종목은 체결이 안 되는데 알림은 "주문 전송 완료" 로 나간다.
+    # (AGENTS.md '일일 아카이브' — 진입가는 그날 종가라 지정가로 그대로 쓰면 안 된다)
+    live = quote(s["code"])
+    if not live:
+        notify(f"⚠️ <b>{E(s['name'])}</b> 현재가 조회 실패 — 주문하지 않았습니다. 다음 폴링에서 재시도합니다.")
+        log("현재가 조회 실패 — 주문 보류")
+        return
+
+    drift = live / s["price"] - 1
+    if abs(drift) > MAX_DRIFT:
+        s["status"] = "stale"; s["live"] = live; save_state(s)
+        notify(f"🛑 <b>{E(s['name'])}</b> 주문을 취소했습니다.\n"
+               f"승인 시점 {s['price']:,}원 → 지금 {live:,}원 ({drift:+.1%}).\n"
+               f"승인하신 가격과 {MAX_DRIFT:.0%} 넘게 벌어져 임의로 사지 않습니다.")
+        log_row(ts=now.isoformat(), date=s["date"], code=s["code"], name=s["name"],
+                qty=s["qty"], price=live, gate=s["gate"], result="stale",
+                msg=f"승인 {s['price']} → 현재 {live} ({drift:+.1%})", odno="", dry=int(not ENABLED))
+        log(f"괴리 {drift:+.1%} > {MAX_DRIFT:.0%} → 주문 중단")
+        return
+
+    qty = min(MAX_KRW, s["qty"] * s["price"]) // live      # 상한을 현재가 기준으로 다시 계산
+    if qty < 1:
+        notify(f"⚠️ <b>{E(s['name'])}</b> 현재가 {live:,}원으로는 상한 안에서 1주도 못 삽니다.")
+        s["status"] = "skipped"; save_state(s)
+        return
+
     if not ENABLED:
-        s["status"] = "ordered"; s["dry"] = True; save_state(s)
-        notify(f"🧪 드라이런: <b>{E(s['name'])}</b> {s['qty']}주 {s['price']:,}원 주문을 "
+        s["status"] = "ordered"; s["dry"] = True; s["live"] = live; save_state(s)
+        notify(f"🧪 드라이런: <b>{E(s['name'])}</b> {qty}주 {live:,}원 주문을 "
                f"만들었지만 전송하지 않았습니다. (TRADE_ENABLED=1 로 켜세요)")
         log_row(ts=now.isoformat(), date=s["date"], code=s["code"], name=s["name"],
-                qty=s["qty"], price=s["price"], gate=s["gate"], result="dryrun",
+                qty=qty, price=live, gate=s["gate"], result="dryrun",
                 msg="TRADE_ENABLED=0", odno="", dry=1)
         return
 
     tok = _trade_token()
     cano, prdt = account()
-    ok, msg, odno = place_order(tok, cano, prdt, s["code"], s["qty"], s["price"])
+    s["qty"], s["price"] = qty, live
+    ok, msg, odno = place_order(tok, cano, prdt, s["code"], qty, live)
     s["status"] = "ordered" if ok else "failed"
     s["msg"] = msg; s["odno"] = odno
     save_state(s)
