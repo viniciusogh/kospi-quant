@@ -439,6 +439,9 @@ COPY_ISSUES = []
 # 깊이 제한으로 미룬 표. 자리표시 문단 뒤에 페이지 생성 후 붙인다.
 DEEP_TABLES = {}
 
+# 깊이 제한으로 자식을 못 넣은 블록 수. 생성 후 따로 붙인다.
+DEEP_PENDING = [0]
+
 
 def _lost(what):
     COPY_ISSUES.append(what)
@@ -491,7 +494,10 @@ def _strip(blk, depth=0):
                 _lost(f"{t} 자식 {len(kids)-95}개 절단 (요청당 100 한도)")
             out[t]["children"] = kids[:95]
     elif blk.get("has_children"):
+        # 요청당 중첩 깊이 제한. 여기서 버리면 '빈 토글' 이 된다 —
+        # 페이지 생성 후 attach_missing_children() 이 따로 붙인다 (2026-09-06 규환 지적).
         out[t].pop("children", None)
+        DEEP_PENDING[0] += 1
     return out
 
 
@@ -527,6 +533,7 @@ def dashboard_copy():
     # 실행 단위 상태라 여기서 초기화한다 (검증 중 자체 발견 2026-09-04).
     DEEP_TABLES.clear()
     COPY_ISSUES.clear()
+    DEEP_PENDING[0] = 0
     out = []
     try:
         _, _, _, mid, tail = D._layout(D.page_id())
@@ -814,6 +821,67 @@ def _table_after(parent, marker_id):
         cur = j.get("next_cursor")
 
 
+def _kids_raw(bid):
+    out, cur = [], None
+    while True:
+        pp = {"page_size": 100}
+        if cur:
+            pp["start_cursor"] = cur
+        r = requests.get(f"{API}/blocks/{bid}/children", headers=_H, params=pp, timeout=30)
+        if r.status_code != 200:
+            return out
+        j = r.json()
+        out += j.get("results", [])
+        if not j.get("has_more"):
+            break
+        cur = j.get("next_cursor")
+    return out
+
+
+def _sig(b):
+    t = b.get("type") or ""
+    txt = "".join(x.get("plain_text", "") for x in (b.get(t) or {}).get("rich_text", []))
+    return (t, txt.strip()[:120])
+
+
+def attach_missing_children(src_id, dst_id, depth=0, budget=None):
+    """원본엔 자식이 있는데 사본엔 없는 블록에 자식을 따로 붙인다.
+    요청당 중첩 깊이가 2 로 제한돼 3단계 이하가 '빈 토글' 로 남던 것을 살린다
+    (2026-09-06: 유튜브 영상 제목 토글 안이 전부 비어 있었다).
+    원본/사본을 나란히 훑으며 (타입, 텍스트) 로 짝을 찾는다."""
+    if budget is None:
+        budget = [400]
+    if budget[0] <= 0 or depth > 6:
+        return 0
+    src, dst = _kids_raw(src_id), _kids_raw(dst_id)
+    used, n = set(), 0
+    for sb in src:
+        if not sb.get("has_children"):
+            continue
+        sig = _sig(sb)
+        db = None
+        for i, d in enumerate(dst):
+            if i not in used and _sig(d) == sig:
+                used.add(i); db = d; break
+        if db is None:
+            continue
+        if db.get("has_children"):
+            n += attach_missing_children(sb["id"], db["id"], depth + 1, budget)
+            continue
+        kids = [c for c in (_strip(k, 0) for k in _kids_raw(sb["id"])) if c]
+        if not kids:
+            continue
+        budget[0] -= 1
+        r = requests.patch(f"{API}/blocks/{db['id']}/children", headers=_H, timeout=60,
+                           json={"children": kids[:95]})
+        if r.status_code != 200:
+            _lost(f"빈 토글 채우기 실패 {r.status_code}: {sig[1][:40]}")
+            continue
+        n += 1
+        n += attach_missing_children(sb["id"], db["id"], depth + 1, budget)
+    return n
+
+
 def attach_deep_tables(pid):
     """자리표시 문단을 찾아 그 뒤에 표를 붙이고 문단을 지운다.
     실패하면 부모를 건드리지 않고 문단만 안내로 바꾼다 — 부모를 지우면 이미
@@ -970,6 +1038,8 @@ def main():
         summary = (rest[0][:110] if rest else "휴장일 유튜브 브리핑")
         pid = upsert(today, blocks, None, False, summary)
         if pid:
+            k = attach_missing_children(D.page_id(), pid)
+            M.log(f"  🧩 빈 토글 {k}개 채움 (깊이 제한 보류 {DEEP_PENDING[0]}건)")
             attach_deep_tables(pid)
         M.log(f"✅ 휴장일 브리핑 완료 · 블록 {len(blocks)}개" if pid else "❌ 실패")
         return
@@ -991,6 +1061,8 @@ def main():
     blocks = build_blocks(d, report, pick, gate_ok)
     pid = upsert(today, blocks, pick, gate_ok, summary)
     if pid:
+        k = attach_missing_children(D.page_id(), pid)
+        M.log(f"  🧩 빈 토글 {k}개 채움 (깊이 제한 보류 {DEEP_PENDING[0]}건)")
         attach_deep_tables(pid)
     M.log(f"✅ 완료 · 추천 {pick['name'] if pick else '없음'} · 블록 {len(blocks)}개" if pid else "❌ 실패")
 
