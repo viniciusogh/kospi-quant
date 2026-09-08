@@ -3,7 +3,7 @@ name: Daily Quant Analysis
 on:
   schedule:
     - cron: '30 8 * * 1-5'  # 17:30 KST (UTC+9), 평일만 (backup)
-  workflow_dispatch:          # cron-job.org 가 매일 16:45 KST trigger
+  workflow_dispatch:          # cron-job.org 평일 15:31 KST trigger (2026-09-08 실예약 저장 확인)
 
 permissions:
   contents: write
