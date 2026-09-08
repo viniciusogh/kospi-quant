@@ -1,0 +1,20 @@
+{
+ "version": 1,
+ "data_date": "2026-09-08",
+ "collection_started_at": "2026-09-08T12:59:23Z",
+ "ready_at": "2026-09-08T22:46:30.063478+09:00",
+ "run_id": "34229198993",
+ "sha256": {
+  "latest_kospi_supply.csv": "679cd541af17e9de9e4356e99346f51b83b85b38ead7898b2ac3296604f05490",
+  "latest_수급_reco.csv": "73c2eabbda03261c3cfa73b775ce2988bfa5966516c6ed58b3a4c4bed15891d6",
+  "latest_kospi_quality.csv": "4626fc29553538af6e6621d7293bf66cbf926e90fdad06678f722cf58aec91a2",
+  "latest_quality_reco.csv": "7009a735f358d689f5a9c328de3ce1626573c0365fc083ca6f39faa4ae7cdc94",
+  "quality_score_history.csv": "513d2c9ae0adea308d295ba71f125682958aeedb5a4bc4ae179f9623937c8faf",
+  "latest_momentum_reco.csv": "6915445529e5cefa774f5ece818fa269898efbf6ebf7897a32c1ae76d3130fea",
+  "latest_momentum_reco_v20g.csv": "9bbfbbb4c7ed4c3b338ef979d53387312cb17b7c76ae7ee2bc165a2daa39d7c0",
+  "momentum_history.csv": "ca48e6c1c91f3ea1ed919f0bcc98af6b910de23034a848219d3663ebf05d7749",
+  "momentum_history_v20g.csv": "326e5ac2e36820bc1210ad7fc72f12a181d433fe332897c1ac92b1e3d5a792e3",
+  "momentum_analysis.json": "3f1f086fc3c2e89f1170e65de105ed432262d6763458658e1597f7c04ffb191b",
+  "latest_sector_close.csv": "1363ed0d61b0da1c76fc2060dd88fc75e6aeaa363a3a599c8231004a3c9542c0"
+ }
+}
