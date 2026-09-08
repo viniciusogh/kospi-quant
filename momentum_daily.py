@@ -82,7 +82,15 @@ def investor_flows(code, tok):
     f5 = sum(g(r, "frgn_ntby_tr_pbmn") for r in o[:5])
     o5 = sum(g(r, "orgn_ntby_tr_pbmn") for r in o[:5])
     p5 = sum(g(r, "prsn_ntby_tr_pbmn") for r in o[:5])
-    return {"frgn5": f5 / 100, "orgn5": o5 / 100, "prsn5": p5 / 100,  # 백만→억
+    dates = [str(r.get('stck_bsop_date', '')) for r in o[:5]]
+    complete = len(dates) == 5 and dates == sorted(set(dates), reverse=True)
+    try:
+        complete = complete and all(np.isfinite(float(r[k])) for r in o[:5]
+                                    for k in ('frgn_ntby_tr_pbmn', 'orgn_ntby_tr_pbmn', 'prsn_ntby_tr_pbmn'))
+    except (KeyError, TypeError, ValueError):
+        complete = False
+    return {"asof": dates[0], "complete": complete,
+            "frgn5": f5 / 100, "orgn5": o5 / 100, "prsn5": p5 / 100,  # 백만→억
             "frgn1": g(o[0], "frgn_ntby_tr_pbmn") / 100, "orgn1": g(o[0], "orgn_ntby_tr_pbmn") / 100}
 
 
@@ -212,7 +220,8 @@ def kospi_trend(tok):
     else:
         txt, emo, color = "하락추세 (200일선 아래) — 게이트 미충족", "📉", "orange_background"
         reason = f"200일선({ma200:,.0f})을 {(1-c/ma200)*100:.1f}% 밑돌아"
-    return {"text": f"{txt}  ·  지수 {c:,.0f} / 200일선 {ma200:,.0f} / 120일선 {ma120:,.0f}",
+    return {"asof": str(s.index[-1]),
+            "text": f"{txt}  ·  지수 {c:,.0f} / 200일선 {ma200:,.0f} / 120일선 {ma120:,.0f}",
             "emoji": emo, "color": color, "uptrend": uptrend, "reason": reason}
 
 
@@ -284,7 +293,7 @@ def main():
     final["종목명"] = final["code"].map(lambda c: meta.get(c, {}).get("종목명", ""))
     final["섹터"]  = final["code"].map(lambda c: meta.get(c, {}).get("섹터", ""))
     out = final[["rank", "code", "종목명", "섹터", "price", "score", "chg", "ret20", "ret5", "vol20",
-                 "per", "pbr", "per_pct", "pbr_pct", "per_rank", "pbr_rank", "sec_n", "hi60", "liq5"]]
+                 "per", "pbr", "per_pct", "pbr_pct", "per_rank", "pbr_rank", "sec_n", "hi60", "liq5", "asof"]]
 
     # 전일 대비: '실제 마지막 거래일(asof)' 기준. 장 전/장중 실행 시 어제 데이터를 오늘로 오기재하는 것 방지
     asof_raw = str(df["asof"].max())                  # YYYYMMDD

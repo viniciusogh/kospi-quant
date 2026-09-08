@@ -36,6 +36,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Test Report close-data boundary (no API calls)
+        run: python -m unittest -q test_report_ready
+
       - name: Restore financial ratio cache
         uses: actions/cache@v4
         with:
@@ -43,6 +46,9 @@ jobs:
           key: fin-ratio-${{ github.run_id }}
           restore-keys: |
             fin-ratio-
+
+      - name: Record collection start (Report consumer verifies actual market close)
+        run: echo "REPORT_COLLECTION_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
 
       - name: Run KOSPI quant analysis
         env:
@@ -64,7 +70,9 @@ jobs:
           python -c "import matplotlib.font_manager as fm; fm._load_fontmanager(try_read_cache=False)" || true
 
       - name: Run sector rotation dashboard (수급.py 산출 latest_kospi_supply.csv 사용)
+        id: sector
         env:
+          SECTOR_CLOSED_ONLY: "1"
           APP_KEY: ${{ secrets.APP_KEY }}
           APP_SECRET: ${{ secrets.APP_SECRET }}
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
@@ -93,6 +101,7 @@ jobs:
         continue-on-error: true   # 교집합 없을 때도 워크플로 종료 안 됨
 
       - name: Run daily momentum report (수급.py 산출 latest_kospi_supply.csv 재사용 — 통합 2026-06-15)
+        id: momentum
         env:
           APP_KEY: ${{ secrets.APP_KEY }}
           APP_SECRET: ${{ secrets.APP_SECRET }}
@@ -105,6 +114,7 @@ jobs:
         continue-on-error: true   # 모멘텀 실패해도 나머지 커밋 진행
 
       - name: Run momentum report (20%컷·추세게이트 변형 — 별도 Notion 페이지)
+        id: momentum_gate
         env:
           APP_KEY: ${{ secrets.APP_KEY }}
           APP_SECRET: ${{ secrets.APP_SECRET }}
@@ -167,14 +177,31 @@ jobs:
       - name: 산출물 검증 게이트 (모멘텀)
         run: python sanity_check.py momentum
 
+      - name: Seal complete Report input bundle
+        env:
+          SECTOR_RESULT: ${{ steps.sector.outcome }}
+          MOMENTUM_RESULT: ${{ steps.momentum.outcome }}
+          MOMENTUM_GATE_RESULT: ${{ steps.momentum_gate.outcome }}
+        run: |
+          test "$SECTOR_RESULT" = success
+          test "$MOMENTUM_RESULT" = success
+          test "$MOMENTUM_GATE_RESULT" = success
+          python report_ready.py --seal --started-at "$REPORT_COLLECTION_STARTED_AT"
+
       - name: Commit momentum reco CSV
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add latest_momentum_reco.csv momentum_history.csv momentum_analysis.json 2>/dev/null || true
           git add latest_momentum_reco_v20g.csv momentum_history_v20g.csv 2>/dev/null || true
+          git add latest_sector_close.csv report_inputs_ready.json
           git diff --staged --quiet || git commit -m "Auto-update: momentum reco $(date +%Y-%m-%d)"
-          for i in 1 2 3; do git pull --rebase --autostash && git push && break || sleep 5; done
+          pushed=0
+          for i in 1 2 3; do
+            if git pull --rebase --autostash && git push; then pushed=1; break; fi
+            sleep 5
+          done
+          test "$pushed" = 1
 
       - name: Upload Excel reports as artifact
         uses: actions/upload-artifact@v4

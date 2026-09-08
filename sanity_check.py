@@ -29,9 +29,9 @@ SPEC = [
     ("quality",  "latest_quality_reco.csv",        100,  100, "quality_score_history.csv:date",
      ["종목코드", "종목명"], "퀄리티점수"),
     ("momentum", "latest_momentum_reco.csv",         10,   10, "momentum_history.csv:date",
-     ["rank", "code", "종목명", "price", "score"], "score"),
+     ["rank", "code", "종목명", "price", "score", "asof"], "score"),
     ("momentum", "latest_momentum_reco_v20g.csv",    10,   10, "momentum_history_v20g.csv:date",
-     ["rank", "code", "종목명", "price", "score"], "score"),
+     ["rank", "code", "종목명", "price", "score", "asof"], "score"),
 ]
 
 def read(name):
@@ -60,6 +60,8 @@ def check(spec, today):
     missing = [c for c in cols if c not in d.columns]
     if missing:
         bad.append(f"{name}: 필수 컬럼 없음 {missing} — 컬럼명 변경이 하위 소비자를 깨뜨린다")
+    if 'asof' in cols and 'asof' in d and not d['asof'].astype(str).eq(today.replace('-', '')).all():
+        bad.append(f"{name}: 후보별 실제 일봉 기준일이 당일이 아님 — 최신일 최댓값으로 덮어 표시 금지")
     if numcol in d.columns:
         s = pd.to_numeric(d[numcol], errors="coerce")
         if s.isna().all():

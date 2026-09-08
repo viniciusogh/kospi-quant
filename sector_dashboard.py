@@ -10,6 +10,7 @@ ETF/ETN/우선주/스팩 제외. 가격은 KIS 일봉(정규장 종가) — 다�
 실행: python sector_dashboard.py
 """
 import os, re
+from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import pandas as pd
 
@@ -160,6 +161,33 @@ def metrics(df, tok):
     return pd.DataFrame(rows)
 
 
+def metrics_closed(df, tok, day=None):
+    """마감 전용: 일봉 1콜에서 당일·전일·5일·20일 가격을 함께 읽는다. 최대 4개 병렬."""
+    day = day or datetime.now(KST).strftime('%Y-%m-%d')
+    if datetime.now(KST).strftime('%H:%M') <= '15:30':
+        raise ValueError('마감 섹터는 정규장 종료 후 수집해야 함')
+    def one(item):
+        _, row = item
+        # 공급 CSV의 작성일이 아니라 실제 투자자 데이터 기준일 확인.
+        if str(row.get('기준일', ''))[:10] != day:
+            raise ValueError('섹터 구성종목의 당일 수급 미확보')
+        got = M.fetch_recent(row['code'], tok)
+        if got is None or str(got[4]) != day.replace('-', ''):
+            raise ValueError('섹터 구성종목의 당일 일봉 미확보')
+        prices = np.asarray(got[0], dtype=float)
+        if len(prices) < 22 or not np.isfinite(prices).all() or (prices <= 0).any():
+            raise ValueError('섹터 일봉 가격 누락')
+        return {'code': row['code'], '종목명': row['종목명'], '섹터': row['섹터'],
+                '시가총액': row['시가총액'], '순매수': row['순매수'], 'price': prices[-1],
+                '오늘': prices[-1] / prices[-2] - 1, 'd5': prices[-1] / prices[-6] - 1,
+                'd20': prices[-1] / prices[-21] - 1, 'asof': got[4]}
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        rows = list(pool.map(one, df.iterrows()))
+    if len(rows) != len(df) or not rows:
+        raise ValueError('섹터 구성종목 누락 — 부분 집계 금지')
+    return pd.DataFrame(rows)
+
+
 def aggregate(m):
     g = m.groupby("섹터")
     agg = g.agg(오늘=("오늘", "mean"), d5=("d5", "mean"), d20=("d20", "mean"),
@@ -278,8 +306,12 @@ def main():
     tok = token()
     df = universe()
     M.log(f"▶ 섹터 장세: 시총 상위 {len(df)}개 수집 시작")
-    base = load_baseline(df, tok)
-    m = metrics_live(df, tok, base)
+    closed = os.environ.get('SECTOR_CLOSED_ONLY') == '1'
+    if closed:
+        m = metrics_closed(df, tok)
+    else:
+        base = load_baseline(df, tok)
+        m = metrics_live(df, tok, base)
     if m.empty:
         M.log("❌ 수집 실패 — 중단")
         return
@@ -287,6 +319,13 @@ def main():
     asof = (f"{asof_raw[:4]}-{asof_raw[4:6]}-{asof_raw[6:]} "
             f"{datetime.now(KST).strftime('%H:%M')}")
     agg, tops = aggregate(m)
+    if closed:
+        snapshot = agg.copy()
+        snapshot.insert(0, 'date', asof[:10])
+        snapshot['주도주'] = [((tops.get(sec) or [('', 0)])[0][0]) for sec in snapshot['섹터']]
+        snapshot['source'] = 'KRX daily close'
+        snapshot['coverage_complete'] = True
+        snapshot.to_csv(os.path.join(_DIR, 'latest_sector_close.csv'), index=False, encoding='utf-8-sig')
     M.log(f"  섹터 {len(agg)}개 집계 (종목 {len(m)}개)")
     # 섹터 집계를 이력으로 append — 매 실행 덮어써서 과거가 안 남던 문제(2026-09-01).
     # 일일 아카이브와 나중 백테스트의 재료다.
