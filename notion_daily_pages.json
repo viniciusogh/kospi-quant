@@ -1040,5 +1040,11 @@
       "moneyinside": "3d94a006-32f8-812e-ba8d-ffb4164e2234",
       "moneydo": "3d94a006-32f8-81dc-ba95-c63ac414389e"
     }
+  },
+  "2026-09-13": {
+    "page_id": "3da4a006-32f8-8194-a069-c47b160f6856",
+    "channels": {
+      "3proTV": "3da4a006-32f8-812c-b432-d1a97896f85b"
+    }
   }
 }
