@@ -1072,7 +1072,10 @@
     "page_id": "3dc4a006-32f8-81e6-86fb-e8706ffdf081",
     "channels": {
       "3proTV": "3dc4a006-32f8-81f5-a3e7-cb3254c727c1",
-      "futuresnow": "3dc4a006-32f8-813f-8b50-f1a3525eaaa0"
+      "futuresnow": "3dc4a006-32f8-813f-8b50-f1a3525eaaa0",
+      "moneyinside": "3dd4a006-32f8-81f8-aae8-de8760c28fbb",
+      "donkkang": "3dd4a006-32f8-817c-b3c9-c93e28e38e5c",
+      "moneydo": "3dd4a006-32f8-81ca-b99f-e2a8bf40aad6"
     }
   }
 }
