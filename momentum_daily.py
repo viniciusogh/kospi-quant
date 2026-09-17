@@ -334,7 +334,7 @@ def main():
     trend = kospi_trend(tok)
     if trend:
         log(f"KOSPI 추세: {trend['emoji']} {trend['text']}")
-    # 게이트 발동: MOM_GATE 이고 비강세(추세이탈)면 현금 모드 — 추천 비우고 enrichment 생략
+    # 게이트는 시장 참고 정보. 미충족이어도 후보 상세는 생성한다.
     # 중복 실행 방지: daily_quant 는 cron-job.org(주)와 GitHub schedule(백업) 이 매일 둘 다 발동해
     # 같은 리포트를 2번 만들고 있었다(모멘텀 Gemini·KIS 호출 2배). 대시보드에 이미 오늘자
     # 토글이 있으면 Gemini 수집 전에 빠진다 — 1차가 실패했을 때만 2차가 실제로 일하므로
@@ -356,15 +356,12 @@ def main():
 
     cash_mode = MOM_GATE and trend is not None and not trend.get("uptrend", True)
     flows, roes, incomes, ebitdas = {}, {}, {}, {}
-    if not cash_mode:
-        log("상위10 수급·ROE·EBITDA 수집")
-        for code in top10["code"]:
-            flows[code] = investor_flows(code, tok)
-            roes[code] = roe_latest(code, tok)
-            incomes[code] = fetch_income(code, tok)
-            ebitdas[code] = fetch_ebitda(code, tok)
-    else:
-        log("⚠️ 추세 이탈 + 게이트 ON → 현금 모드 (추천 생략)")
+    log("상위10 수급·ROE·EBITDA 수집 (게이트와 관계없이 후보 상세 표시)")
+    for code in top10["code"]:
+        flows[code] = investor_flows(code, tok)
+        roes[code] = roe_latest(code, tok)
+        incomes[code] = fetch_income(code, tok)
+        ebitdas[code] = fetch_ebitda(code, tok)
     import json
     cache = {}
     if os.path.exists(CACHE_JSON):
@@ -372,8 +369,8 @@ def main():
             cache = json.load(open(CACHE_JSON, encoding="utf-8"))
         except Exception:
             cache = {}
-    dranks = {} if cash_mode else load_debt_ranks()
-    analysis = {} if cash_mode else (gemini_analyze(top10, flows, roes, cache, ebitdas, dranks) if os.environ.get("GEMINI_API_KEY") else {})
+    dranks = load_debt_ranks()
+    analysis = (gemini_analyze(top10, flows, roes, cache, ebitdas, dranks) if os.environ.get("GEMINI_API_KEY") else {})
     if analysis:
         json.dump(prune_cache(cache), open(CACHE_JSON, "w", encoding="utf-8"),
                   ensure_ascii=False, indent=1)
@@ -908,30 +905,21 @@ def upload_notion(top, analysis=None, trend=None, flows=None, roes=None, deltas=
             "children": [{"object": "block", "type": "paragraph", "paragraph": {
                 "rich_text": [{"type": "text", "text": {"content": METHOD}, "annotations": {"color": "gray"}}]}}]}},
     ]
-    if cash:     # 게이트 발동: 추세 이탈 → 추천 비우고 현금 메시지
-        header.append({"object": "block", "type": "callout", "callout": {
-            # 실제로는 한쪽 선만 밑도는 경우가 흔한데 '200·120일선 아래' 라고 뭉뚱그려
-            # 리포트끼리 모순돼 보였다(2026-08-30: 200일선 위 · 120일선 아래였다).
-            "rich_text": [{"type": "text", "text": {"content":
-                "🛑 게이트 미충족 — 신규 진입 중단·전량 현금 권장. "
-                + ((trend or {}).get("reason") or "200·120일선 조건을 채우지 못해") +
-                " 게이트가 요구하는 강세 구간이 아닙니다. 이 전략은 백테스트상 상승추세에서만 수익이 났고 "
-                "비추세장에선 약했습니다. 지수가 200일선과 120일선을 **모두** 넘길 때까지 신규 매수를 멈추세요. "
-                "(오늘 추천 종목 없음)"},
-                "annotations": {"bold": True}}],
-            "icon": {"type": "emoji", "emoji": "🛑"}, "color": "red_background"}})
-    else:
-        if newly or dropped:
-            chg = []
-            if newly:
-                chg.append(f"🆕 신규 진입: {', '.join(newly)}")
-            if dropped:
-                chg.append(f"📉 이탈: {', '.join(dropped)}")
-            header.append({"object": "block", "type": "callout", "callout": {
-                "rich_text": [{"type": "text", "text": {"content": "어제 대비  " + "   ·   ".join(chg)}}],
-                "icon": {"type": "emoji", "emoji": "📌"}, "color": "blue_background"}})
-        header.append({"object": "block", "type": "heading_3",
-                       "heading_3": {"rich_text": [{"type": "text", "text": {"content": "🏆 상위 10 — 종목을 펼치면 상세 분석"}}]}})
+    if cash:
+        header.append({"object":"block", "type":"callout", "callout": {
+            "rich_text":[{"type":"text", "text":{"content":
+                "시장 게이트 미충족 · " + ((trend or {}).get("reason") or "추세 조건 미충족")
+                + ". 아래 10종목은 조건과 관계없이 표시하는 분석 후보입니다. 이 전략은 비추세장에 약했으며 후보 선정이 매수 적합성을 보장하지 않습니다."}}],
+            "icon":{"type":"emoji","emoji":"🟡"}, "color":"yellow_background"}})
+    if newly or dropped:
+        chg=[]
+        if newly: chg.append(f"🆕 신규 진입: {', '.join(newly)}")
+        if dropped: chg.append(f"📉 이탈: {', '.join(dropped)}")
+        header.append({"object":"block","type":"callout","callout":{
+            "rich_text":[{"type":"text","text":{"content":"어제 대비  " + "   ·   ".join(chg)}}],
+            "icon":{"type":"emoji","emoji":"📌"},"color":"blue_background"}})
+    header.append({"object":"block","type":"heading_3","heading_3":{
+        "rich_text":[{"type":"text","text":{"content":"🏆 후보 10 — 종목을 펼치면 상세 분석"}}]}})
 
     def _item(rank, r):
         """종목 1개의 (토글, 2차블록) — 페이지 모드·대시보드 모드 공통. 2차블록은 table 등 3단계 불가분."""
@@ -956,7 +944,7 @@ def upload_notion(top, analysis=None, trend=None, flows=None, roes=None, deltas=
     if MOM_TARGET == "dashboard":
         # 통합 대시보드에 토글 1개로 붙인다 (날짜별 페이지 생성 안 함)
         import dashboard
-        items = [] if cash else [_item(rank, r) for rank, (_, r) in
+        items = [_item(rank, r) for rank, (_, r) in
                                  enumerate(top.head(10).iterrows(), 1)]
         tid = dashboard.add_report(title, header, items)
         log(f"✅ 대시보드 리포트 추가{'(현금/추세이탈)' if cash else ''}: {dashboard.url()}"
@@ -982,9 +970,6 @@ def upload_notion(top, analysis=None, trend=None, flows=None, roes=None, deltas=
         log("❌ Notion 페이지 생성 최종 실패"); return
     page_id = r.json()["id"]
     page_url = r.json().get("url", "")
-    if cash:     # 현금 모드: 종목 토글 없이 종료
-        log(f"✅ Notion 업로드 완료(현금/추세이탈): {page_url}")
-        return
 
     def append(block_id, blocks):
         # Notion API 일시 지연(ReadTimeout)·5xx·429 재시도 — 1종목 실패가 리포트 전체 중단 막음
