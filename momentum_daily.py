@@ -4,6 +4,7 @@
 검증: walk-forward IR ~0.14, 승률 ~51%, 추세장 강·반전장 약 (자세히 [[momentum-30d-research]]).
 실행: python momentum_daily.py   (UNIV_TOP=300 로 테스트 축소 가능)
 """
+from report_titles import momentum_title
 import os, time, random, re, requests
 import pandas as pd, numpy as np
 from datetime import datetime, timedelta
@@ -341,13 +342,13 @@ def main():
     if MOM_TARGET == "dashboard" and os.environ.get("MOM_SKIP_IF_DONE", "1") == "1":
         try:
             import dashboard as _D
-            _title = f"🚀 {today_str} KOSPI 30일 모멘텀 추천{MOM_LABEL}"
+            _title = momentum_title(today_str, expanded=MOM_TAG == "_v20g")
             _, _, _div, _, _tail = _D._layout(_D.page_id())
             for _b in _tail:
                 if _b["type"] != "toggle":
                     continue
                 _t = "".join(x.get("plain_text", "") for x in _b["toggle"]["rich_text"])
-                if _t == _title:
+                if _D._base_title(_t) in (_title, f"🚀 {today_str} KOSPI 30일 모멘텀 추천{MOM_LABEL}"):
                     log(f"⏭️ 오늘자 리포트가 이미 대시보드에 있음 → 건너뜀 (강제: MOM_SKIP_IF_DONE=0)")
                     return
         except Exception as e:
@@ -884,7 +885,7 @@ def upload_notion(top, analysis=None, trend=None, flows=None, roes=None, deltas=
     cal_today = datetime.now(KST).strftime("%Y-%m-%d")
     asof = asof or cal_today
     parent = os.environ.get("NOTION_PARENT_PAGE_ID", "3324a00632f880fbb014d766d87a1079")
-    title = f"🚀 {asof} KOSPI 30일 모멘텀 추천{MOM_LABEL}"
+    title = momentum_title(asof, expanded=MOM_TAG == "_v20g")
 
     header = []
     if asof != cal_today:
