@@ -74,6 +74,8 @@ YT_MODEL = os.environ.get("YT_MODEL", "gpt-5.4-mini")
 MAX_VIDEOS_PER_RUN   = int(os.environ.get("YT_MAX_VIDEOS", "20"))
 LOCK_MAX_AGE_HOURS   = 0.5   # lock 파일 최대 유효 시간 (30분 — 정상 실행은 1~2분 내 완료)
 ANALYSIS_CACHE_DAYS  = 7     # 분석본 캐시 보존 기간 (daily_recommend 가 최근 7일 사용)
+# 다음 날부터 노션에는 하루 통합 레포트 하나만. 기존 local daily_archive가 종합한다.
+UNIFIED_REPORT_SINCE = "2026-09-21"
 
 # cron 환경의 PATH 가 minimal 이라 Homebrew 경로 안 잡힘 → 절대 경로 폴백
 YT_DLP_BIN = shutil.which("yt-dlp") or "/opt/homebrew/bin/yt-dlp"
@@ -1107,9 +1109,20 @@ def _process_channel(channel: dict, today: str):
             else:
                 log(f"    ⏭️ Gemini 실패({failed[vid]}/{MAX_FAIL_BEFORE_SKIP}회) → 다음 run 재시도: {r['video']['title'][:34]}")
             continue
-        all_blocks.extend(build_video_blocks(r["video"], r["analysis"], r["transcript_len"]))
+        if today < UNIFIED_REPORT_SINCE:
+            all_blocks.extend(build_video_blocks(r["video"], r["analysis"], r["transcript_len"]))
         processed_now.append(r["video"]["id"])
         _save_analysis_cache(today, channel, r["video"], r["analysis"])
+
+    if today >= UNIFIED_REPORT_SINCE:
+        # 노션 실패 때문에 자막/분석을 재취득하지 않는다. 채널별 노션 블록도 만들지 않는다.
+        processed.update(processed_now)
+        save_processed(processed)
+        save_failed(failed)
+        if not any(r['analysis'] for r in results):
+            raise RuntimeError('영상 분석 성공 0건 — 통합 레포트 입력 저장 실패')
+        log(f"✅ 영상 분석 {sum(bool(r['analysis']) for r in results)}편 저장 · 일일 통합 레포트 입력")
+        return
 
     if not all_blocks:
         if processed_now:            # Gemini 포기분 — 마킹해서 자막 재취득을 끊는다
