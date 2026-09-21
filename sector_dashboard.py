@@ -357,6 +357,9 @@ def main():
     except Exception as e:
         M.log(f"  ⚠️ 섹터 이력 저장 실패: {str(e)[:70]}")
 
+    M.log("섹터 수치 저장 완료 — 별도 보고서/차트 생성은 시장 동향으로 통합")
+    return
+
     header, rows = blocks(agg, tops, asof)
     tid = D.add_report(f"🔄 {asof} 섹터 장세 (순환매)", header)
     if not tid:

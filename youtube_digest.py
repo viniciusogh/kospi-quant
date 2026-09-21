@@ -111,13 +111,26 @@ def render(text):
     return blocks
 
 
-def generate(cache, day, *, llm, write, root=ROOT, light=False, model='gpt-5.4-mini'):
+def generate(cache, day, *, llm, write, root=ROOT, light=False, model='gpt-5.4-mini', sector=None):
     rows = material(cache, day, light=light)
     prompt = prompt_for(rows, day)
+    if sector is not None:
+        prompt += '''\n추가 사용자 지시: 오늘의 핵심요약·유튜브·섹터 장세를 시장 동향 글 하나로 통합한다.
+아래 실제 섹터 수치와 영상 의견을 비교해 함께 설명하되 일치하지 않으면 차이를 밝혀라.
+영상별/자료별 파트를 따로 붙이지 말고 3~5개 흐름에 녹여라. 당일과 최근 5일/20일 흐름은 구분한다.
+수급 부호와 주가 등락 부호를 혼동하지 말고 개별주 수익률을 업종 수익률처럼 쓰지 않는다.
+요약과 본문의 상승/하락 방향을 수치 근거의 당일방향과 대조하라. 순매수여도 주가는 하락할 수 있다.
+등가중 업종 평균으로 특정 종목에만 돈이 몰렸다고 단정하지 않는다. 영상 시점과 마감 수치의 차이도 구분한다.
+수치에 없는 업종/개별주 흐름은 영상의 의견으로만 귀속하고 실제 마감 검증 결과처럼 쓰지 않는다.
+배당 일정 등 영상의 주장은 공식 공시로 검증된 확정 사실처럼 바꾸지 않는다.
+소부장(소재·부품·장비), HBM(고대역폭 메모리) 등은 처음에 풀어 쓴다.
+방산과 AI처럼 별개 성장 요인을 하나의 원인으로 억지로 묶지 않는다. 보유 계좌·종목 분석은 만들지 않는다.
+수치 근거:\n''' + json.dumps(sector, ensure_ascii=False, separators=(',', ':'))
     if len(prompt) > 100000:
         raise ValueError('유튜브 통합 입력 10만자 초과 — 자동 분할/추가 호출 안 함')
     key = hashlib.sha256((VERSION + model + prompt).encode()).hexdigest()
-    path = Path(root) / '.recommendation_audits' / f'youtube-digest-{day}-{key[:16]}.json'
+    kind = 'market' if sector is not None else 'youtube'
+    path = Path(root) / '.recommendation_audits' / f'{kind}-digest-{day}-{key[:16]}.json'
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if path.exists():
         record = json.loads(path.read_text())
@@ -126,7 +139,7 @@ def generate(cache, day, *, llm, write, root=ROOT, light=False, model='gpt-5.4-m
         validate(record['report'])
         return record
     usage = {}
-    record = {'version': VERSION, 'sha256': key, 'data_date': day, 'model': model,
+    record = {'version': VERSION, 'sha256': key, 'data_date': day, 'model': model, 'kind': kind, 'sector': sector,
               'status': 'started', 'sources': rows, 'prompt': prompt,
               'created_at': datetime.now(timezone.utc).isoformat()}
     write(path, record)
@@ -147,7 +160,8 @@ def generate(cache, day, *, llm, write, root=ROOT, light=False, model='gpt-5.4-m
 def publish(record, dashboard):
     """Read back the exact body; retrying publication never calls a model."""
     blocks = render(record['report'])
-    title = f"📺 {record['data_date']} 유튜브 통합 레포트"
+    title = (f"📊 {record['data_date']} 시장 동향" if record.get('kind') == 'market'
+             else f"📺 {record['data_date']} 유튜브 통합 레포트")
     _, _, _, _, tail = dashboard._layout(dashboard.page_id())
     matching = [b for b in tail if b.get('type') == 'toggle' and
                 dashboard._base_title(_text(b)) == title]
@@ -166,3 +180,40 @@ def _text(block):
 
 def _body(blocks):
     return [(b['type'], _text(b)) for b in blocks]
+
+
+def run_daily(cache, day, *, llm, write, dashboard, root=ROOT, light=False, sector=None):
+    """Freeze the day's one report, independently of the stock recommendation.
+
+    Caller holds the existing archive lock. Publication can resume from generated
+    text, but failed/uncertain model calls are never silently retried.
+    """
+    kind = 'market' if sector is not None else 'youtube'
+    receipt = Path(root) / '.recommendation_audits' / f'{kind}-daily-{day}.json'
+    receipt.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    prior = json.loads(receipt.read_text()) if receipt.exists() else {}
+    if prior.get('status') == 'published':
+        validate(prior['record']['report'])
+        # Other producers may rebuild the dashboard. Restore this same frozen
+        # report if needed, without paying again or changing its contents.
+        publish(prior['record'], dashboard)
+        return prior['record']
+    if prior.get('status') in ('failed', 'started') and not prior.get('record'):
+        raise ValueError('유튜브 당일 생성 실패/불명 — 자동 재호출 중단')
+    material(cache, day, light=light)  # Missing input is waiting, not a paid attempt.
+    state = {'status': 'started', 'date': day, 'checked_at': datetime.now(timezone.utc).isoformat()}
+    if prior.get('record'):
+        state['record'] = prior['record']
+    write(receipt, state)
+    try:
+        record = state.get('record') or generate(cache, day, llm=llm, write=write, root=root, light=light, sector=sector)
+        state.update(record=record, status='generated')
+        write(receipt, state)
+        tid = publish(record, dashboard)
+        state.update(status='published', block_id=tid)
+        write(receipt, state)
+        return record
+    except Exception as exc:
+        state.update(status='failed', error_type=type(exc).__name__)
+        write(receipt, state)
+        raise

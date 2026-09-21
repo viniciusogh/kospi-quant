@@ -505,6 +505,11 @@ def push_to_notion(text: str) -> str | None:
 
 
 def main():
+    print('오늘의 핵심요약 별도 생성 폐지')
+    return
+
+
+def _retired_main():
     # 중복 실행 방지 (cron + manual 동시 실행 → 2번 push 되던 문제)
     if os.path.exists(LOCK_FILE):
         lock_age_h = (time.time() - os.path.getmtime(LOCK_FILE)) / 3600
@@ -525,6 +530,10 @@ def main():
 
 
 def _run():
+    return  # 2026-09-21 사용자 요청: 별도 핵심요약의 AI/차트 호출도 폐지.
+
+
+def _retired_run():
     log("▶ 일일 종합 추천 시작")
 
     # 1. 정량 데이터 (수급 모델만 — Quality 는 별도 페이지 (💎 KOSPI Quality 추천종목) 있음)
