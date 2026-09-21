@@ -115,6 +115,8 @@ def generate(cache, day, *, llm, write, root=ROOT, light=False, model='gpt-5.4-m
     rows = material(cache, day, light=light)
     prompt = prompt_for(rows, day)
     if sector is not None:
+        prose_sector = {**sector, 'rows': [{k:v for k,v in row.items() if not k.startswith('chart_')}
+                                          for row in sector['rows']]}
         prompt += '''\n추가 사용자 지시: 오늘의 핵심요약·유튜브·섹터 장세를 시장 동향 글 하나로 통합한다.
 아래 실제 섹터 수치와 영상 의견을 비교해 함께 설명하되 일치하지 않으면 차이를 밝혀라.
 영상별/자료별 파트를 따로 붙이지 말고 3~5개 흐름에 녹여라. 당일과 최근 5일/20일 흐름은 구분한다.
@@ -125,7 +127,7 @@ def generate(cache, day, *, llm, write, root=ROOT, light=False, model='gpt-5.4-m
 배당 일정 등 영상의 주장은 공식 공시로 검증된 확정 사실처럼 바꾸지 않는다.
 소부장(소재·부품·장비), HBM(고대역폭 메모리) 등은 처음에 풀어 쓴다.
 방산과 AI처럼 별개 성장 요인을 하나의 원인으로 억지로 묶지 않는다. 보유 계좌·종목 분석은 만들지 않는다.
-수치 근거:\n''' + json.dumps(sector, ensure_ascii=False, separators=(',', ':'))
+수치 근거:\n''' + json.dumps(prose_sector, ensure_ascii=False, separators=(',', ':'))
     if len(prompt) > 100000:
         raise ValueError('유튜브 통합 입력 10만자 초과 — 자동 분할/추가 호출 안 함')
     key = hashlib.sha256((VERSION + model + prompt).encode()).hexdigest()
@@ -157,7 +159,7 @@ def generate(cache, day, *, llm, write, root=ROOT, light=False, model='gpt-5.4-m
         raise
 
 
-def publish(record, dashboard):
+def publish(record, dashboard, *, root=ROOT):
     """Read back the exact body; retrying publication never calls a model."""
     blocks = render(record['report'])
     title = (f"📊 {record['data_date']} 시장 동향" if record.get('kind') == 'market'
@@ -165,11 +167,19 @@ def publish(record, dashboard):
     _, _, _, _, tail = dashboard._layout(dashboard.page_id())
     matching = [b for b in tail if b.get('type') == 'toggle' and
                 dashboard._base_title(_text(b)) == title]
-    if len(matching) == 1 and _body(dashboard.children(matching[0]['id'])) == _body(blocks):
-        return matching[0]['id']
-    tid = dashboard.add_report(title, blocks)
-    if not tid or _body(dashboard.children(tid)) != _body(blocks):
+    import market_visuals
+    visual = record.get('kind') == 'market' and record['data_date'] >= market_visuals.SINCE
+    def prose(kids):
+        return market_visuals.narrative(kids) if visual else kids
+    if len(matching) == 1 and _body(prose(dashboard.children(matching[0]['id']))) == _body(blocks):
+        tid = matching[0]['id']
+    else:
+        tid = dashboard.add_report(title, blocks)
+    if not tid or _body(prose(dashboard.children(tid))) != _body(blocks):
         raise ValueError('유튜브 통합 레포트 노션 게시 대조 실패')
+    if visual:
+        import archive_guard
+        market_visuals.ensure(record, tid, dashboard, root, archive_guard.write_private)
     return tid
 
 
@@ -196,7 +206,7 @@ def run_daily(cache, day, *, llm, write, dashboard, root=ROOT, light=False, sect
         validate(prior['record']['report'])
         # Other producers may rebuild the dashboard. Restore this same frozen
         # report if needed, without paying again or changing its contents.
-        publish(prior['record'], dashboard)
+        publish(prior['record'], dashboard, root=root)
         return prior['record']
     if prior.get('status') in ('failed', 'started') and not prior.get('record'):
         raise ValueError('유튜브 당일 생성 실패/불명 — 자동 재호출 중단')
@@ -209,7 +219,7 @@ def run_daily(cache, day, *, llm, write, dashboard, root=ROOT, light=False, sect
         record = state.get('record') or generate(cache, day, llm=llm, write=write, root=root, light=light, sector=sector)
         state.update(record=record, status='generated')
         write(receipt, state)
-        tid = publish(record, dashboard)
+        tid = publish(record, dashboard, root=root)
         state.update(status='published', block_id=tid)
         write(receipt, state)
         return record

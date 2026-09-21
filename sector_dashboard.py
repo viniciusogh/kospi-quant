@@ -9,7 +9,7 @@ ETF/ETN/우선주/스팩 제외. 가격은 KIS 일봉(정규장 종가) — 다�
 
 실행: python sector_dashboard.py
 """
-import os, re
+import os, re, json
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import pandas as pd
@@ -323,6 +323,9 @@ def main():
         snapshot = agg.copy()
         snapshot.insert(0, 'date', asof[:10])
         snapshot['주도주'] = [((tops.get(sec) or [('', 0)])[0][0]) for sec in snapshot['섹터']]
+        capital = m.groupby('섹터')['시가총액'].sum()
+        snapshot['시가총액'] = [float(capital[sec]) for sec in snapshot['섹터']]
+        snapshot['주도종목_json'] = [json.dumps(tops.get(sec, []), ensure_ascii=False) for sec in snapshot['섹터']]
         snapshot['source'] = 'KRX daily close'
         snapshot['coverage_complete'] = True
         snapshot.to_csv(os.path.join(_DIR, 'latest_sector_close.csv'), index=False, encoding='utf-8-sig')
@@ -357,7 +360,7 @@ def main():
     except Exception as e:
         M.log(f"  ⚠️ 섹터 이력 저장 실패: {str(e)[:70]}")
 
-    M.log("섹터 수치 저장 완료 — 별도 보고서/차트 생성은 시장 동향으로 통합")
+    M.log("섹터 수치 저장 완료 — 그림과 표는 시장 동향 통합 게시 단계에서 생성")
     return
 
     header, rows = blocks(agg, tops, asof)

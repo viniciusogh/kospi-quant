@@ -1,5 +1,6 @@
 """One market narrative from video analyses and measured sector data."""
 import csv
+import json
 import math
 from pathlib import Path
 
@@ -23,6 +24,8 @@ def sectors(root, day, *, light=False):
                     '당일수급방향': '순매수' if values['순매수'] > 0 else '순매도' if values['순매수'] < 0 else '중립',
                     '당일등락률_pct': values['오늘'] * 100,
                     '5일등락률_pct': values['d5'] * 100, '20일등락률_pct': values['d20'] * 100,
-                    '외국인기관순매수_억원': values['순매수'] / 100, '주도주': r.get('주도주', '')})
+                    '외국인기관순매수_억원': values['순매수'] / 100, '주도주': r.get('주도주', ''),
+                    'chart_capital': float(r['시가총액']) if r.get('시가총액') else None,
+                    'chart_leaders': json.loads(r['주도종목_json']) if r.get('주도종목_json') else None})
     return {'data_date': next(iter(dates)), 'source': 'KRX daily close',
             'method': '수집 유니버스의 섹터 내 등가중, 업종지수 자체는 아님', 'rows': out}

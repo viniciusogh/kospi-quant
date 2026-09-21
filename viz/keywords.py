@@ -59,7 +59,7 @@ def _load_text(path, days=2):
     return txt, n
 
 
-def count_keywords(txt, universe_csv, top=40):
+def count_keywords(txt, universe_csv, top=40, extra_words=()):
     """긴 단어 우선 + 구간 마스킹으로 중복 없이 센다. 반환 [(단어, 횟수, 카테고리)]."""
     voc = {}
     try:
@@ -80,6 +80,9 @@ def count_keywords(txt, universe_csv, top=40):
         voc[t] = "테마·섹터"
     for m in MACRO:
         voc.setdefault(m, "매크로")
+    for word in extra_words:
+        if isinstance(word, str) and 2 <= len(word) <= 14:
+            voc.setdefault(word, "테마·섹터")
 
     mask = bytearray(len(txt))
     cnt = collections.Counter()
