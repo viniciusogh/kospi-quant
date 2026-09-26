@@ -28,12 +28,13 @@ class ReadyBoundaryTests(unittest.TestCase):
         frame = pd.DataFrame([{'code': '000001', '종목명': '테스트', '섹터': '건설',
                                '시가총액': 10, '순매수': 3, '기준일': '2026-09-09'}])
         prices = np.arange(100., 170.)
+        dates = pd.bdate_range(end='2026-09-09', periods=len(prices)).strftime('%Y%m%d').tolist()
         fixed = unittest.mock.Mock(wraps=datetime)
         fixed.now.return_value = ready.aware('2026-09-09T16:00:00+09:00')
         with patch.object(sector, 'datetime', fixed), \
-                patch.object(sector.M, 'fetch_recent', return_value=(prices, [], 0, 0, '20260909')) as fetch:
+                patch.object(sector.M, 'fetch_recent', return_value=(prices, [], 0, 0, '20260909', dates)) as fetch:
             result = sector.metrics_closed(frame, 'test', '2026-09-09').iloc[0]
-        self.assertEqual(fetch.call_count, 1)
+        fetch.assert_called_once_with('000001', 'test', include_dates=True)
         self.assertEqual(result['d5'], prices[-1] / prices[-6] - 1)
         self.assertEqual(result['d20'], prices[-1] / prices[-21] - 1)
 

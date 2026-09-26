@@ -16,6 +16,7 @@ import pandas as pd
 
 import momentum_daily as M
 import dashboard as D
+import market_flow
 from momentum_backtest import token, KST, BASE, APP_KEY, APP_SECRET
 from datetime import datetime
 
@@ -171,16 +172,18 @@ def metrics_closed(df, tok, day=None):
         # 공급 CSV의 작성일이 아니라 실제 투자자 데이터 기준일 확인.
         if str(row.get('기준일', ''))[:10] != day:
             raise ValueError('섹터 구성종목의 당일 수급 미확보')
-        got = M.fetch_recent(row['code'], tok)
+        got = M.fetch_recent(row['code'], tok, include_dates=True)
         if got is None or str(got[4]) != day.replace('-', ''):
             raise ValueError('섹터 구성종목의 당일 일봉 미확보')
         prices = np.asarray(got[0], dtype=float)
         if len(prices) < 22 or not np.isfinite(prices).all() or (prices <= 0).any():
             raise ValueError('섹터 일봉 가격 누락')
+        detail = market_flow.stock(prices, got[5], row.get('flow_daily_json', ''))
+        detail['code'] = row['code']
         return {'code': row['code'], '종목명': row['종목명'], '섹터': row['섹터'],
                 '시가총액': row['시가총액'], '순매수': row['순매수'], 'price': prices[-1],
                 '오늘': prices[-1] / prices[-2] - 1, 'd5': prices[-1] / prices[-6] - 1,
-                'd20': prices[-1] / prices[-21] - 1, 'asof': got[4]}
+                'd20': prices[-1] / prices[-21] - 1, 'asof': got[4], 'flow_detail': detail}
     with ThreadPoolExecutor(max_workers=4) as pool:
         rows = list(pool.map(one, df.iterrows()))
     if len(rows) != len(df) or not rows:
@@ -328,6 +331,11 @@ def main():
         snapshot['주도종목_json'] = [json.dumps(tops.get(sec, []), ensure_ascii=False) for sec in snapshot['섹터']]
         snapshot['source'] = 'KRX daily close'
         snapshot['coverage_complete'] = True
+        observed_at = datetime.now(KST).isoformat(timespec='seconds')
+        flow_records = {sec: market_flow.sector(sec, list(sub['flow_detail']), observed_at)
+                        for sec, sub in m.groupby('섹터') if len(sub) >= MIN_STOCKS}
+        snapshot['market_flow_json'] = [json.dumps(flow_records[sec], ensure_ascii=False,
+                                                  allow_nan=False) for sec in snapshot['섹터']]
         snapshot.to_csv(os.path.join(_DIR, 'latest_sector_close.csv'), index=False, encoding='utf-8-sig')
     M.log(f"  섹터 {len(agg)}개 집계 (종목 {len(m)}개)")
     # 섹터 집계를 이력으로 append — 매 실행 덮어써서 과거가 안 남던 문제(2026-09-01).

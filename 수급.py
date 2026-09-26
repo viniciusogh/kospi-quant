@@ -148,6 +148,10 @@ def get_netflow_history(code: str, access_token: str) -> pd.DataFrame:
         if not rows:
             return pd.DataFrame()
 
+        # Keep the dated response before legacy feature cleanup/fillna/grouping.
+        from market_flow import encode_investors
+        flow_daily_json = encode_investors(rows)
+
         df = pd.DataFrame(rows)[["stck_bsop_date", "frgn_ntby_tr_pbmn", "orgn_ntby_tr_pbmn"]].copy()
         df.rename(columns={"stck_bsop_date": "date"}, inplace=True)
 
@@ -176,6 +180,7 @@ def get_netflow_history(code: str, access_token: str) -> pd.DataFrame:
                 .reset_index(drop=True)
             )
 
+        df.attrs['flow_daily_json'] = flow_daily_json
         return df
     except Exception:
         return pd.DataFrame()
@@ -235,6 +240,7 @@ def compute_strength_score(code: str, name: str, df_nf: pd.DataFrame):
 
     out = {
         "code": code,
+        "flow_daily_json": df_nf.attrs.get('flow_daily_json', ''),
         "name": name,
         "date": last["date"],
         "frgn_ntby_tr_pbmn": float(last.get("frgn_ntby_tr_pbmn", np.nan)),

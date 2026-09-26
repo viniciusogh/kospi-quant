@@ -36,7 +36,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Test official earnings boundary (no API calls)
-        run: python -m unittest -q test_report_earnings
+        run: python -m unittest -q test_market_flow test_report_earnings
 
       - name: Run daily momentum report
         env:

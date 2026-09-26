@@ -71,6 +71,9 @@ def validate_data(day, root=ROOT):
         import numpy as np
         if not np.isfinite(pd.to_numeric(sector[field], errors='coerce')).all():
             raise ValueError('마감 섹터 필수 수치 누락')
+    if 'market_flow_json' in sector:
+        import market_flow
+        market_flow.read(root, day)
     analysis = json.loads((Path(root) / 'momentum_analysis.json').read_text())
     if not isinstance(analysis, dict) or not analysis:
         raise ValueError('분석 JSON 없음/형식 오류')

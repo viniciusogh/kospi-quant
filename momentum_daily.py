@@ -44,7 +44,7 @@ WORKERS   = 4
 def log(m): print(f"[{datetime.now(KST):%H:%M:%S}] {m}")
 
 
-def fetch_recent(code, tok):
+def fetch_recent(code, tok, *, include_dates=False):
     """최근 ~100거래일 일봉 1콜. [close array, value array(거래대금)]."""
     today = datetime.now(KST)
     j = _get(f"{BASE}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
@@ -65,7 +65,10 @@ def fetch_recent(code, tok):
     c = np.array([x[1] for x in rows]); v = np.array([x[2] for x in rows])
     o1 = j.get("output1", {}) or {}  # PER/PBR (정보용, 선정엔 미사용)
     per = float(o1.get("per") or 0); pbr = float(o1.get("pbr") or 0)
-    return c, v, per, pbr, rows[-1][0]   # 마지막 거래일 (실제 기준일)
+    result = (c, v, per, pbr, rows[-1][0])
+    if include_dates:
+        result += ([x[0] for x in rows],)
+    return result   # 기존 기본 호출의 5개 반환값 유지
 
 
 def investor_flows(code, tok):

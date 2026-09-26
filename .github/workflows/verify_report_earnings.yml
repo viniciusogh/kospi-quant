@@ -19,7 +19,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Test earnings and report boundaries without external calls
-        run: python -m unittest -q test_report_earnings test_report_ready
+        run: python -m unittest -q test_market_flow test_report_earnings test_report_ready
       - name: Verify DART connection and official earnings (read only)
         env:
           DART_API_KEY: ${{ secrets.DART_API_KEY }}
