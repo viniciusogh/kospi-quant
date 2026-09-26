@@ -43,6 +43,8 @@
 
 GitHub Actions에서는 `DART_API_KEY` repository secret이 필요하다. 로컬 .env 설정은 이 secret을 대신하지 않는다. hosted runner의 원문 감사 파일은 별도 보존 설정 없이는 실행 종료 후 유지되지 않는다. 분석 산출물에는 실적 출처와 원문 해시가 남지만 원문 파일 장기보관을 의미하지 않는다.
 
-2026-09-26 로컬 구현 및 읽기 검증 완료. 후보 10개 정기보고서, 드림텍 Q1/Q4 계산, 삼성전자 정정 잠정 경로 확인. 최초 HTTP 403은 다른 GitHub 계정의 인증 때문이었다. 저장된 소유자 인증을 해당 작업 프로세스에만 적용해 관리 권한을 확인하고 DART_API_KEY repository secret을 등록했다. 기본 계정과 다른 프로젝트 인증은 변경하지 않았다. 배포 검증 진행 중이며 기존 Notion 보고서는 재게시하지 않았다.
+2026-09-26 로컬 구현 및 읽기 검증 완료. 후보 10개 정기보고서, 드림텍 Q1/Q4 계산, 삼성전자 정정 잠정 경로 확인. 최초 HTTP 403은 다른 GitHub 계정의 인증 때문이었다. 저장된 소유자 인증을 해당 작업 프로세스에만 적용해 관리 권한을 확인하고 DART_API_KEY repository secret을 등록했다. 기본 계정과 다른 프로젝트 인증은 변경하지 않았다. 실적 개선 코드 7a145f554d6ca993f8ee640c431b5e5ac3bd2fd1을 main에 배포했다. GitHub 검증 실행 36239879526은 2026-09-26 20:50 KST에 성공했다. 클라우드 회귀 24개와 실제 DART 수집/원문 대조를 확인했다. 로컬 관련 회귀는 100개 통과했다. 기존 Notion 보고서는 재게시하지 않았으며 다음 정상 생성부터 새 코드가 적용된다.
+
+검증 기록: https://github.com/viniciusogh/kospi-quant/actions/runs/36239879526
 
 검증: `python3 -m unittest -q test_report_earnings test_report_ready test_analysis_cache test_report_presentation test_report_pipeline test_daily_archive test_recommendation_policy`.
