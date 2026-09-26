@@ -180,6 +180,7 @@ def metrics_closed(df, tok, day=None):
             raise ValueError('섹터 일봉 가격 누락')
         detail = market_flow.stock(prices, got[5], row.get('flow_daily_json', ''))
         detail['code'] = row['code']
+        detail.update(market_flow.turnover_detail(row['종목명'], got[1], got[5]))
         return {'code': row['code'], '종목명': row['종목명'], '섹터': row['섹터'],
                 '시가총액': row['시가총액'], '순매수': row['순매수'], 'price': prices[-1],
                 '오늘': prices[-1] / prices[-2] - 1, 'd5': prices[-1] / prices[-6] - 1,

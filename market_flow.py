@@ -79,6 +79,42 @@ def sector(name, members, observed_at):
             'members': members, 'source': 'KIS FHKST03010100 / FHKST01010900'}
 
 
+def turnover_detail(name, values, price_dates):
+    """Turnover from the same dated price response, in KRW. Missing is not zero."""
+    ds = dates(price_dates)
+    amounts = None
+    try:
+        if len(values) != len(ds) or len(ds) < 5:
+            raise ValueError('거래대금 날짜/길이 불일치')
+        amounts = [number(v) for v in values[-5:]]
+        if min(amounts) < 0:
+            amounts = None
+    except (ValueError, TypeError):
+        amounts = None
+    return {'name': str(name), 'turnover_dates': ds[-5:], 'turnover_krw': amounts}
+
+
+def representatives(record):
+    members = record['members']
+    # A missing constituent could be the largest: don't rank a partial universe.
+    for m in members:
+        if (not m.get('name') or m.get('turnover_dates') != record['dates']
+                or m.get('turnover_krw') is None):
+            return []
+        if len(m['turnover_krw']) != 5 or any(number(v) < 0 for v in m['turnover_krw']):
+            raise ValueError('대표종목 거래대금 형식 오류')
+    active = [m for m in members if sum(m['turnover_krw']) > 0]
+    return sorted(active, key=lambda m: (-sum(m['turnover_krw']), m['code']))[:3]
+
+
+def representative_block(record):
+    rows = representatives(record)
+    if not rows:
+        return block('대표종목 · 최근 5일 거래대금 확인 중')
+    return block('대표종목 · 최근 5일 거래대금 순 / 같은 기간 수익률\n' +
+                 ' · '.join(f"{m['name']} {m['d5']:+.1%}" for m in rows))
+
+
 def validate(record, day):
     if record['version'] != VERSION or record['asof'] != day.replace('-', ''):
         raise ValueError('시장 흐름 기준일/버전 불일치')
@@ -91,6 +127,12 @@ def validate(record, day):
             raise ValueError('시장 흐름 거래일 부족')
         for key in ('d5', 'd20', 'previous5'):
             number(m[key])
+        if 'turnover_krw' in m:
+            if not m.get('name') or m.get('turnover_dates') != record['dates']:
+                raise ValueError('대표종목 이름/거래대금 날짜 불일치')
+            if m['turnover_krw'] is not None:
+                if len(m['turnover_krw']) != 5 or any(number(v) < 0 for v in m['turnover_krw']):
+                    raise ValueError('대표종목 거래대금 오류')
         if m['flow'] is not None:
             if len(m['flow']) != 5:
                 raise ValueError('시장 흐름 수급일 부족')
@@ -212,6 +254,7 @@ def blocks(data, upload):
     for r in records:
         result.extend([block(headline(r), 'heading_3'),
                        block(f"최근 5일 {r['d5']:+.1%}     20일 {r['d20']:+.1%}")])
+        result.append(representative_block(r))
         if r['flow'] is not None:
             fid = upload(chart_png(r), 'market-flow.png')
             if not fid:

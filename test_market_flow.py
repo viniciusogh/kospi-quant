@@ -25,6 +25,29 @@ def record(name='테스트', up=True):
 
 
 class FlowTests(unittest.TestCase):
+    def test_representatives_rank_turnover_not_returns_and_keep_negative_return(self):
+        members = []
+        for code, amount, up in [('000001', 100, True), ('000002', 500, False),
+                                 ('000003', 300, True), ('000004', 200, True)]:
+            m = member(code, up)
+            m.update(F.turnover_detail('종목' + code, [amount] * 21, DS))
+            members.append(m)
+        r = F.sector('테스트', members, 'now')
+        self.assertEqual([m['code'] for m in F.representatives(r)], ['000002', '000003', '000004'])
+        text = F.representative_block(r)['paragraph']['rich_text'][0]['text']['content']
+        self.assertIn('종목000002 -', text)
+        self.assertEqual(F.validate(r, DAY), r)
+
+    def test_representatives_require_complete_same_period_turnover(self):
+        r = record()
+        for m in r['members']:
+            m.update(F.turnover_detail('종목', [100] * 21, DS))
+        self.assertEqual(len(F.representatives(r)), 2)
+        r['members'][0].update(F.turnover_detail('종목', [float('nan')] * 21, DS))
+        self.assertEqual(F.representatives(r), [])
+        r['members'][0]['turnover_dates'][-1] = '20260924'
+        with self.assertRaises(ValueError): F.validate(r, DAY)
+
     def test_supply_preserves_raw_dates_through_feature_export(self):
         with patch.dict(os.environ, {'APP_KEY': 'test', 'APP_SECRET': 'test', 'NOTION_API_KEY': 'test'}):
             import 수급 as supply

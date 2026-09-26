@@ -57,7 +57,9 @@ def fetch_recent(code, tok, *, include_dates=False):
     time.sleep(random.uniform(0.2, 0.35))
     if not j or j.get("rt_cd") != "0":
         return None
-    rows = [(r["stck_bsop_date"], float(r["stck_clpr"]), float(r.get("acml_tr_pbmn", 0) or 0))
+    rows = [(r["stck_bsop_date"], float(r["stck_clpr"]),
+             float(r['acml_tr_pbmn']) if r.get('acml_tr_pbmn') not in (None, '')
+             else (float('nan') if include_dates else 0.0))
             for r in (j.get("output2", []) or []) if r.get("stck_clpr") and r["stck_clpr"] != "0"]
     if len(rows) < 65:
         return None
