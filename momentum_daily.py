@@ -5,6 +5,7 @@
 실행: python momentum_daily.py   (UNIV_TOP=300 로 테스트 축소 가능)
 """
 from report_titles import momentum_title
+import report_earnings as earnings_report
 import os, time, random, re, requests
 import pandas as pd, numpy as np
 from datetime import datetime, timedelta
@@ -355,12 +356,15 @@ def main():
             log(f"  중복 확인 실패(계속 진행): {str(e)[:70]}")
 
     cash_mode = MOM_GATE and trend is not None and not trend.get("uptrend", True)
-    flows, roes, incomes, ebitdas = {}, {}, {}, {}
+    flows, roes, incomes, ebitdas, official_earnings = {}, {}, {}, {}, {}
+    from dart_earnings import Client as EarningsClient
+    earnings_client = EarningsClient()
     log("상위10 수급·ROE·EBITDA 수집 (게이트와 관계없이 후보 상세 표시)")
     for code in top10["code"]:
         flows[code] = investor_flows(code, tok)
         roes[code] = roe_latest(code, tok)
-        incomes[code] = fetch_income(code, tok)
+        official_earnings[code] = earnings_client.collect(code, today_str)
+        incomes[code] = official_earnings[code].get("rows", [])
         ebitdas[code] = fetch_ebitda(code, tok)
     import json
     cache = {}
@@ -370,7 +374,8 @@ def main():
         except Exception:
             cache = {}
     dranks = load_debt_ranks()
-    analysis = (gemini_analyze(top10, flows, roes, cache, ebitdas, dranks) if os.environ.get("GEMINI_API_KEY") else {})
+    analysis = gemini_analyze(top10, flows, roes, cache, ebitdas, dranks,
+                              earnings=official_earnings, asof=today_str)
     if analysis:
         json.dump(prune_cache(cache), open(CACHE_JSON, "w", encoding="utf-8"),
                   ensure_ascii=False, indent=1)
@@ -442,8 +447,8 @@ def parse_items(v):
     return out
 
 
-def _gemini_full(c, r, fl, roe, ebitda=None, drank=None):
-    """종목 전체 심층 분석 (8섹션). 분기 숫자는 표로 별도 제공 → prose엔 나열 금지."""
+def _gemini_full(c, r, fl, roe, ebitda=None, drank=None, earnings=None):
+    """공식 실적을 본문과 표의 공통 입력으로 사용한다."""
     code = r["code"]
     hi = "60일 신고가" if r.get("hi60", 0) >= 0.999 else f"60일 고점대비 {(r['hi60']-1)*100:.0f}%"
     sup = (f"최근5일 수급 외인 {fl.get('frgn5',0):+.0f}억·기관 {fl.get('orgn5',0):+.0f}억·개인 {fl.get('prsn5',0):+.0f}억"
@@ -452,22 +457,10 @@ def _gemini_full(c, r, fl, roe, ebitda=None, drank=None):
     per_str = (f"PER {r['per']:.0f}(섹터 {int(r['per_rank'])}/{int(n)}위)"
                if (r.get('per', 0) > 0 and not pd.isna(r.get('per_rank')) and n) else "PER 적자/-")
     roe_str = f"·ROE {roe:.1f}%" if roe is not None else ""
-    qtrend = ""; lblt = None
-    try:
-        from value_increment import fetch_fin
-        fd = fetch_fin(code, None)
-        if fd is not None and len(fd):
-            lblt = fd.iloc[-1].get("lblt")
-            qtrend = "참고 분기추이: " + " · ".join(
-                f"{x['stac_yymm']} ROE{x['roe']:.1f}/EPS{x['eps']:.0f}/매출{x['grs']:.0f}%" for _, x in fd.tail(4).iterrows())
-    except Exception:
-        pass
     # 부채(부채비율, 동일섹터 내 순위) + 현금흐름(EBITDA·EV/EBITDA) — 밸류 파트 핵심 데이터
     if drank:   # latest_kospi_quality.csv 기반 섹터 내 상대위치 (절대수치 판정 X)
         debt_str = (f"부채비율 {drank['debt']:.0f}%(동일섹터 {drank['n']}개 중 부채 낮은순 "
                     f"{drank['rank']}위·{drank['band']})")
-    elif lblt is not None and not pd.isna(lblt):
-        debt_str = f"부채비율 {lblt:.0f}%(섹터순위 미산출)"
     else:
         debt_str = "부채비율 미제공"
     # 현금흐름(연간 EBITDA·EV/EBITDA). 금융·보험·증권은 EBITDA 비표준 지표라 생략.
@@ -483,10 +476,12 @@ def _gemini_full(c, r, fl, roe, ebitda=None, drank=None):
             cf_parts.append(f"EV/EBITDA {eb['ev_ebitda']:.1f}배")
         cf_str = ("현금흐름 " + "·".join(cf_parts)) if cf_parts else "현금흐름(EBITDA) 미제공"
     stat = (f"{r['종목명']}({code}, {r['섹터']}): 20일 {r['ret20']*100:+.0f}%·{hi}, "
-            f"{per_str}·PBR {r['pbr']:.1f}{roe_str}, {debt_str}, {cf_str}, {sup}. {qtrend}")
+            f"{per_str}·PBR {r['pbr']:.1f}{roe_str}, {debt_str}, {cf_str}, {sup}.")
+    earnings = earnings or earnings_report.snapshot(None, datetime.now(KST).date().isoformat())
     prompt = (
         "너는 한국 주식 애널리스트다. 최근 뉴스·공시·실적을 광범위하게 검색해 아래 종목의 '심층 분석 리포트'를 작성하라.\n"
         f"데이터: {stat}\n\n"
+        + earnings_report.prompt_context(earnings) + "\n"
         "규칙:\n"
         "- 밸류에이션 수치는 위 제공된 PER/PBR/ROE/섹터순위/부채비율/EBITDA만 사용(웹의 다른 수치 절대 인용 금지). 없으면 '미제공'.\n"
         "- 부채비율은 절대수치로 정상/위험을 단정하지 말 것. 반드시 제공된 '동일 섹터 내 부채 순위'로 해석하라 — 같은 업종 피어들 사이에서 부채가 높은 편인지 낮은 편인지가 핵심이다.\n"
@@ -499,8 +494,9 @@ def _gemini_full(c, r, fl, roe, ebitda=None, drank=None):
         "한줄: <투자판단 결론부터 2문장, 90자내. '무엇이 핵심 동력이고 무엇이 리스크인지'>\n"
         "태그: <🟢(강점)/🔴(약점)/🟡(주의) 중 하나 + 2~6자 라벨, 4개를 ·로 구분. "
         "예: 🟢 본업 회복 · 🟢 성장동력 · 🔴 높은 부채 · 🟡 밸류 부담>\n"
-        "실적결론: <최근 실적을 8자 이내 대비로. 예: 매출 ↓ / 수익성 ↑>\n"
-        "실적근거: <항목 3~4개. 각 '지표 :: 방향·수치' 16자내. 예: 주택 GPM :: 하반기 12~15% 전망>\n"
+        f"실적기준분기: {earnings['period']}\n"
+        "실적결론·실적근거는 프로그램이 공식 수치로 계산하므로 출력하지 않는다. "
+        "다른 항목의 현재 실적 해석도 위 공식 기준만 따른다.\n"
         "촉매: <주가를 끌어올릴 요인 4~5개. 각 '제목(10자내) :: 한 줄 설명(30자내)'. 제목은 명사구>\n"
         "강세론: <상승 시나리오 3개. 각 '핵심(14자내) :: 근거 한 줄(30자내)'>\n"
         "리스크: <하방 리스크 3개. 각 '핵심(14자내) :: 영향 한 줄(30자내)'>\n"
@@ -519,7 +515,7 @@ def _gemini_full(c, r, fl, roe, ebitda=None, drank=None):
         # Gemini 는 라벨을 **촉매**: / ### 촉매: / - 촉매: 등으로 감싸 내놓는다(실측)
         m = re.match(r"^\s*(?:[#>\-*•·]+\s*)?\*{0,2}\s*"
                      r"(이슈|한줄|태그|실적결론|실적근거|촉매|수급분석|밸류한줄|"
-                     r"강세론|리스크|관전|추정)\s*\*{0,2}\s*[:：]\s*(.*)", s)
+                     r"강세론|리스크|관전|추정|실적기준분기)\s*\*{0,2}\s*[:：]\s*(.*)", s)
         if m:
             cur = "issue" if m.group(1) == "이슈" else m.group(1); d[cur] = m.group(2).strip()
         elif cur and s:
@@ -527,13 +523,18 @@ def _gemini_full(c, r, fl, roe, ebitda=None, drank=None):
     d["issue"] = _trim_phrase(d["issue"]) if _is_clean(_trim_phrase(d["issue"])) else ""
     for k in SEC_KEYS[1:] + ["추정"]:
         d[k] = d[k].replace("**", "").strip().strip("'\"")     # 볼드 잔재가 그대로 렌더되던 문제
-    d["fmt"] = 2          # 구조화 포맷 스탬프 — 신선도 판정에 쓴다(빈 '한줄' 로 재분석 무한반복 방지)
+    if d.pop("실적기준분기", "").replace("**", "").strip() != earnings["period"]:
+        raise ValueError("AI 실적 기준 분기 불일치")
+    d.update(earnings_report.sections(earnings))
+    d["fmt"] = earnings_report.ANALYSIS_FORMAT
     return d
 
 
-def _gemini_update(c, name, code, prev_summary):
+def _gemini_update(c, name, code, prev_summary, earnings=None):
     """재등장 종목: 오늘 새 뉴스 + 다음분기 컨센서스만 가볍게 (토큰 절약). {업데이트, 추정} 반환."""
     prompt = (f"한국 주식 '{name}({code})'의 어제 분석 요약: {prev_summary}\n"
+              + (earnings_report.prompt_context(earnings) if earnings else "")
+              +
               "오늘 새로 나온 뉴스·공시·증권사 리포트를 검색해서 아래 2줄만 출력:\n"
               "업데이트: <어제와 겹치지 않는 새 변화 1~2문장. 서두 없이 사실 바로. 새 게 없으면 '오늘 특이 변화 없음'>\n"
               "추정: <다음 분기 매출·영업이익 컨센서스 방향을 ▲상향/▼하향/→유지 중 하나로 시작하고 근거 1문장. 못 찾으면 '컨센서스 미확인'>")
@@ -588,7 +589,7 @@ def load_debt_ranks():
 ANALYSIS_TTL_DAYS = int(os.environ.get("ANALYSIS_TTL_DAYS", "5"))
 
 
-_KEEP = set(SEC_KEYS) | {"추정", "업데이트", "date", "full", "fmt"}
+_KEEP = set(SEC_KEYS) | {"추정", "업데이트", "date", "full", "fmt"} | earnings_report.META_KEYS
 
 
 def prune_cache(cache, keep_days=60):
@@ -602,51 +603,60 @@ def prune_cache(cache, keep_days=60):
     return out
 
 
-def gemini_analyze(top10, flows, roes, cache, ebitdas=None, dranks=None):
+def gemini_analyze(top10, flows, roes, cache, ebitdas=None, dranks=None, *, earnings=None, asof=None):
     """캐시 인식: 재등장(TTL 내) 종목은 어제 8섹션 재사용 + 오늘 업데이트만 호출. 신규/묵은건 전체분석.
 
     신선도는 'date'(=마지막 실행일) 가 아니라 **'full'(=마지막 전체분석일)** 로 판정한다.
     date 는 매 실행마다 오늘로 갱신되므로 그걸로 재면 days<=7 이 영원히 참이 되어
     프로즈가 한 번 쓰이면 절대 재생성되지 않았다 — 수급분석이 13일째 그대로였던 원인(2026-08-25).
     """
-    from google import genai
     ebitdas = ebitdas or {}; dranks = dranks or {}
-    c = genai.Client(api_key=os.environ["GEMINI_API_KEY"], http_options={"timeout": GENAI_TIMEOUT_MS})
+    earnings = earnings or {}
+    c = None
+    if os.environ.get("GEMINI_API_KEY"):
+        from google import genai
+        c = genai.Client(api_key=os.environ["GEMINI_API_KEY"], http_options={"timeout": GENAI_TIMEOUT_MS})
     today = datetime.now(KST); out = {}
+    asof = asof or today.date().isoformat()
     for _, r in top10.iterrows():
         code = r["code"]; fl = flows.get(code) or {}; roe = roes.get(code)
         cached = cache.get(code)
+        try:
+            e = earnings_report.snapshot(earnings.get(code), asof)
+        except (ValueError, KeyError, TypeError):
+            e = earnings_report.snapshot(None, asof)
         fresh = False
         base = (cached or {}).get("full") or (cached or {}).get("date")   # full 없는 옛 캐시는 date 로 1회 판정
         if cached and base:
             try:
-                fresh = (today - datetime.strptime(base, "%Y-%m-%d").replace(tzinfo=KST)).days <= ANALYSIS_TTL_DAYS
+                fresh = 0 <= (today - datetime.strptime(base, "%Y-%m-%d").replace(tzinfo=KST)).days <= ANALYSIS_TTL_DAYS
             except Exception:
                 fresh = False
-        if not cached or cached.get("fmt") != 2:
-            fresh = False          # 줄글 시절 캐시(fmt 없음)만 재분석. 파싱이 일부 실패해
-                                   # '한줄' 이 비어도 fmt 는 찍히므로 매 실행 재분석되지 않는다.
+        fresh = fresh and earnings_report.matches(cached, e)
         try:
+            if c is None:
+                raise ValueError("Gemini 미설정")
             if fresh:
                 a = {k: cached.get(k, "") for k in SEC_KEYS}        # 어제 8섹션 재사용
                 a["full"] = base                                    # 전체분석 시점은 그대로 물려받는다
-                u = _gemini_update(c, r["종목명"], code, cached.get("한줄", ""))
+                u = _gemini_update(c, r["종목명"], code, cached.get("한줄", ""), e)
                 a["업데이트"], a["추정"] = u["업데이트"], u["추정"]
                 log(f"  {r['종목명']}: 캐시 재사용 + 업데이트")
             else:
-                a = _gemini_full(c, r, fl, roe, ebitdas.get(code), dranks.get(code)); a["업데이트"] = ""
+                a = _gemini_full(c, r, fl, roe, ebitdas.get(code), dranks.get(code), e); a["업데이트"] = ""
                 a["full"] = today.strftime("%Y-%m-%d")
                 log(f"  {r['종목명']}: 전체 분석")
-        except Exception as e:
-            log(f"  Gemini {code} 실패: {str(e)[:80]}")
-            # 옛 줄글 캐시를 새 렌더러에 넣으면 문단 하나가 불릿 1개로 뭉치고 섹션이 사라진다
-            a = dict(cached) if (cached and cached.get("fmt") == 2) else {k: "" for k in SEC_KEYS}
+            a["analysis_status"] = "ok"
+        except Exception as exc:
+            log(f"  Gemini {code} 실패: {type(exc).__name__}")
+            a = dict(cached) if fresh else {k: "" for k in SEC_KEYS}
             a.setdefault("업데이트", ""); a.setdefault("추정", "")
-            if cached and cached.get("fmt") != 2:
-                a["issue"] = cached.get("issue", "")
-                log(f"  ⚠️ {r['종목명']}: 분석 실패 + 캐시가 옛 포맷 → 지표만 표시")
+            a["analysis_status"] = "unavailable"
+        a.update(earnings_report.sections(e))
+        a.update(earnings_report.metadata(e))
+        a["earnings"] = e
+        a["fmt"] = earnings_report.ANALYSIS_FORMAT
         a["date"] = today.strftime("%Y-%m-%d")
-        a.setdefault("full", a["date"])
         out[code] = a; cache[code] = a
     return out
 
@@ -731,6 +741,10 @@ def _sections(a, r=None, roe=None, eb=None, drank=None):
         for it in parse_items(a.get("실적근거")):
             out.append(_bullet(_t(it[0] + ("  " if len(it) > 1 else ""), False, "gray")
                                + (_t(it[1]) if len(it) > 1 else [])))
+        if a.get("earnings"):
+            source_line = earnings_report.provenance(a["earnings"])
+            if source_line:
+                out.append(_para(_t(source_line, False, "gray")))
 
     if a.get("촉매"):
         out.append(_para(_t("⚡ 상승 촉매", True)))
@@ -867,7 +881,8 @@ def _quarter_table(income):
     rows = [{"type": "table_row", "table_row": {"cells": [cell(c) for c in ["분기", "매출(억)", "영업이익(억)"]]}}]
     for x in income:
         rows.append({"type": "table_row", "table_row": {"cells": [
-            cell(q(x["q"])), cell(f"{x['sale']:,.0f}"), cell(f"{x['op']:,.0f}")]}})
+            cell(q(x["q"])), cell(earnings_report.format_amount(x['sale'])),
+            cell(earnings_report.format_amount(x['op']))]}})
     return {"object": "block", "type": "table", "table": {
         "table_width": 3, "has_column_header": True, "has_row_header": False, "children": rows}}
 
@@ -928,10 +943,11 @@ def upload_notion(top, analysis=None, trend=None, flows=None, roes=None, deltas=
                             ebitdas.get(r["code"]), dranks.get(r["code"]))
         a = analysis.get(r["code"], {})
         extra = []
-        qt = _quarter_table(incomes.get(r["code"]))
+        # 본문과 동일한 공식 실적만 표시. 이전 한투 표로 확인 실패를 숨기지 않는다.
+        qt = _quarter_table((a.get("earnings") or {}).get("rows"))
         if qt:
             extra.append({"object": "block", "type": "paragraph", "paragraph": {
-                "rich_text": [{"type": "text", "text": {"content": "📊 분기 실적 추이 (단일분기)"},
+                "rich_text": [{"type": "text", "text": {"content": "📊 공시 실적 비교 (전년 동기·단일분기)"},
                                "annotations": {"bold": True}}]}})
             extra.append(qt)
         if a.get("추정"):

@@ -35,6 +35,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Test official earnings boundary (no API calls)
+        run: python -m unittest -q test_report_earnings
+
       - name: Run daily momentum report
         env:
           APP_KEY: ${{ secrets.APP_KEY }}
@@ -43,6 +46,7 @@ jobs:
           NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
           NOTION_DAILY_DB_ID: ${{ secrets.NOTION_DAILY_DB_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
           MOM_TARGET: "dashboard"   # 통합 대시보드 토글로 (날짜별 페이지 생성 안 함)
         run: python momentum_daily.py
 
@@ -54,6 +58,7 @@ jobs:
           NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
           NOTION_DAILY_DB_ID: ${{ secrets.NOTION_DAILY_DB_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
           MOM_CUT: "0.20"
           MOM_GATE: "1"
           MOM_LABEL: " (20%컷·추세게이트)"

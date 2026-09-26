@@ -1,0 +1,39 @@
+name: Verify report earnings
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Test earnings and report boundaries without external calls
+        run: python -m unittest -q test_report_earnings test_report_ready
+      - name: Verify DART connection and official earnings (read only)
+        env:
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+        run: |
+          python - <<'PY'
+          from datetime import datetime
+          from dart_earnings import Client, KST
+          from report_earnings import snapshot, sections, provenance
+          asof = datetime.now(KST).date().isoformat()
+          result = Client().collect('192650', asof)
+          if result['status'] != 'verified':
+              raise SystemExit('Official earnings check failed: ' + result['reason'])
+          data = snapshot(result, asof)
+          print(sections(data)['실적결론'])
+          print(provenance(data))
+          print('DART connection and official earnings verified. No report publication or orders.')
+          PY

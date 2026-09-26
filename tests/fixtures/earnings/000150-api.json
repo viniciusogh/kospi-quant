@@ -1,0 +1,44 @@
+{
+  "status": "000",
+  "message": "정상",
+  "list": [
+    {
+      "rcept_no": "20260814004047",
+      "reprt_code": "11012",
+      "bsns_year": "2026",
+      "corp_code": "00117212",
+      "sj_div": "IS",
+      "sj_nm": "손익계산서",
+      "account_id": "dart_OperatingIncomeLoss",
+      "account_nm": "영업이익",
+      "account_detail": "-",
+      "thstrm_nm": "제 90 기 반기",
+      "thstrm_amount": "488426000000",
+      "thstrm_add_amount": "830730000000",
+      "frmtrm_q_nm": "제 89 기 반기",
+      "frmtrm_q_amount": "354921000000",
+      "frmtrm_add_amount": "552857000000",
+      "ord": "6",
+      "currency": "KRW"
+    },
+    {
+      "rcept_no": "20260814004047",
+      "reprt_code": "11012",
+      "bsns_year": "2026",
+      "corp_code": "00117212",
+      "sj_div": "IS",
+      "sj_nm": "손익계산서",
+      "account_id": "ifrs-full_Revenue",
+      "account_nm": "매출액",
+      "account_detail": "-",
+      "thstrm_nm": "제 90 기 반기",
+      "thstrm_amount": "5586147000000",
+      "thstrm_add_amount": "10617501000000",
+      "frmtrm_q_nm": "제 89 기 반기",
+      "frmtrm_q_amount": "5331122000000",
+      "frmtrm_add_amount": "9617666000000",
+      "ord": "31",
+      "currency": "KRW"
+    }
+  ]
+}
