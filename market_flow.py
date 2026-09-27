@@ -110,7 +110,7 @@ def representatives(record):
 def representative_block(record):
     rows = representatives(record)
     if not rows:
-        return block('대표종목 · 최근 5일 거래대금 확인 중')
+        return block('대표종목 · 최근 5일 거래대금 자료 조회 실패')
     return block('대표종목 · 최근 5일 거래대금 순 / 같은 기간 수익률\n' +
                  ' · '.join(f"{m['name']} {m['d5']:+.1%}" for m in rows))
 

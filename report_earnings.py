@@ -99,7 +99,7 @@ def format_amount(value):
 
 def sections(e):
     if e["status"] != "current":
-        return {"실적결론": "최신 실적 확인 중", "실적근거": ""}
+        return {"실적결론": "최신 실적 자료 조회 실패", "실적근거": ""}
     latest = e["rows"][-1]
     q = latest["q"]
     label = f"{q[:4]}년 {int(q[4:]) // 3}분기"

@@ -153,7 +153,7 @@ class EarningsTests(unittest.TestCase):
         data = {"status": "unavailable", "rows": [{"q": "202503", "sale": 300, "op": 20}]}
         e = report.snapshot(data, ASOF)
         self.assertEqual(e["rows"], [])
-        self.assertEqual(report.sections(e), {"실적결론": "최신 실적 확인 중", "실적근거": ""})
+        self.assertEqual(report.sections(e), {"실적결론": "최신 실적 자료 조회 실패", "실적근거": ""})
 
     def test_snapshot_rejects_future_and_inconsistent_proof(self):
         for key, value in (("asof", "2026-09-27"), ("published_on", "2026-09-27"), ("cumulative", True), ("sources", [])):
@@ -197,7 +197,7 @@ class EarningsTests(unittest.TestCase):
         frame = pd.DataFrame([{"code": "192650", "종목명": "드림텍"}])
         with patch.dict(os.environ, {"GEMINI_API_KEY": ""}):
             a = momentum.gemini_analyze(frame, {}, {}, {}, asof=ASOF)["192650"]
-        self.assertEqual(a["실적결론"], "최신 실적 확인 중")
+        self.assertEqual(a["실적결론"], "최신 실적 자료 조회 실패")
         self.assertIsNotNone(momentum._supply_bars({"frgn5": -70, "orgn5": 226, "prsn5": -155}))
 
     def test_model_receives_current_actuals_and_wrong_basis_is_rejected(self):
