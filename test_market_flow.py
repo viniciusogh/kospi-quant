@@ -121,7 +121,7 @@ class FlowTests(unittest.TestCase):
         r = record(); r['flow'] = [-1] * 5
         self.assertIn('올랐지만', F.interpretation(r))
         r['flow'] = None
-        self.assertIn('보류', F.interpretation(r))
+        self.assertIn('자료 조회 실패', F.interpretation(r))
         r['flow'] = [0] * 5
         self.assertIn('균형', F.interpretation(r))
 

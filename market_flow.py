@@ -194,7 +194,7 @@ def interpretation(r):
         first = '최근 한 달 수익률은 보합이며 최근 5거래일은 ' + ('상승했습니다.' if up else '하락했습니다.')
     flow = r['flow']
     if flow is None:
-        return first + ' 외국인·기관 수급은 일부 자료가 빠져 합산을 보류했습니다.'
+        return first + ' 외국인·기관 수급 자료 조회 실패로 합계를 제시하지 않습니다.'
     total = sum(flow)
     if total == 0:
         second = '외국인·기관의 합산 순매수는 매수와 매도가 균형을 이뤘습니다.'
@@ -246,7 +246,7 @@ def block(text, kind='paragraph'):
 def blocks(data, upload):
     result = [block('시장 흐름', 'heading_2')]
     if data['status'] != 'verified':
-        return result + [block('날짜가 확인된 최근 5거래일 자료를 준비 중입니다.')]
+        return result + [block('최근 5거래일 시장 흐름 자료 조회 실패')]
     records = selected(data['sectors'])
     result.append(block(f"{data['day']} 마감 · KIS 시세·수급 · 시총 상위 300개와 지정 테마 · 수익률은 업종 내 종목 평균"))
     if not records:
