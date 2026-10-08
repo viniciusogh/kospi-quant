@@ -1,20 +1,20 @@
 {
  "version": 1,
- "data_date": "2026-10-07",
- "collection_started_at": "2026-10-07T06:31:44Z",
- "ready_at": "2026-10-07T16:40:00.250989+09:00",
- "run_id": "37581930336",
+ "data_date": "2026-10-08",
+ "collection_started_at": "2026-10-08T06:31:37Z",
+ "ready_at": "2026-10-08T16:14:13.268776+09:00",
+ "run_id": "37738039181",
  "sha256": {
-  "latest_kospi_supply.csv": "088e6743ef222b63336f30ef34008662e2b173906d2c2068f23873e14393216d",
-  "latest_수급_reco.csv": "68e56d82d0d52addf2cfdf91fbbf58080aa48e6a760838f8c0ec510612812e8c",
-  "latest_kospi_quality.csv": "540ba8dc6f1898f64d817aa7fee08773df27572244cacbd2b868277e0108cbf2",
-  "latest_quality_reco.csv": "48b5156275f06dd13d77855c5a66852d2ed5a09e16ce6d05192d8afb4c400da8",
-  "quality_score_history.csv": "71788e066fe986d7ee31adfdee6e0be7c2f66b39239e85a047675cb8ca232b23",
-  "latest_momentum_reco.csv": "d7d4d504559a2725850a8a7d26ed5e13590a867d30b1e40b2e8a1238fd3ff8e7",
-  "latest_momentum_reco_v20g.csv": "fb6d3138f44e3cb04bc3517590ea419c30f6534ae766bf8fc716d5f562403d15",
-  "momentum_history.csv": "9161eca2e8841b5decc79f6f232fa160510f0084d5f35c7b81c0a8a3a5247736",
-  "momentum_history_v20g.csv": "54959bc5a597e20568ed1aff1ebb2eba88fcbb99d18179bd1fbb8c45c1ec6c45",
-  "momentum_analysis.json": "48c27271144d0c491c2d0164957656f342adbe0552c3dddea4af3027d1312c8f",
-  "latest_sector_close.csv": "cafaab041b79dd313363d37f245e34f8044150cb7bfd268952c6226564e314d6"
+  "latest_kospi_supply.csv": "cb1181857ef3092a8a5d57f7030762e9885fbc3a4d3efdf300a7ca8fbbb95489",
+  "latest_수급_reco.csv": "b96d485c0e5436a7ca4a86db7fa830a9489c42b6df4d922fbc3f731fa1359f95",
+  "latest_kospi_quality.csv": "b1922e7ef15d58fe6fb9c79e1d4e4e80dfeaff802fb8fc3456a9e88d8e0f8209",
+  "latest_quality_reco.csv": "32aeda2d5bfd166391ef558b5d44527b897cb199d92c2b3c78dd863e8d893d80",
+  "quality_score_history.csv": "876acdbf11a657b70989d0bf01d6cc48db8a129c27dcd85e748eb712c02ca47f",
+  "latest_momentum_reco.csv": "866ac28812c3ccc508a9d37be7137c9b6e4af5d8467b6c0566655bd561889817",
+  "latest_momentum_reco_v20g.csv": "0339d7defa658a44d4e487f1124d037b4861971776889dc9a9622b1dc536c162",
+  "momentum_history.csv": "c72d675f0a44d29735e082207ab490800ddf292dff2fbee4986e109ba841af4e",
+  "momentum_history_v20g.csv": "d0a111803d5c58804973d6da801ade6766075bc044038629a89f6e661ae40c0f",
+  "momentum_analysis.json": "6200c998b365fcc4cbccd84b97be476f11194db4adc0ae79ea2cd80ccef5f621",
+  "latest_sector_close.csv": "2dd12f7af349f593a7e603f2cb95cf68c6f07511aaea6bd013aec47153646a82"
  }
 }
